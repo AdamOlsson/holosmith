@@ -5453,9 +5453,13 @@ AGAIN
   [ ! -e "$root/dry-union" ] || fail "$name/uniondry/root" "the dry run created $root/dry-union"
   assertions=$((assertions + 1))
 
-  # `both` runs sessions, so its unit keeps the daemon even though the run that wrote it installed the hub's half.
-  grep -qx 'Requires=docker.service' "$(unit_for "$server_config")" ||
-    fail "$name/union/unit" "a both machine's unit dropped the daemon it needs: $(cat "$(unit_for "$server_config")")"
+  # A user unit cannot order itself after a system unit (ADR-0088 D2, as amended): this manager does not own the
+  # names `docker.service` or `network-online.target`, `After=`/`Wants=` against them are inert, and `Requires=` is
+  # a job systemd refuses before `ExecStartPre` runs. So the `both` unit names neither, and the daemon is the
+  # preflight's question — the fact a previous rendering got wrong for every role but `hub`.
+  if grep -qE '^(Requires|After|Wants)=.*(docker\.service|network-online\.target)' "$(unit_for "$server_config")"; then
+    fail "$name/union/unit" "a both machine's unit names a system unit this manager cannot resolve: $(cat "$(unit_for "$server_config")")"
+  fi
   assertions=$((assertions + 1))
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true

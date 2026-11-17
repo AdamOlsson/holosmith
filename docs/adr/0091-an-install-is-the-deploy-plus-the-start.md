@@ -103,6 +103,11 @@ with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` comma
   serving process predates them, and names `systemctl --user restart` as the command that starts them. It is the one
   arrangement in which "started it" would be false, and this ADR takes the words over a restart: an install is not a
   promotion (ADR-0082), and interrupting a serving daemon is not a first setup's business.
+- **The unit line does not trust `enable --now`'s exit status, because systemd does not.** `enable --now` exits 0 even
+  when the start it bundled failed (measured: a `Requires=` naming a system unit, with `Failed to start
+  holosmith.service` on stderr), and a line that stopped at the status printed `unit ✓` for a unit that never ran. The
+  word is the manager's answer to a second `is-active`, taken **after** the two commands: anything but `active` is
+  `failed`, and the sentence carries that answer and `journalctl --user -u holosmith.service`.
 - **The guide is the operator's account throughout.** The sweep this ADR deferred has landed: `README.md`'s
   getting-started section now names `~/.local/share/holosmith`, runs `key set` and `git clone` as the operator, reads
   `journalctl --user` and restarts with `systemctl --user`, and the day-two verb is `holosmith install`.

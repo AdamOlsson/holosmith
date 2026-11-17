@@ -1881,27 +1881,21 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
 /// `ReadWritePaths=` gave — a compromised `serve` unable to write `/etc` — is gone, and that is a loss this rendering
 /// states by omission rather than by pretending the directive still works.
 ///
-/// `role` is the role the **machine** will hold (`deploy::union`'s answer), not the half this run installs, and it
-/// decides two things: `Description=`, and whether the unit requires the daemon. A `hub`-only machine has no
-/// Docker, so a unit that requires `docker.service` there is a unit systemd never starts — and a `both` machine
-/// runs sessions, so its unit keeps the requirement even when the run that wrote it was a `hub deploy`.
+/// `role` is the role the **machine** will hold (`deploy::union`'s answer), not the half this run installs, and
+/// `Description=` is the only place it is read.
+///
+/// **The unit names no system unit at all**, because a user manager does not own those names. `After=` and `Wants=`
+/// against one are inert — the unit starts and the clause buys nothing — and `Requires=` is not: systemd refuses the
+/// whole job before `ExecStartPre` runs, so a `server`/`both` unit carrying `Requires=docker.service` never started
+/// and left no journal entry to say why (measured on a `both` machine; ADR-0088 D2 carries the correction). Docker
+/// readiness is a runtime fact instead: `ExecStartPre` runs `doctor --quick`, whose `docker` finding refuses with
+/// the sentence that names the fix, and `Restart=on-failure` retries. `StartLimitIntervalSec=0` is what makes that
+/// retry indefinite rather than a burst the default five-per-ten-seconds limiter could end.
 pub fn unit_text(exe: &Path, role: Role, root: &Root) -> String {
-    let daemon = if role == Role::Hub {
-        ""
-    } else {
-        " docker.service"
-    };
-    let requires = if role == Role::Hub {
-        ""
-    } else {
-        "Requires=docker.service\n"
-    };
     format!(
         "[Unit]\n\
          Description=Holosmith {role}\n\
-         After=network-online.target{daemon}\n\
-         Wants=network-online.target\n\
-         {requires}\
+         StartLimitIntervalSec=0\n\
          \n\
          [Service]\n\
          Type=simple\n\

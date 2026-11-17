@@ -119,11 +119,16 @@ operator's, so `upgrade` and `rollback` keep ADR-0083 D7's restart-and-poll with
 `Tools::sudo`, and no sentence in the failure path telling an operator to edit `/etc/sudoers.d`.
 
 One guarantee does not survive the move and is recorded rather than papered over: **a user unit cannot order itself
-after a system unit.** The rendered unit's `Requires=docker.service`/`After=docker.service` mean nothing to the user
-manager, which does not own that name, so "the daemon starts after Docker" becomes "the daemon starts, finds no daemon,
-is refused by the preflight, and `Restart=on-failure` tries again". That is a retry loop where the system unit had an
-ordering, and this ADR has not measured a boot where the two managers race — it is the one thing about the move that a
-later release should look at on a machine that boots with both.
+after a system unit.** The first rendering kept `Requires=docker.service`/`After=docker.service` on the theory that
+they "mean nothing" to this manager, and a `both` machine measured the theory: `After=` is inert, `Requires=` is not.
+The manager does not own that name, so the job is refused before `ExecStartPre` runs (`Failed to start
+holosmith.service: Unit docker.service not found.`), the unit never starts, and `journalctl --user -u holosmith` has no
+entry to say why — there was no retry loop to observe, only a dead unit. The rendering therefore names no system unit
+at all (neither `docker.service` nor `network-online.target`, which this manager does not ship either): "the daemon
+starts after Docker" becomes "the daemon starts, finds no daemon, is refused by the preflight, and `Restart=on-failure`
+tries again", with `StartLimitIntervalSec=0` so that retry is the promise rather than a burst the default
+five-per-ten-seconds limiter could end. A boot where the two managers race is still unmeasured, but there is no longer
+an ordering to get wrong — the only thing left to measure is the retry.
 
 ## D3 — the unit keeps only the directives that need no namespace, and the loss is a loss
 
