@@ -13313,12 +13313,24 @@ case_install_terse() {
   deploy_machine_shims "$shims" "$logs/tailscale.log" "$logs/tailscale.state"
   cat >"$shims/systemctl" <<'SHIM'
 #!/bin/sh
-# The user manager, as a recorder: the two reads answer "not loaded yet" and the two applies do nothing but say yes,
-# which is the state a machine that has never run an install is in.
+# The user manager, as a recorder: the two reads answer "not loaded yet" until this machine's first `install` has
+# applied them, which is the state a machine that has never run one is in — and `enable --now` writes the state a
+# later read answers back, because the run asks the manager once more after it (`install.rs`'s `unit`: the command's
+# exit status is not the fact).
 printf 'systemctl %s\n' "$*" >>"$HS_SYSTEMCTL_LOG"
 case "$*" in
-  "--user is-enabled holosmith.service" | "--user is-active holosmith.service") exit 1 ;;
-  "--user daemon-reload" | "--user enable --now holosmith.service") exit 0 ;;
+  "--user is-enabled holosmith.service")
+    if [ -f "$HS_UNIT_STATE" ]; then printf 'enabled\n'; exit 0; fi
+    printf 'disabled\n'
+    exit 1
+    ;;
+  "--user is-active holosmith.service")
+    if [ -f "$HS_UNIT_STATE" ]; then printf 'active\n'; exit 0; fi
+    printf 'inactive\n'
+    exit 1
+    ;;
+  "--user daemon-reload") exit 0 ;;
+  "--user enable --now holosmith.service") : >"$HS_UNIT_STATE"; exit 0 ;;
   *) exit 1 ;;
 esac
 SHIM
@@ -13341,6 +13353,7 @@ SHIM
       --setenv HS_SHIM_LOG "$logs/tailscale.log" \
       --setenv HS_SHIM_STATE "$logs/tailscale.state" \
       --setenv HS_SYSTEMCTL_LOG "$logs/systemctl.log" \
+      --setenv HS_UNIT_STATE "$logs/unit.state" \
       --setenv HS_LOGINCTL_LOG "$logs/loginctl.log" \
       "$artifact" "$@"
   }
@@ -13406,7 +13419,7 @@ REPORT
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
-  unset HS_SHIM_LOG HS_SHIM_STATE HS_SYSTEMCTL_LOG HS_LOGINCTL_LOG
+  unset HS_SHIM_LOG HS_SHIM_STATE HS_SYSTEMCTL_LOG HS_UNIT_STATE HS_LOGINCTL_LOG
   unset -f terse_home
   rm -rf "$root"
 }
