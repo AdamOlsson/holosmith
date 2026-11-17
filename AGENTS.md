@@ -37,7 +37,8 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `crates/holosmith/fixtures/` | The recorded turn the smoke image replays |
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
-| `docs/quickstart.md` | One machine, phone as the browser: config, deploy, first session |
+| `README.md` | The human overview, including the getting-started path: install, key, project, phone, tailnet |
+| `docs/*.md` | Operator guides: requirements, egress, remote access, hub, troubleshooting, architecture |
 | `docs/config.md` | Every config key: type, default, rule, and what reads it |
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |

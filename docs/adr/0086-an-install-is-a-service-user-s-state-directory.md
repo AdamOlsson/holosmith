@@ -149,7 +149,7 @@ it did not make.
 Step 6 configured two `tailscale serve` origins. Tailscale is a layer above this machine, not part of it: the deploy's
 list becomes six steps, and `DeployStep::Origins`, `CONTROL_HTTPS`, `PREVIEW_HTTPS`, `served()` and its
 `ipn.ServeConfig` parse are deleted with their gate cases. The documentation's origin wiring moves to
-`docs/quickstart.md` as the operator's own step, where it already reads like one.
+`docs/remote-access.md` as the operator's own step, where it already reads like one.
 
 ## Refused
 

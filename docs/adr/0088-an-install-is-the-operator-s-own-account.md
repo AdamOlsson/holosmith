@@ -205,7 +205,7 @@ the file is still there (disable reads its `[Install]` section), the file, `syst
 `loginctl disable-linger` — with no `sudo` on any line. It commands that manager only for the unit the manager
 actually loads, because `systemctl --user` resolves a **name** in its own search path while a `--root`/`--config`
 tree is a file no manager reads; such a tree's unit is removed and nothing else is asked of the manager. The
-operator-facing commands moved too: `README.md` and `docs/quickstart.md` now ask this unit's own manager
+operator-facing commands moved too: `README.md` and its getting-started section now ask this unit's own manager
 (`systemctl --user status`, `journalctl --user -u`, `systemctl --user restart`), which is what makes them work at
 all, since the system spelling answers `Unit holosmith.service could not be found`.
 
@@ -254,12 +254,13 @@ them would break the sequence instead of fixing it.
 ## Consequences
 
 - The `holosmith` account is not part of the install this ADR describes, and only ADR-0086 carries the pointer. The
-  documents that described the install it replaced — `docs/quickstart.md`, `docs/config.md`'s `<root>/config.toml`
+  documents that described the install it replaced — the getting-started guide, `docs/config.md`'s `<root>/config.toml`
   and `/var/lib/holosmith` default — were swept afterwards: the guide now speaks the operator's account from §1 to
   the day-two verbs, the config page's `sudo holosmith` sentence is gone, and the glossary's **Service user** entry is
-  retired. `README.md`'s by-hand recipe still describes the deleted account, because the human overview was not part
-  of that sweep. The superseded ADRs (0056, 0058, 0082, 0086, 0087) stay as they were: they are the history this one
-  reverses, and rewriting them would lose the record.
+  retired. `README.md`'s by-hand recipe still described the deleted account, because the human overview was not part
+  of that sweep; it was swept afterwards, when the getting-started guide moved into the README. The superseded ADRs
+  (0056, 0058, 0082, 0086, 0087) stay as they were: they are the history this one reverses, and rewriting them would
+  lose the record.
 - **ADR-0006's rejection of XDG is reversed, on its own premise.** It ruled the XDG paths out because the file was read
   by "a systemd unit running as the `holosmith` service user, which has no `$HOME` worth depending on", and with one uid
   the file is read by the account whose home it is, so "XDG is for per-user applications" now describes this install

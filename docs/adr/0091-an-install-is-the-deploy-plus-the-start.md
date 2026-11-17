@@ -103,7 +103,6 @@ with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` comma
   serving process predates them, and names `systemctl --user restart` as the command that starts them. It is the one
   arrangement in which "started it" would be false, and this ADR takes the words over a restart: an install is not a
   promotion (ADR-0082), and interrupting a serving daemon is not a first setup's business.
-- **The guide is the operator's account throughout.** The sweep this ADR deferred has landed: `docs/quickstart.md`
-  §5–§8 now name `~/.local/share/holosmith`, run `key set` and `git clone` as the operator, read `journalctl --user`
-  and restart with `systemctl --user`, and the day-two verb is `holosmith install`. `README.md`'s by-hand recipe is
-  deliberately not part of that sweep.
+- **The guide is the operator's account throughout.** The sweep this ADR deferred has landed: `README.md`'s
+  getting-started section now names `~/.local/share/holosmith`, runs `key set` and `git clone` as the operator, reads
+  `journalctl --user` and restarts with `systemctl --user`, and the day-two verb is `holosmith install`.

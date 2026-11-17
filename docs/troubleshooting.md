@@ -1,0 +1,46 @@
+# Troubleshooting
+
+Read this when something refuses, or when the unit will not stay up. [Back to README](../README.md).
+
+## Is it serving?
+
+```bash
+systemctl --user status holosmith.service --no-pager
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+`active (running)` and a JSON body is the machine working. `activating (auto-restart)` means the preflight refused:
+`holosmith doctor --quick` and `journalctl --user -u holosmith -n 30` say why, and so does a failed deploy step.
+
+## When something refuses
+
+| What you see | What it means |
+| --- | --- |
+| `403 bad_host` | the `Host` sent is not in `allowed_hosts`: add the exact name. `localhost` and `127.0.0.1` always load, `[::1]` does not |
+| `403 bad_origin` | a write whose `Origin` is not `control_origin`, character for character, port included — a scheme or port change needs a restart |
+| `403 bad_client` | the request carried neither `X-Holosmith-Client: 1` nor a JSON content type: a stale tab, a script or `curl`, not the app |
+| `403 bad_owner` | `owner` is set and no matching login header arrived: unset it, or point the proxy at the right login |
+| `409 cap_reached` | `max_live_sessions` reached with nothing idle to evict: stop or delete a session |
+| `507 disk_floor` | free space below `min_free_gb` on the data root: free space or lower the key, then restart |
+| `422 git_not_directory` | the project has no `.git` directory, has submodules, or sets `extensions.worktreeConfig` |
+| unit restart-loops on `perms` | something under the data root is not owned by its owner — a `sudo` wrote it. Fix it with the command below |
+| session `error` at the container step | `docker ps`, `holosmith logs --session <id>` and `docker image ls` name it |
+
+## The `perms` restart loop
+
+Something under the data root is not owned by the data root's owner — a file from an older install, or one a `sudo`
+wrote before this build refused it. The next boot's `ExecStartPre` refuses, so the unit restarts forever:
+
+```bash
+sudo chown "$(id -u):$(id -g)" ~/.local/share/holosmith/data/secrets/keys.toml
+```
+
+## A session that never leaves `error`
+
+```bash
+docker ps
+holosmith logs --session <id>
+docker image ls
+```
+
+The images are `agent-image` and `holosmith-proxy`.

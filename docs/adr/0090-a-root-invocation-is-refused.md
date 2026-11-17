@@ -76,15 +76,15 @@ this runs as you, drop the sudo: holosmith status
   the one uid the decision is about; `tests/root_refusal.rs` still covers the decision at its own layer, for every
   verb clap knows. What neither measures is a host run as root, and the namespace whose procfs shows the overflow uid
   (above) is still not a refusal.
-- **The command modules stopped telling an operator to type `sudo holosmith …`; the README has not.** The
+- **The command modules stopped telling an operator to type `sudo holosmith …`, and the docs followed.** The
   promotion's restart moved to the operator's own manager, so `crates/holosmith/src/commands/upgrade.rs` and
   `rollback.rs` now describe a promotion that checks no account and escalates nothing, and the
   `deploy::privilege_problem` this decision replaced is gone from the tree. `crates/holosmith/src/identity.rs` and
   `main.rs` still spell `sudo holosmith …`, in explanation rather than instruction — what the shell would have run,
   and why uid 0 is refused before it reaches a default path — which is the right place for it, and the refusal's own
-  sentence is built from the typed words. What remains wrong is `README.md:81,92,98,134`: its day-two verbs and its
-  tailnet steps. The human overview still describes the install ADR-0088 deleted, and sweeping it is its own work
-  rather than this decision's.
+  sentence is built from the typed words. `README.md`'s day-two verbs, its tailnet steps and the install prose that
+  ADR-0088 replaced have since been swept: the only `sudo` left in the operator-facing path is the `usermod` that puts
+  an account in the daemon's group, which is root's work by definition.
 
 ## Consequences
 
