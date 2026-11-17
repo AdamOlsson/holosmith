@@ -319,6 +319,11 @@ pub fn host_problem(text: &str) -> Option<String> {
 ///
 /// `~` is deliberately **not** in the safe set: unquoted, the target's shell would expand it, and this function
 /// promises the word the operator wrote.
+///
+/// The other caller is the **resume command** a failed run prints (`commands::install::resume_command`,
+/// `commands::deploy::resume_command`): that value is a command line an operator pastes into their own shell, so a
+/// `--config`/`--root` with a space in it has to arrive as one argument there too, and a plain path has to keep the
+/// exact bytes it always had.
 pub fn quote(text: &str) -> String {
     let safe = !text.is_empty()
         && text.chars().all(|character| {

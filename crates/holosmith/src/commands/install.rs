@@ -39,6 +39,7 @@ use crate::config::{Config, LoadError, Role};
 use crate::deploy::{self, DeployStep, Kind, Root, UNIT_NAME, Word};
 use crate::docker::Docker;
 use crate::progress::{Announce, Progress, Silent};
+use crate::remote;
 
 /// What the command line asked for: the config every command reads, the install tree, whether to apply anything, and
 /// which of the two renderings to print.
@@ -513,10 +514,15 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
     }
     Line {
         what: What::Unit,
-        word: Word::Changed,
         // `enable --now` starts a unit that is not running and leaves one that is alone, so "started it" is only true
         // when the manager answered `inactive` a moment ago. A re-run that rewrote the unit's bytes with the previous
-        // process still serving is `already_running`, and what it needs is the restart.
+        // process still serving is `already_running`, and what it needs is the restart — which is why that arm is
+        // `needs` and not `changed`: `needs` is "the remaining action is the operator's", a `changed` line of
+        // install's own stops at the mark in the terse report, and a command may not stop at it.
+        word: match already_running {
+            true => Word::Needs,
+            false => Word::Changed,
+        },
         sentence: match already_running {
             true => format!(
                 "{plan} ran: the manager has loaded the unit this run wrote, and {UNIT_NAME} was already running — the \
@@ -774,21 +780,31 @@ fn ran(program: &Path, arguments: &[&str], because: &str) -> Result<(), String> 
     ))
 }
 
-/// The resume command as a reader pastes it: this run's own flags, made absolute, and `--dry-run` when this run was
-/// one.
+/// The resume command as a reader pastes it: this run's own flags, made absolute, quoted for a shell, and `--dry-run`
+/// when this run was one.
 ///
 /// The install is the recovery for its own failure — every step of it reads before it applies, the deploy's included
 /// — so the command names this verb rather than the two deploys it runs: `server deploy` would install the same tree
 /// and leave the unit printed rather than started, which is the command that just failed. It is a value and not a
 /// line because it travels twice: as a failed step's `fix:` ([`Report::fill_fix`]) and as the verbose shape's last
 /// line.
+///
+/// **Each path is quoted** ([`crate::remote::quote`]), because this value is a command line an operator runs: a plain
+/// path comes back byte for byte, and one with a space in it survives the paste as the one argument it was. The
+/// flags the operator did not give are not invented, so a bare resume stays bare.
 fn resume_command(args: &InstallArgs) -> String {
     let mut command = String::from("holosmith install");
     if let Some(config) = &args.config {
-        command.push_str(&format!(" --config {}", deploy::absolute(config).display()));
+        command.push_str(&format!(
+            " --config {}",
+            remote::quote(&deploy::absolute(config).display().to_string())
+        ));
     }
     if let Some(root) = &args.root {
-        command.push_str(&format!(" --root {}", deploy::absolute(root).display()));
+        command.push_str(&format!(
+            " --root {}",
+            remote::quote(&deploy::absolute(root).display().to_string())
+        ));
     }
     if args.dry_run {
         command.push_str(" --dry-run");

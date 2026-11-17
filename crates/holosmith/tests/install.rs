@@ -626,9 +626,12 @@ fn an_install_tells_its_sink_every_step_it_evaluates_and_names_the_waits_bound()
 }
 
 #[test]
-fn a_plan_says_nothing_while_it_works() {
-    // `--dry-run` is the read alone: nothing is slow, so nothing is announced. The silent sink is the plan's, and
-    // `install::run` passing it is what makes the flag quiet on stderr as well as on stdout.
+fn a_plan_tells_its_sink_the_same_seven_steps_a_real_run_does() {
+    // `execute` announces every step it evaluates whether the run is a plan or an apply, and the **silence** of a plan
+    // is `commands::install::run`'s choice of sink — `Silent` for `--dry-run`, `Announce` otherwise — which no test
+    // here can reach without capturing a process's stderr. So what is measured at this layer is the other half: the
+    // plan and the run it describes hand a sink the same seven lines, and the silence itself is `scripts/verify.sh`'s
+    // `case_install`/`case_install_terse` `dry/stderr`, which must be zero bytes on the artifact.
     let _serial = one_at_a_time();
     let dir = TempDir::new("install-progress-dry");
     let listen = health_responder(|| true);
@@ -636,10 +639,27 @@ fn a_plan_says_nothing_while_it_works() {
     let root = rooted(&dir, "root");
     let deployed = deployed(&root, &config);
     let tools = tools(&dir, &root, ("operator", "operator docker"));
-    let mut quiet = Silent;
 
-    install::execute(&deployed, &root, &tools, &NoDaemon, true, &mut quiet)
+    let mut planned = Recorded::default();
+    let plan = install::execute(&deployed, &root, &tools, &NoDaemon, true, &mut planned)
         .expect("a plan is not a refusal");
+    assert!(!plan.failed(), "the plan failed:\n{}", plan.render());
+
+    let mut ran = Recorded::default();
+    let real = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut ran)
+        .expect("a readable account is not a refusal");
+    assert!(!real.failed(), "the run failed:\n{}", real.render());
+
+    assert_eq!(
+        planned.0.len(),
+        7,
+        "a plan does not announce every step it evaluates: {:?}",
+        planned.0
+    );
+    assert_eq!(
+        planned.0, ran.0,
+        "a plan and the run it describes announce different steps"
+    );
 }
 
 // ---- linger ---------------------------------------------------------------------------------
@@ -815,6 +835,96 @@ fn a_second_run_changes_nothing_and_says_so() {
         "the second run ran a loginctl command that changes something:\n{:?}",
         diary(&dir.file("loginctl.log"))
     );
+}
+
+// ---- a re-run that rewrote the unit's bytes -------------------------------------------------
+
+#[test]
+fn a_rerun_that_rewrote_the_unit_leaves_the_restart_to_the_operator() {
+    // The one arrangement in which `enable --now` is not the whole story, and the one line that must not lose it: the
+    // manager is already running the unit and this run has just put different bytes on disk, so the process serving
+    // predates them. The word is `needs` and not `changed`, because `changed` is install's own confirmation and stops
+    // at the mark in the terse report — and this line carries the command that starts the bytes (ADR-0085, ADR-0091).
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-unit-rewritten");
+    let listen = health_responder(|| true);
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+
+    let first = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
+        .expect("a readable account is not a refusal");
+    assert!(!first.failed(), "the first run failed:\n{}", first.render());
+    assert_eq!(
+        line(&first, What::Unit).word,
+        Word::Changed,
+        "the first run did not enable the unit: {}",
+        line(&first, What::Unit).sentence
+    );
+    assert!(
+        dir.file("unit-enabled").exists(),
+        "the manager was left without the unit, so this is not the already-running arm"
+    );
+
+    // The bytes the manager loaded are no longer the bytes on disk, which is what a reinstall over a new release is.
+    std::fs::write(root.unit(), "stale\n").expect("the unit file is writable");
+    let before = diary(&dir.file("systemctl.log")).len();
+
+    let second = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
+        .expect("a readable account is not a refusal");
+
+    // The premise: the deploy pass did put new bytes on disk, so the manager is holding the older copy.
+    let service = second
+        .deploy
+        .lines
+        .iter()
+        .find(|line| line.step == DeployStep::Service)
+        .unwrap_or_else(|| panic!("the deploy reported no service step:\n{}", second.render()));
+    assert_eq!(
+        service.word,
+        Word::Changed,
+        "the run did not rewrite the unit:\n{}",
+        second.render()
+    );
+    // Two applies, because the manager's copy is stale: the reload and the enable, the same as a first install.
+    assert_eq!(
+        applied(&diary(&dir.file("systemctl.log"))[before..]),
+        2,
+        "the run did not reload and enable the unit it wrote:\n{:?}",
+        diary(&dir.file("systemctl.log"))
+    );
+
+    // The word, the command the terse line must keep, and the exit class: the three things this line owes.
+    let unit = line(&second, What::Unit);
+    assert_eq!(
+        unit.word,
+        Word::Needs,
+        "a restart this run left to the operator is not `changed`: {unit}"
+    );
+    let terse = second
+        .render()
+        .lines()
+        .find(|line| line.starts_with("unit "))
+        .unwrap_or_else(|| panic!("the terse report has no unit line:\n{}", second.render()))
+        .to_string();
+    assert!(
+        terse.contains("systemctl --user restart holosmith.service"),
+        "the terse line lost the command the operator must run: {terse}"
+    );
+    assert!(
+        terse.contains("the process serving predates these bytes"),
+        "the terse line lost the reason it is the operator's: {terse}"
+    );
+    // And it is not a failure: `run` prints the URL and the next step, and returns success, exactly when the report's
+    // own predicate is false (`install::Report::failed`) — so this is the success path's evidence.
+    assert!(
+        !second.failed(),
+        "a line that only waits on a restart must not fail the run:\n{}",
+        second.render()
+    );
+    assert_eq!(second.url, config.control_origin.as_str());
+    assert_eq!(second.next, "holosmith hub host add <name> <url>");
 }
 
 // ---- the wait that is the verdict -----------------------------------------------------------

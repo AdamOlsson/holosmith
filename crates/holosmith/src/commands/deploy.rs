@@ -193,13 +193,22 @@ fn resume(args: &DeployArgs) -> String {
 
 /// [`resume`] as a reader pastes it: the same flags without the field's name, which is the form a failed step's
 /// `fix:` line carries ([`deploy::Report::fill_fix`]).
+///
+/// **Each path is quoted** ([`remote::quote`]), because this value is a command line an operator runs: a plain path
+/// comes back byte for byte, and one with a space in it survives the paste as the one argument it was.
 fn resume_command(args: &DeployArgs) -> String {
     let mut command = format!("holosmith {} deploy", args.kind);
     if let Some(config) = &args.config {
-        command.push_str(&format!(" --config {}", deploy::absolute(config).display()));
+        command.push_str(&format!(
+            " --config {}",
+            remote::quote(&deploy::absolute(config).display().to_string())
+        ));
     }
     if let Some(root) = &args.root {
-        command.push_str(&format!(" --root {}", deploy::absolute(root).display()));
+        command.push_str(&format!(
+            " --root {}",
+            remote::quote(&deploy::absolute(root).display().to_string())
+        ));
     }
     if args.dry_run {
         command.push_str(" --dry-run");
