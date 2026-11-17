@@ -433,7 +433,7 @@ fn own_unit(root: &Root, tools: &Tools) -> bool {
 
 /// The unit, through the account's own manager — the two commands the deploy prints and never runs.
 ///
-/// Three things decide the word, and the first is not a program's:
+/// Four things decide the word, and the first is not a program's:
 ///
 /// - **The manager must be this tree's.** `systemctl --user` resolves the *name* [`UNIT_NAME`] in its own search path,
 ///   so a tree under `target/`, or one `--config` moved, has a unit no manager reads; commanding that name would
@@ -445,6 +445,9 @@ fn own_unit(root: &Root, tools: &Tools) -> bool {
 /// - **`written` overrides both.** When the deploy pass wrote the unit's bytes, the manager holds the older copy, and
 ///   `daemon-reload` is the one thing that closes that gap — so that run cannot be `satisfied` however the two
 ///   questions answer.
+/// - **The commands' exit statuses are not the answer.** `enable --now` exits 0 even when the start it bundles
+///   fails, so the line asks the manager again after them: a unit the manager answers anything but `active` for is
+///   [`Word::Failed`], whatever the two commands exited with.
 fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
     let path = root.unit();
     if !own_unit(root, tools) {
@@ -511,6 +514,30 @@ fn unit(root: &Root, tools: &Tools, written: bool, dry_run: bool) -> Line {
         ) {
             return failed(What::Unit, sentence);
         }
+    }
+    // **The exit status of `enable --now` is not the fact.** systemd reports the enable's success and exits 0 even
+    // when the start it bundled failed (measured: `Failed to start holosmith.service: Unit docker.service not found.`
+    // on stderr, status 0), so a line that stopped at that status printed `unit ✓` for a unit that never ran and left
+    // the wait for `/api/health` to be the only thing that noticed. The manager's own answer is the measurement.
+    let running = match asked(
+        &tools.deploy.systemctl,
+        &["--user", "is-active", UNIT_NAME],
+        "the unit is this run's to start, so the manager is asked whether it is running after the two commands",
+    ) {
+        Ok(answer) if answer.out.is_empty() => answer.said,
+        Ok(answer) => answer.out,
+        Err(sentence) => return failed(What::Unit, sentence),
+    };
+    if running != "active" {
+        return failed(
+            What::Unit,
+            format!(
+                "`systemctl --user daemon-reload` and `systemctl --user enable --now {UNIT_NAME}` ran, and the \
+                 manager then answered `{running}` when asked whether the unit is running: `enable --now` exits 0 \
+                 even when the start it bundles fails, so the manager's answer is the fact and not that command's \
+                 status — `journalctl --user -u {UNIT_NAME}` names why"
+            ),
+        );
     }
     Line {
         what: What::Unit,

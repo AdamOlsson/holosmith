@@ -1997,8 +1997,8 @@ fn the_two_halves_union_into_both_and_nothing_is_refused() {
 fn a_hub_deploy_runs_five_steps_and_skips_the_two_a_hub_has_no_work_for() {
     // The acceptance's first bullet, as a run: steps 1, 2, 5, 6 and 7 apply, steps 3 and 4 are `skipped` with a
     // reason, and the tally counts them apart. Two measurements underneath it: the machine is **never asked to build
-    // an image or start a container**, and the file the run leaves boots as a hub — a unit with no
-    // `Requires=docker.service`, because a hub-only machine has no daemon for systemd to wait on.
+    // an image or start a container**, and the file the run leaves boots as a hub — a unit that names no system unit,
+    // because the user manager does not own those names (ADR-0088 D2).
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-hub");
     let socket = dir.file("docker.sock");
@@ -2197,8 +2197,8 @@ fn a_hub_deploy_on_a_server_machine_installs_the_union() {
     );
     let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
-        unit.contains("Requires=docker.service"),
-        "a `both` machine's unit dropped the daemon it needs:\n{unit}"
+        !unit.contains("docker.service"),
+        "a `both` machine's unit names a system unit this manager does not own:\n{unit}"
     );
     assert!(
         unit.contains("Description=Holosmith both"),
@@ -2243,8 +2243,8 @@ fn a_server_deploy_on_a_hub_machine_installs_the_union() {
     );
     let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
-        unit.contains("Requires=docker.service"),
-        "a `both` machine's unit dropped the daemon it needs:\n{unit}"
+        !unit.contains("docker.service"),
+        "a `both` machine's unit names a system unit this manager does not own:\n{unit}"
     );
 }
 
@@ -2631,6 +2631,43 @@ fn a_vapid_file_that_is_not_a_pair_fails_the_step_and_is_not_regenerated() {
 // ---- step 5: the unit, step 6: the origins, step 7: the health wait ----------------------
 
 #[test]
+fn a_user_unit_names_no_system_unit_whatever_the_role() {
+    // The rule ADR-0088 D2 records: `docker.service` and `network-online.target` are **system** units, and this
+    // account's manager does not own those names. `After=` and `Wants=` against one are inert; `Requires=` is a job
+    // systemd refuses before `ExecStartPre` runs, which is why the unit that carried it never started and left no
+    // journal entry. The rendering therefore carries none of the three, and Docker is `ExecStartPre`'s question —
+    // pinned for every role, because the old rendering differed by role and that difference is what made a `both`
+    // machine's unit unstartable.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-unit-roles");
+    let root = rooted(&dir, "root");
+    let exe = PathBuf::from("/usr/local/bin/holosmith");
+    for role in [Role::Hub, Role::Server, Role::Both] {
+        let unit = deploy::unit_text(&exe, role, &root);
+        for absent in [
+            "Requires=",
+            "Wants=",
+            "After=",
+            "docker.service",
+            "network-online.target",
+        ] {
+            assert!(
+                !unit.contains(absent),
+                "a {role} unit carries `{absent}`, which this manager cannot resolve:\n{unit}"
+            );
+        }
+        assert!(
+            unit.contains("StartLimitIntervalSec=0"),
+            "a {role} unit would give up on a daemon that is not up yet:\n{unit}"
+        );
+        assert!(
+            unit.contains(&format!("Description=Holosmith {role}")),
+            "the unit does not describe the machine it boots:\n{unit}"
+        );
+    }
+}
+
+#[test]
 fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-unit");
@@ -2647,8 +2684,7 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     // The spec's block, byte for byte: a rendering that matches itself would prove nothing about the file an
     // operator's systemd reads.
     let expected = format!(
-        "[Unit]\nDescription=Holosmith server\nAfter=network-online.target docker.service\n\
-         Wants=network-online.target\nRequires=docker.service\n\n[Service]\nType=simple\n\
+        "[Unit]\nDescription=Holosmith server\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n\
          UMask=0077\nNoNewPrivileges=yes\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\
          RestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallFilter=@system-service\n\
          ExecStartPre={exe} doctor --quick\nExecStart={exe} serve --config {config}\n\

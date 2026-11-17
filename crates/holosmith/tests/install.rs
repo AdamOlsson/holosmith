@@ -152,11 +152,19 @@ case "$1 $2" in
   '--user is-active')
     if [ -e "$state" ]; then echo active; exit 0; else echo inactive; exit 4; fi ;;
   '--user daemon-reload') exit 0 ;;
-  '--user enable') : > "$state"; exit 0 ;;
+  '--user enable')
+    # The knob `a_unit_the_manager_did_not_start_is_a_failure` sets: systemd reports the enable's success and
+    # exits 0 even when the start it bundled failed, so this arm is the status that hides a dead unit.
+    if [ -e '{refused}' ]; then
+      echo 'Failed to start holosmith.service: Unit docker.service not found.' >&2
+      exit 0
+    fi
+    : > "$state"; exit 0 ;;
   *) exit 1 ;;
 esac"#,
             log = dir.file("systemctl.log").display(),
             state = dir.file("unit-enabled").display(),
+            refused = dir.file("start-refused").display(),
         ),
     )
 }
@@ -834,6 +842,68 @@ fn a_second_run_changes_nothing_and_says_so() {
         0,
         "the second run ran a loginctl command that changes something:\n{:?}",
         diary(&dir.file("loginctl.log"))
+    );
+}
+
+// ---- a unit the manager did not start ---------------------------------------------------------
+
+#[test]
+fn a_unit_the_manager_did_not_start_is_a_failure_and_not_a_pass() {
+    // The shape whose absence printed `unit ✓` on a machine that never served: `systemctl --user enable --now`
+    // reports the enable's success and exits 0 even when the start it bundles failed (a `Requires=` on a system
+    // unit does it), so the command's status is not the fact. The shim answers that status and leaves the unit
+    // inactive; the line must read the manager's own word, name the log, and stop the run.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("install-unit-not-started");
+    let listen = health_responder(|| true);
+    let config = hub_config(listen);
+    let root = rooted(&dir, "root");
+    let deployed = deployed(&root, &config);
+    let tools = tools(&dir, &root, ("operator", "operator docker"));
+    std::fs::write(dir.file("start-refused"), b"").expect("the shim's knob is writable");
+
+    let report = install::execute(&deployed, &root, &tools, &NoDaemon, false, &mut Silent)
+        .expect("a readable account is not a refusal");
+
+    // The premise: both commands ran and exited 0, so this is the status-0 arm rather than a child that failed.
+    assert_eq!(
+        applied(&diary(&dir.file("systemctl.log"))),
+        2,
+        "the run did not reach the two commands:\n{:?}",
+        diary(&dir.file("systemctl.log"))
+    );
+    let unit = line(&report, What::Unit);
+    assert_eq!(unit.word, Word::Failed, "{}", unit.sentence);
+    assert!(
+        unit.sentence.contains("answered `inactive`"),
+        "the failure does not quote the manager's own word: {}",
+        unit.sentence
+    );
+    assert!(
+        unit.sentence
+            .contains("journalctl --user -u holosmith.service"),
+        "the failure does not name the log that says why: {}",
+        unit.sentence
+    );
+    assert!(
+        report.failed(),
+        "a run whose unit the manager refused to start exits 0:\n{}",
+        report.render()
+    );
+    // The failure stops the run: no linger flag, and no wait for an endpoint that only the unit could make serve.
+    assert_eq!(
+        report
+            .lines
+            .iter()
+            .map(|line| line.what)
+            .collect::<Vec<_>>(),
+        [What::Unit],
+        "the run carried on after a unit it could not start:\n{}",
+        report.render()
+    );
+    assert!(
+        !dir.file("linger-on").exists(),
+        "the run set linger for a unit that never started"
     );
 }
 
