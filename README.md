@@ -89,7 +89,7 @@ Three things about that first run:
   systemctl --user restart holosmith
   ```
 
-Day two is the same verbs: `sudo holosmith status`, `sudo holosmith logs -f`, `sudo holosmith doctor --full`. A
+Day two is the same verbs: `sudo holosmith status`, `holosmith logs -f`, `sudo holosmith doctor --full`. A
 config edit is a restart, not a redeploy — though a redeploy re-reads the file, so edits survive one.
 
 ### From your phone, on the same wifi

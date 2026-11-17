@@ -4,8 +4,14 @@
 //! Four things are removed, in this order, and each is a **read** followed by an **apply** so that a second run is
 //! honestly `nothing` rather than a re-application (the order `server deploy` uses, ADR-0056):
 //!
-//! 1. **The unit**: `systemctl disable --now holosmith.service`, the file, and `systemctl daemon-reload`. The unit
-//!    goes first because it is what would restart anything.
+//! 1. **The unit**, at [`Root::unit`] — and it is two arms, because the file a tree names and the file the account's
+//!    own manager loads are two different files whenever `--root` or `--config` moved the tree. The account's own unit
+//!    ([`Tools::manager_unit`]) is retired with four children: `systemctl --user disable --now holosmith.service`
+//!    while the file is still there (disable reads its `[Install]` section to know which `WantedBy` link to unlink),
+//!    the file, `systemctl --user daemon-reload`, and `loginctl disable-linger`. Any other tree's unit is a file and
+//!    nothing else: `systemctl --user` resolves the **name** [`UNIT_NAME`] in that manager's own search path, so a
+//!    child there would reach the account's unit rather than this one. The unit goes first because it is what would
+//!    restart anything.
 //! 2. **The two proxies**: `docker rm --force hs_egress hs_key`.
 //! 3. **The machine's network**: `docker network rm egress`. After the containers, because a network with an
 //!    endpoint refuses to be removed (the rule `docker::remove_network` already follows).
@@ -42,10 +48,17 @@
 //! # The root, and the privilege
 //!
 //! [`crate::deploy::Root`] is the same value the deploy installs into: one directory, owned by the account that runs
-//! the daemon — the operator's own (ADR-0088). This program never escalates, so the half that is root's — `systemctl
-//! disable --now`, the unit in `/etc/systemd/system`, `daemon-reload` — is **printed** as the unit line's remark, and
-//! what this run does itself is what that account can do: remove `<root>/holosmith.service` and, with `--purge`, the
-//! data root.
+//! the daemon — the operator's own (ADR-0088). Its unit is that account's **user** unit, at [`Root::unit`], which is
+//! why this command needs no privilege at all: `systemctl --user`, `rm` and `loginctl` are children of a run made by
+//! the account that owns the file, the manager and the linger flag. There is no root half to print and no line
+//! carries `sudo` — a machine installed this way has nothing left for superuser to do.
+//!
+//! **Owning the tree is not owning the manager.** `--root` and `--config` compose a tree, so [`Root::unit`] is
+//! whatever path those flags make; `systemctl --user` takes a **name** and looks it up in the manager's own search
+//! path, which is `<home>/.config/systemd/user` for the account that runs it and nothing a flag can move. The manager
+//! is therefore this run's to command only when the tree's unit *is* the file that manager loads
+//! ([`Tools::manager_unit`], and [`unit`] is where the two arms are); a tree under `target/` or `/tmp` is a file to
+//! remove and nothing more.
 
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -55,7 +68,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::container::{network_listing_prefix, network_name};
 use crate::db;
-use crate::deploy::{Root, UNIT_DIR, UNIT_NAME};
+use crate::deploy::{Root, UNIT_NAME};
 use crate::docker::{self, Docker};
 use crate::sessions::Status;
 
@@ -210,12 +223,29 @@ impl Machines for Docker {
 
 /// The programs a teardown runs, as a seam — the same shape and the same reason as [`crate::deploy::Tools`].
 ///
-/// One program, because one thing is left for this run to remove itself: `rm`. Everything else a teardown touches is
-/// Docker's (no privilege) or root's (printed, not run).
+/// Three programs, because retiring the operator's own user unit is three of them: `systemctl` disables it and
+/// reloads the manager that read it, `rm` removes the file, and `loginctl` turns linger off so the account stops
+/// starting a user manager at the next boot. Without a privilege there is no fourth, and Docker's own work is
+/// [`Machines`]' rather than a program's. The seam is also where a **machine fact** can be handed in —
+/// [`Tools::manager_unit`], which decides whether that manager is this run's to command — because the struct is
+/// everything a test or the gate has to supply and this machine refuses to.
 #[derive(Debug, Clone)]
 pub struct Tools {
     /// `rm`: how a file and a directory tree go.
     pub rm: PathBuf,
+    /// `systemctl`: `--user disable --now` before the file goes, and `--user daemon-reload` after.
+    pub systemctl: PathBuf,
+    /// `loginctl`: `disable-linger`, so an uninstalled account starts no user manager at boot.
+    pub loginctl: PathBuf,
+    /// The unit the account's own user manager resolves: the file `systemctl --user` reaches, whatever tree this run
+    /// was pointed at.
+    ///
+    /// It decides the one question [`unit`] asks about the manager — whether the manager is this run's to command —
+    /// because `systemctl --user` looks [`UNIT_NAME`] up in the manager's **search path** and never at [`Root::unit`].
+    /// It is a machine fact rather than a program, and [`Root::resolve`] derives it here rather than at the call site
+    /// so there is one derivation of "the account's own unit": a tree's unit equal to this one is the manager's own
+    /// file, and anything else is a file no manager ever reads.
+    pub manager_unit: PathBuf,
     /// How long each daemon question and removal may take; [`BOUND`] on a machine.
     pub bound: Duration,
 }
@@ -224,6 +254,9 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             rm: PathBuf::from("rm"),
+            systemctl: PathBuf::from("systemctl"),
+            loginctl: PathBuf::from("loginctl"),
+            manager_unit: Root::resolve(None, None).unit(),
             bound: BOUND,
         }
     }
@@ -328,25 +361,84 @@ fn live_sessions(config: &Config) -> Result<u64, String> {
 
 /// Step 1: the unit.
 ///
-/// The deliverable this run can reach is `<root>/holosmith.service`, the file the deploy rendered; the unit systemd
-/// actually loads is `/etc/systemd/system/holosmith.service`, which is root's to disable and delete. So the step
-/// removes the rendered file, and its sentence carries the three commands that finish the job — one clause, the
-/// same `; still root's to run: …` shape the deploy's step 5 prints (ADR-0086). A machine that never ran them is not
-/// this step's failure: the file it owns is gone, and the operator is told what is left.
+/// The deliverable is [`Root::unit`], the operator's own **user** unit beside the config (ADR-0088) — but only one
+/// tree's such file is a unit the manager loads, so there are two arms, and [`Tools::manager_unit`] is the predicate.
+///
+/// **The account's own unit** (`path == tools.manager_unit`) is retired by the account that owns it — four children,
+/// in the one order that works:
+///
+/// 1. `systemctl --user disable --now` **while the file is still there**: disable reads the unit's `[Install]`
+///    section to know which `WantedBy` link to unlink, so a file removed first leaves the link behind and a manager
+///    that starts the unit again at the next login.
+/// 2. `rm -f` of the file, the deliverable itself.
+/// 3. `systemctl --user daemon-reload`, so the manager forgets a unit whose file is gone.
+/// 4. `loginctl disable-linger`, so a removed install does not start again at the next boot.
+///
+/// The linger question is asked by turning it **off**, not by reading `loginctl show-user`: `disable-linger` is
+/// idempotent and measured to exit `0` when linger is already off, so one child that cannot be wrong beats a parse
+/// plus a second bus question that can fail.
+///
+/// **Any other tree's unit** is a file and nothing else. `systemctl --user` takes the **name** [`UNIT_NAME`] and
+/// resolves it in the manager's search path, so a child here would not touch this tree's file at all: it would
+/// disable the *account's* unit — a service this run was never asked about — and `loginctl disable-linger` would
+/// turn the invoking account's own linger off. Nothing is disabled and linger is left as it is, and the sentence
+/// says exactly that, in place of any claim about what starts at the next boot.
+///
+/// The read is the file's existence in both arms, and it gates the whole step: a machine with no file here has
+/// nothing to disable and nothing left behind, which is what keeps a second run `nothing` instead of children whose
+/// answer changes nothing. A child that exits non-zero is the step's `Failed`, because a report that said `removed`
+/// over a refused `disable` would be describing a unit that still starts — and the sentence names the command and
+/// the line it said. A context with no user bus to ask (`cron`, a container, a login that never got
+/// `XDG_RUNTIME_DIR`) is that arm rather than a quiet skip: the file is not removed and the run stops there, and
+/// the sentence says a login session is where a re-run succeeds.
 fn unit(root: &Root, tools: &Tools) -> Line {
     let path = root.unit();
-    let present = path.is_file();
-    let remark = format!(
-        "; still root's to run: sudo systemctl disable --now {UNIT_NAME}; sudo rm -f {}; sudo systemctl \
-         daemon-reload",
-        Path::new(UNIT_DIR).join(UNIT_NAME).display()
-    );
-    if !present {
+    if !path.is_file() {
         return Line {
             what: What::Unit,
             word: Word::Nothing,
             sentence: format!(
-                "there was no file at {}, so nothing has installed one here or this run already removed it{remark}",
+                "there was no file at {}, so nothing has installed one here or this run already removed it",
+                path.display()
+            ),
+        };
+    }
+    if path != tools.manager_unit {
+        if let Err(sentence) = remove(path.as_path(), false, tools) {
+            return Line {
+                what: What::Unit,
+                word: Word::Failed,
+                sentence: format!(
+                    "{} is this tree's unit and not the one the account's own manager loads ({}), so nothing was \
+                     disabled and linger is unchanged: {sentence}",
+                    path.display(),
+                    tools.manager_unit.display()
+                ),
+            };
+        }
+        return Line {
+            what: What::Unit,
+            word: Word::Removed,
+            sentence: format!(
+                "{} is gone, and nothing was disabled and linger is unchanged: this tree's unit is not the one the \
+                 account's own manager loads ({}), the only file `systemctl --user {}` resolves",
+                path.display(),
+                tools.manager_unit.display(),
+                UNIT_NAME
+            ),
+        };
+    }
+    let disable = ["--user", "disable", "--now", UNIT_NAME];
+    if let Err(reason) = refusal(&tools.systemctl, &disable) {
+        return Line {
+            what: What::Unit,
+            word: Word::Failed,
+            sentence: format!(
+                "`{} {}` failed ({reason}), so nothing after it ran: the unit was not disabled and {} is still \
+                 there — this step asks the account's user bus, which a `cron` job or a container may not have, and \
+                 re-running from a login session is the recovery",
+                tools.systemctl.display(),
+                disable.join(" "),
                 path.display()
             ),
         };
@@ -355,14 +447,65 @@ fn unit(root: &Root, tools: &Tools) -> Line {
         return Line {
             what: What::Unit,
             word: Word::Failed,
-            sentence,
+            sentence: format!(
+                "the unit is disabled but still on disk, and `{} --user daemon-reload` and `{} disable-linger` did \
+                 not run: {sentence}",
+                tools.systemctl.display(),
+                tools.loginctl.display()
+            ),
+        };
+    }
+    if let Err(reason) = refusal(&tools.systemctl, &["--user", "daemon-reload"]) {
+        return Line {
+            what: What::Unit,
+            word: Word::Failed,
+            sentence: format!(
+                "{} is gone, and `{} --user daemon-reload` failed ({reason}): the manager still holds the unit it read \
+                 from it, and `{} disable-linger` did not run",
+                path.display(),
+                tools.systemctl.display(),
+                tools.loginctl.display()
+            ),
+        };
+    }
+    if let Err(reason) = refusal(&tools.loginctl, &["disable-linger"]) {
+        return Line {
+            what: What::Unit,
+            word: Word::Failed,
+            sentence: format!(
+                "{} is gone and the manager reloaded, and `{} disable-linger` failed ({reason}): this account still \
+                 starts a user manager at the next boot",
+                path.display(),
+                tools.loginctl.display()
+            ),
         };
     }
     Line {
         what: What::Unit,
         word: Word::Removed,
-        sentence: format!("{} is gone{remark}", path.display()),
+        sentence: format!(
+            "{} is gone, and the unit is disabled, forgotten by the manager and set not to start at the next boot",
+            path.display()
+        ),
     }
+}
+
+/// One child's own answer: `Ok` when it exited zero, and the first line of its stderr — or its exit code, when it
+/// said nothing — when it did not.
+///
+/// The reason is the child's rather than a verdict of this command's, because "the manager could not be reached" and
+/// "the unit is not loaded" are different facts that only its own words separate, and the caller's sentence is what
+/// names the command it came from.
+fn refusal(program: &Path, arguments: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(first_line(&String::from_utf8_lossy(&output.stderr))
+        .unwrap_or_else(|| format!("exit {:?}", output.status.code())))
 }
 
 /// The first non-blank line of some text.
@@ -392,7 +535,7 @@ fn remove(path: &Path, recursive: bool, tools: &Tools) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "`{} {}` failed ({}): nothing was removed before it, so the tree is as this run found it",
+        "`{} {}` failed ({})",
         tools.rm.display(),
         arguments.join(" "),
         first_line(&String::from_utf8_lossy(&output.stderr))

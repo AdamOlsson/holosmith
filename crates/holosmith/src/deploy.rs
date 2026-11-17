@@ -87,7 +87,7 @@ const USER_UNIT_DIR: &str = "systemd/user";
 /// Where systemd's system-wide units live: the directory a system unit is installed into for every account.
 ///
 /// [`Root::unit`] is not there: this install's unit is the operator's own, in [`USER_UNIT_DIR`]. This constant is what
-/// `uninstall`'s reminder and `promote`'s fallback still name.
+/// `promote`'s fallback still names.
 pub const UNIT_DIR: &str = "/etc/systemd/system";
 
 /// How long the last step's apply waits for `/api/health` before it calls the unit's start a failure.

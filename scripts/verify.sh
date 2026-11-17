@@ -13534,8 +13534,10 @@ case_status() {
 # The two log sources, and the one child each needs (spec's Commands table, ADR-0059).
 #
 # No server and no daemon: the journald arm is a stand-in on `PATH` — the command names `journalctl`, exactly as a
-# machine does — and the session arm is a file this case wrote at the path `exit::SessionLog` owns. Nothing here
-# needs python3 either, so the case has no `SKIP` line.
+# machine does — and the session arm is a file this case wrote at the path `exit::SessionLog` owns. The unit is the
+# operator's **user** unit (ADR-0088), so the argv asserted is the **user** journal's: reading a system journal would
+# need `systemd-journal` group membership that an account with its own unit never joined. Nothing here needs python3
+# either, so the case has no `SKIP` line.
 #
 # What a shell can measure about `-f` is that the flag reaches the child; that a followed **file** prints what
 # arrives is `logs.rs`'s unit test (a line appended after the first read is printed), because the alternative here
@@ -13573,15 +13575,15 @@ SHIM
   grep -qx 'holosmith\[42\]: serving' "$root/server.out" ||
     fail "$name/server/out" "the child's log did not reach stdout: $(cat "$root/server.out" "$root/server.err")"
   assertions=$((assertions + 1))
-  check "$name/server/argv" "journalctl -u holosmith.service" "$(cat "$HS_JOURNAL_LOG")"
+  check "$name/server/argv" "journalctl --user -u holosmith.service" "$(cat "$HS_JOURNAL_LOG")"
 
-  # `-f` is the child's flag: `journalctl -u holosmith.service -f`, nothing else.
+  # `-f` is the child's flag: `journalctl --user -u holosmith.service -f`, nothing else.
   : >"$HS_JOURNAL_LOG"
   status=0
   PATH="$shims:$PATH" "$artifact" logs -f --config "$WORK/config-logs.toml" \
     >"$root/follow.out" 2>&1 || status=$?
   check "$name/follow/exit" 0 "$status"
-  check "$name/follow/argv" "journalctl -u holosmith.service -f" "$(cat "$HS_JOURNAL_LOG")"
+  check "$name/follow/argv" "journalctl --user -u holosmith.service -f" "$(cat "$HS_JOURNAL_LOG")"
 
   # A journald that refuses is its own answer and its own code — the command adds one sentence, not a verdict.
   : >"$HS_JOURNAL_LOG"
@@ -13647,10 +13649,20 @@ SHIM
 #
 # The refusal's live row comes from a boot of its own over the tree's data root, which is the only way to put a row
 # in a database this case is about to delete without writing SQL by hand.
+#
+# **This case's tree is a foreign one, and that is what it is here to prove.** The unit `--config` composes under
+# `$WORK` is not the file the account's own user manager loads, and `systemctl --user` resolves the **name** in that
+# manager's search path — so a `systemctl`/`loginctl` child here would reach the account's real unit and its linger
+# flag. The assertion is that the only child is the `rm` of the file. The four-child order the account's own unit gets
+# is `tests/uninstall.rs`'s, because this machine's real unit path is not a gate's to write and the `cargo test` phase
+# of this same run executes those tests. `systemctl` and `loginctl` still get recording stand-ins on `PATH`: they must
+# never run, and if the predicate ever regresses they are what turns a stopped daemon on the machine running this gate
+# into one recorded line and a failed assertion — the same reason every other case here hands in the machine it cannot
+# fake.
 case_uninstall() {
   local name=case_uninstall root="$repo_root/target/verify-uninstall-$$"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local tree status line id networks egress_before control preview unit
+  local tree status line id networks egress_before control preview unit shims
   local create_body='{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}'
 
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
@@ -13659,6 +13671,32 @@ case_uninstall() {
   fi
   rm -rf "$root"
   mkdir -p "$root"
+  # This case's tree is a **foreign** one on purpose: its unit is the file `--config` composes under `$WORK`, while the
+  # file the account's own user manager loads is `~/.config/systemd/user/holosmith.service`. `systemctl --user` takes
+  # the **name** and resolves it in that manager's search path, so it never looks in this tree at all — the teardown
+  # must therefore remove the file and ask the manager and `loginctl` nothing. `rm` is the one child expected, and it
+  # records **and** removes (`command -p rm` is the account's own), which makes the log the whole list of children.
+  # The two manager programs are recorded as well even though nothing should run them: a regression is then a line in
+  # this log and a failed equality below, not this machine's real unit being stopped.
+  shims="$root/shims"
+  mkdir -p "$shims"
+  export HS_UNIT_LOG="$root/unit.log"
+  cat >"$shims/rm" <<'SHIM'
+#!/bin/sh
+printf 'rm %s\n' "$*" >>"$HS_UNIT_LOG"
+command -p rm "$@"
+SHIM
+  cat >"$shims/systemctl" <<'SHIM'
+#!/bin/sh
+printf 'systemctl %s\n' "$*" >>"$HS_UNIT_LOG"
+exit 1
+SHIM
+  cat >"$shims/loginctl" <<'SHIM'
+#!/bin/sh
+printf 'loginctl %s\n' "$*" >>"$HS_UNIT_LOG"
+exit 1
+SHIM
+  chmod 0755 "$shims/rm" "$shims/systemctl" "$shims/loginctl"
   printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\nmin_free_gb = 1\n' \
     "$owner" >"$WORK/config-uninstall.toml"
   # The machine's network, as this case found it: `uninstall` removes it, so a run that did not put it back would
@@ -13681,9 +13719,17 @@ case_uninstall() {
   install -m 0600 /dev/null "$tree/data/secrets/vapid.toml" ||
     fail "$name/tree/vapid" "could not create the VAPID pair"
   status=0
-  "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+  PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
     >"$root/first.out" 2>&1 || status=$?
   check "$name/first/exit" 0 "$status"
+  # The unit is this tree's file and not the account's, so the only child is the `rm` that removes it: a `systemctl
+  # --user` here would have disabled the account's own unit, and a `loginctl` its linger flag. The stand-ins record, so
+  # this equality is also what contains a regression — one extra line, and the case fails instead of the machine.
+  check "$name/first/children" "rm -f $unit" "$(cat "$HS_UNIT_LOG")"
+  # Nothing is root's any more: the unit this run retired is the operator's own, so no line asks for `sudo`.
+  grep -q 'sudo' "$root/first.out" &&
+    fail "$name/first/sudo" "the first run's output hands work to sudo: $(cat "$root/first.out")"
+  assertions=$((assertions + 1))
   grep -q '^uninstall: unit: removed: ' "$root/first.out" ||
     fail "$name/first/unit" "the unit was not reported removed: $(cat "$root/first.out")"
   assertions=$((assertions + 1))
@@ -13713,8 +13759,9 @@ case_uninstall() {
   assertions=$((assertions + 1))
 
   # The second run: nothing installed, nothing removed, and exit 0 — a teardown of nothing is not a failure.
+  : >"$HS_UNIT_LOG"
   status=0
-  "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+  PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
     >"$root/second.out" 2>&1 || status=$?
   check "$name/second/exit" 0 "$status"
   for what in unit proxies network; do
@@ -13727,6 +13774,11 @@ case_uninstall() {
   assertions=$((assertions + 1))
   grep -q '^uninstall: resume: ' "$root/second.out" &&
     fail "$name/second/resume" "a successful run printed a resume command: $(cat "$root/second.out")"
+  assertions=$((assertions + 1))
+  # `nothing` in children as well as in words: the read found no file, so nothing was asked to retire one — the first
+  # run above proved **which** child ran, this one proves none ran once the file was gone.
+  [ ! -s "$HS_UNIT_LOG" ] ||
+    fail "$name/second/children" "the second run ran a child over a unit file that is not there: $(cat "$HS_UNIT_LOG")"
   assertions=$((assertions + 1))
 
   # ---- 2. the two proxies: `rm --force` by the names the machine's install gave them -------------
@@ -13741,7 +13793,7 @@ case_uninstall() {
       fail "$name/proxies/key" "could not start a stand-in for hs_key"
     install -d -m 0755 "$tree/data" || fail "$name/proxies/tree" "could not recreate the data root"
     status=0
-    "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
+    PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
       >"$root/proxies.out" 2>&1 || status=$?
     check "$name/proxies/exit" 0 "$status"
     grep -q '^uninstall: proxies: removed: hs_egress and hs_key' "$root/proxies.out" ||
@@ -13779,7 +13831,7 @@ case_uninstall() {
   wait_for_idle_id "$name-idle" "$id"
 
   status=0
-  "$artifact" uninstall --root "$tree" --purge --config "$WORK/config-uninstall.toml" \
+  PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --purge --config "$WORK/config-uninstall.toml" \
     >"$root/refused.out" 2>&1 || status=$?
   check "$name/refused/exit" 1 "$status"
   line="$(grep 'live' "$root/refused.out" || true)"
@@ -13797,7 +13849,7 @@ case_uninstall() {
 
   # With `--force`, the data root goes and the session that was live is named in the line.
   status=0
-  "$artifact" uninstall --root "$tree" --purge --force --config "$WORK/config-uninstall.toml" \
+  PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --purge --force --config "$WORK/config-uninstall.toml" \
     >"$root/forced.out" 2>&1 || status=$?
   check "$name/forced/exit" 0 "$status"
   grep -q '^uninstall: data: removed: ' "$root/forced.out" ||
@@ -13814,6 +13866,7 @@ case_uninstall() {
     docker network create egress >/dev/null 2>&1 ||
       fail "$name/restore" "could not put the machine's egress network back"
   fi
+  unset HS_UNIT_LOG
   rm -rf "$root"
 }
 

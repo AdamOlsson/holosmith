@@ -90,12 +90,13 @@ write. A missing database is six zeros (a machine that never served holds no ses
 
 ## D4 — `logs`: journald through one child, a session's log through one file
 
-The spec says "Server log from journald", so the server arm is one child: `journalctl -u holosmith.service`, `-f`
-appended when asked, **stdio inherited** (following is the child's, and a captured pipe would deliver nothing until
-it exited) and **no `-n`** — any window is a truncation this command cannot label, and journalctl's own pager is
-what an operator navigates. A child that cannot be started is one sentence from us; a child that exits non-zero is
-**its** answer and **its** code, because journald's own "no journal" line explains the machine better than a generic
-failure would.
+The spec says "Server log from journald", so the server arm is one child: `journalctl --user -u holosmith.service`
+— `--user` because the unit is the account's own (ADR-0088), so its journal is the one that account reads as itself —
+with `-f` appended when asked, **stdio inherited** (following is the child's, and a captured pipe would deliver
+nothing until it exited) and **no `-n`** — any window is a truncation this command cannot label, and journalctl's own
+pager is what an operator navigates. A child that cannot be started is one sentence from us; a child that exits
+non-zero is **its** answer and **its** code, because journald's own "no journal" line explains the machine better
+than a generic failure would.
 
 A session's log is `<data>/sessions/<id>/session.log`, written by `exit::Exits::record` (the launch line, plus the
 stderr's tail when a container failed), so the reader is that writer's inverse and needs **no program**: `std::fs`,
@@ -116,15 +117,22 @@ difference is deliberate: this one arm reads nothing from it.
 ADR-0056's five words (`satisfied`, `needs`, `changed`, `skipped`, `failed`) are a **deploy** contract: a step that
 read a state and applied a difference. A teardown's questions are different — was there one, and is it gone — so
 `uninstall` owns four words of its own: `removed`, `kept`, `nothing`, `failed`, on lines shaped
-`uninstall: <what>: <word>: <sentence>` after a header naming the tree and its privilege. Reusing the deploy's words
+`uninstall: <what>: <word>: <sentence>` after a header naming the tree — not its privilege, which an install whose
+unit is the account's own (ADR-0088) does not have. Reusing the deploy's words
 would have been a second user of a shape nobody documented for it, and the first thing they would lie about is
 `nothing`: a deploy has no word for "there was nothing to do because nothing was ever installed", which is a
 teardown's commonest answer and the one the acceptance's idempotency asks for.
 
 ## D6 — what it removes, in what order, and what it keeps
 
-1. **The unit** — `systemctl disable --now holosmith.service`, then the file (`rm -f`, `sudo`-prefixed on a system
-   install), then `systemctl daemon-reload`. It goes first because it is what would restart anything.
+1. **The unit** — at `Root::unit`. The account's own user unit (`~/.config/systemd/user/holosmith.service`, the one
+   file `systemctl --user` resolves) is `systemctl --user disable --now holosmith.service` first, while the file is
+   still there because disable reads its `[Install]` section, then `rm -f` the file, then `systemctl --user
+   daemon-reload`, then `loginctl disable-linger`. Any **other** tree's unit — which is what `--root` and `--config`
+   compose — is a file and nothing else: the manager is looked up by **name** in its own search path and never at a
+   tree, so a child there would retire the account's unit instead. Either way the file's removal is the deliverable
+   and the unit goes first because it is what would restart anything. No line carries `sudo`: an install whose unit
+   is the account's own has no privileged half left (ADR-0088).
 2. **The two proxies** — `docker rm --force hs_egress hs_key`. The read is **existence**, not `running`:
    `--restart unless-stopped` keeps a stopped container's name and its definition, so a teardown that removed only
    running ones would leave two containers behind.
@@ -189,9 +197,16 @@ command that just ran, with its own flags made absolute) because re-running is t
   asserts they go while the data stays, and restores the network the rest of the gate needs; the purge refusal's
   live row comes from a boot of its own over a database this case seeds, and `--force` then takes the tree.
 
+  Its tree's unit is a **foreign** one: the file `--config` composes under the gate's work directory, not the file the
+  account's own manager loads. `systemctl --user` resolves a **name** in that manager's search path and never looks at
+  a tree, so a child there would retire the account's real unit and clear its linger flag — and the case therefore
+  asserts that the only child is the `rm` of that file, with `systemctl` and `loginctl` stand-ins on `PATH` that must
+  never be reached. The four-child order the account's own unit gets is `tests/uninstall.rs`'s, because this machine's
+  real unit path is not a gate's to write; the `cargo test` phase of the same run executes those.
+
 **What this machine cannot measure**: no systemd, so no unit is loaded and `disable --now`/`daemon-reload` are
-`tests/uninstall.rs`'s recorders (and a privileged run's unit *file* is untestable here, because `/etc/systemd/system`
-is not this user's to write — the case's `--root` arm and `AGENTS.md`'s by-hand procedure are the two proofs);
-no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and no host registry, so `status`'s
-machines line names instead of a health it cannot ask for. Those three are the ship note's "said plainly",
-not gaps found later.
+`tests/uninstall.rs`'s recorders. The unit's **file** needs no systemd and is real: the deploy writes it beside the
+config, under a directory this user owns, so the case writes one and the teardown's `rm` is measured against a file
+that is there and gone. There is no `journalctl` for a unit, so the server arm's real journal is a stand-in's; and
+no host registry, so `status`'s machines line names instead of a health it cannot ask for. Those three are the ship
+note's "said plainly", not gaps found later.

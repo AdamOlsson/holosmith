@@ -196,8 +196,8 @@ create time with a `422` — those are the three shapes that cannot be mounted s
 
 ```bash
 sudo -u holosmith holosmith status       # role, version, uptime, session counts, proxies
-sudo holosmith logs -f                   # journalctl -u holosmith.service (the journal is root's, or the
-                                         # `systemd-journal` group's)
+holosmith logs -f                        # journalctl --user -u holosmith.service, no group needed
+                                         # (the unit is your own: ADR-0088)
 sudo -u holosmith holosmith doctor --full
 systemctl --user restart holosmith       # after any config edit
 sudo -u holosmith holosmith server deploy   # idempotent: the second run changes nothing

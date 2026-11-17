@@ -105,8 +105,11 @@ owner, and it keeps `ExecStartPre=<exe> doctor --quick`, the pre-line ADR-0084 D
 it works the same through the user manager.
 
 **`loginctl enable-linger` is what turns it into a boot service**, and a machine without it starts the daemon only
-while a session is open — which is not an install. It is measured unprivileged, so the deploy sets it rather than
-printing a command for the operator to copy, and the set of commands ADR-0086 D2's rule leaves to print is now empty.
+while a session is open — which is not an install. It is unprivileged, so nothing needs root to set it and the set of
+commands ADR-0086 D2's rule leaves to print is empty; what the tree does is narrower than this decision, and the
+narrower thing is the record. `server deploy` writes the unit and prints `systemctl --user daemon-reload` and
+`enable --now` without setting linger, and `uninstall` is the only verb that touches the flag: it turns it **off**,
+which is what stops a removed install starting at the next boot. Setting it is still outstanding (below).
 `journalctl --user -u holosmith` is the log, one flag away from the system spelling.
 
 **The sudoers line is deleted, and with it ADR-0086 D4's whole argument.** That decision existed for one reason: a
@@ -191,21 +194,27 @@ and its ADR-0086 D4 citation go. The two hints that told an operator to escalate
 holosmith holosmith key set`", which is now the operator writing their own 0600 file, and `remote`'s note about the
 machine's sudoers rule.
 
-**The move is in the tree for the unit, its commands and the restart.** Step 5 has it: the unit it renders carries
-no `User=` or `Group=`, the sandbox is the reduced set, it is enabled with `WantedBy=default.target` and the two
-`systemctl --user` commands, and it is written into the user manager's directory beside the config. `promote`'s
-restart has it too — `upgrade` and `rollback` ask `systemctl --user restart`, `Tools` carries no `sudo`, and a restart
-that fails names `systemctl --user status` and `journalctl --user` — so the line D2 deleted is gone from the failure
-path as well as from the argument. The operator-facing commands moved too: `README.md` and `docs/quickstart.md`
-now ask this unit's own manager (`systemctl --user status`, `journalctl --user -u`, `systemctl --user restart`),
-which is what makes them work at all, since the system spelling answers `Unit holosmith.service could not be found`.
+**The move is in the tree for the unit, its commands, the restart and its retirement.** Step 5 has it: the unit it
+renders carries no `User=` or `Group=`, the sandbox is the reduced set, it is enabled with
+`WantedBy=default.target` and the two `systemctl --user` commands, and it is written into the user manager's
+directory beside the config. `promote`'s restart has it too — `upgrade` and `rollback` ask `systemctl --user
+restart`, `Tools` carries no `sudo`, and a restart that fails names `systemctl --user status` and
+`journalctl --user` — so the line D2 deleted is gone from the failure path as well as from the argument. `logs`
+reads `journalctl --user`, and `uninstall` retires the user unit itself — `systemctl --user disable --now` while
+the file is still there (disable reads its `[Install]` section), the file, `systemctl --user daemon-reload`,
+`loginctl disable-linger` — with no `sudo` on any line. It commands that manager only for the unit the manager
+actually loads, because `systemctl --user` resolves a **name** in its own search path while a `--root`/`--config`
+tree is a file no manager reads; such a tree's unit is removed and nothing else is asked of the manager. The
+operator-facing commands moved too: `README.md` and `docs/quickstart.md` now ask this unit's own manager
+(`systemctl --user status`, `journalctl --user -u`, `systemctl --user restart`), which is what makes them work at
+all, since the system spelling answers `Unit holosmith.service could not be found`.
 
-Still outstanding: `logs`'s journal spelling, `uninstall`'s words, `loginctl enable-linger`, `hosts/client.rs`'s
-refusal sentence (`sudo systemctl start holosmith`), and the rest of those two documents' install prose — the
-`/etc/systemd/system/` install act (`sudo install …`, `sudo systemctl daemon-reload`, `enable --now`), the
-`sudo -u holosmith …` day-two list and the `/var/lib/holosmith` default. That is ADR-0086's install, and it is left
-to the story that rewrites it rather than half-moved here: the three lines are one act of putting a file into
-`/etc/systemd/system`, so a `--user` tail on them would break the sequence instead of fixing it.
+Still outstanding: `loginctl enable-linger`, `hosts/client.rs`'s refusal sentence (`sudo systemctl start
+holosmith`), and the rest of those two documents' install prose — the `/etc/systemd/system/` install act
+(`sudo install …`, `sudo systemctl daemon-reload`, `enable --now`), the `sudo -u holosmith …` day-two list and the
+`/var/lib/holosmith` default. That is ADR-0086's install, and it is left to the story that rewrites it rather than
+half-moved here: the three lines are one act of putting a file into `/etc/systemd/system`, so a `--user` tail on
+them would break the sequence instead of fixing it.
 
 ## Refused
 
