@@ -247,7 +247,7 @@ and no deploy generates)
 ### Sessions and turns
 
 **Project**:
-A git repository on a server that sessions are created against.
+A git repository on a server that sessions are created against: a directory directly inside the **Projects root**, addressed by its own name. `holosmith project add <url>` clones one there under the name the URL's last segment gives (less a trailing `/` and `.git`), which is the string a create asks for, and `holosmith project list` prints the ones that are there. Its machine names are `projects::name_from_url`, `projects::name_is_valid` and the command `commands::project`.
 _Avoid_: Repo, workspace
 
 **Session**:

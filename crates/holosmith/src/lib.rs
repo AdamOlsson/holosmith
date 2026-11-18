@@ -38,6 +38,7 @@ pub mod pins;
 pub mod preflight;
 pub mod preview;
 pub mod progress;
+pub mod projects;
 pub mod promote;
 pub mod provisioner;
 pub mod proxies;

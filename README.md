@@ -12,10 +12,11 @@ Requirements: Linux with systemd, Docker, git 2.38 or newer, and a provider key 
 ```bash
 holosmith install                # the tree, the two images, the unit; waits for /api/health
 holosmith key set opencode-go    # paste the key, then Enter
-git clone https://github.com/you/project ~/.local/share/holosmith/projects/project
+holosmith project add https://github.com/you/project
 ```
 
-Open <http://localhost:8080>, type the directory name (`project`) in **New session**, press **Start session**.
+The last command clones the repository into the projects root and prints the name the new-session form takes
+(`project`). Open <http://localhost:8080>, type that name in **New session**, press **Start session**.
 
 If Docker says permission denied, your account is not in the `docker` group. Run this, log back in, and repeat the
 install:
