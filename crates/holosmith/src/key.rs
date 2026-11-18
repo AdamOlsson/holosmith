@@ -1,7 +1,7 @@
-//! The machine's provider keys and each session's dummy key (spec item 2).
+//! The machine's provider keys, its tool credentials, and each session's dummy key (spec item 2).
 //!
-//! The story's promise is a negative one: a real provider key never enters a session container. Two files
-//! make that true and this module owns both:
+//! The story's promise is a negative one: a real key never enters a session container. Two files make that true
+//! and this module owns both:
 //!
 //! * `<data>/secrets/keys.toml`, mode **0600**, is the only place a real key is written. `hs_key` mounts the
 //!   **directory** it lives in, read-only (`container::KeyProxy::mount`, ADR-0050); no session container mounts
@@ -9,9 +9,11 @@
 //! * `<data>/sessions/<id>/pi-home/models.json` carries the session's **dummy** key and the key proxy's URL.
 //!   That file is inside a session mount, which is exactly why it may hold nothing else.
 //!
-//! `keys.toml` carries both halves because the proxy has no database: the provider keys are what it swaps in,
-//! and the session table is what lets it answer "is this dummy key still valid?". Deleting a session removes
-//! its row here ([`Store::revoke`]), which is the hook's whole body.
+//! `keys.toml` carries every table because the proxy has no database: the provider keys are what it swaps in, the
+//! session table is what lets it answer "is this dummy key still valid?", and the tool table ([`TOOLS`]) is where
+//! a credential for a host that is not a model provider lives — out of the session's own `pi-home`, where the agent
+//! could read it (ADR-0098). Deleting a session removes its row here ([`Store::revoke`]), which is the hook's
+//! whole body.
 //!
 //! **Writes are temp-file + rename.** The file must never be observable half-written: a proxy reading it at
 //! the wrong moment would answer 503 for a key the operator just saved. The temporary file is created with
@@ -256,16 +258,102 @@ pub fn provider_ids() -> Vec<&'static str> {
     PROVIDERS.iter().map(|provider| provider.id).collect()
 }
 
+/// A credential for a **tool** rather than for a model provider: one host a session's agent calls.
+///
+/// The file has two key tables because two different things spend them. A provider key is swapped in by the key
+/// proxy at a fixed route per row of [`PROVIDERS`]; a tool key belongs to a host the agent's own client talks to,
+/// whose paths the tool's protocol names. So a tool is **not** a provider: it has no entry in pi's catalog, it is
+/// never [`default_provider`], [`models`] writes nothing for it, and the key proxy's routes never name it. It is a
+/// row `key set` accepts and `key list` shows (ADR-0098).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tool {
+    /// The id `key set` and `key revoke` take, and the row's name in `keys.toml`'s `[tools]` table.
+    pub id: &'static str,
+    /// The host the real key is presented to, over TLS.
+    pub host: &'static str,
+    /// Where the real key goes in that host's requests.
+    pub auth: Auth,
+    /// The paths this host serves the tool under, with their leading `/`.
+    ///
+    /// Constants, matched exactly, for ADR-0050's reason: a caller of the table is told where a key may be spent
+    /// rather than being handed a path to forward.
+    pub endpoints: &'static [&'static str],
+}
+
+/// The tools this build knows how to hold a credential for.
+///
+/// Small and explicit like [`PROVIDERS`], and for the same reason: `key set` refuses an id no row names, because a
+/// stored key for a host nothing serves is a key nothing can spend.
+pub const TOOLS: &[Tool] = &[Tool {
+    id: "linear",
+    host: "mcp.linear.app",
+    auth: Auth::Bearer,
+    endpoints: &["/mcp", "/mcp/readonly"],
+}];
+
+/// The tool row `id` names, if this build has one.
+pub fn tool(id: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|tool| tool.id == id)
+}
+
+/// The tool ids, in table order, for a refusal's sentence and the CLI's help.
+pub fn tool_ids() -> Vec<&'static str> {
+    TOOLS.iter().map(|tool| tool.id).collect()
+}
+
 /// The refusal an id outside [`PROVIDERS`] gets, in one spelling.
 ///
-/// `key set` asks it **before** it reads stdin: an unknown id is refused at once rather than after a key the
-/// operator then watches disappear into a command that throws it away. [`Store::set_provider`] asks it again for
-/// a caller that skipped the step, so the sentence is written here once.
+/// `key set` asks its own sentence ([`unknown_id`], which names both tables) **before** it reads stdin: an unknown
+/// id is refused at once rather than after a key the operator then watches disappear into a command that throws it
+/// away. [`Store::set_provider`] asks this one again for a caller that skipped the step, so the sentence is written
+/// here once.
 pub fn unknown_provider(provider: &str) -> KeyError {
     KeyError::new(format!(
         "{provider} is not a provider this build knows: {}",
         provider_ids().join(", ")
     ))
+}
+
+/// The refusal an id outside [`TOOLS`] gets, in one spelling: [`Store::set_tool`]'s guard, for a caller that
+/// stored without asking the CLI first — the proxy that spends a tool key is that caller (ADR-0098).
+pub fn unknown_tool(id: &str) -> KeyError {
+    KeyError::new(format!(
+        "{id} is not a tool this build knows: {}",
+        tool_ids().join(", ")
+    ))
+}
+
+/// The refusal an id that is in **neither** table gets from `key set`, naming both.
+///
+/// `set` takes one positional id and stores it in the table that names it, so a typo has to be told the whole
+/// vocabulary this build accepts rather than half of it: the sentence is the two one-table sentences, in the
+/// order the file has its credential tables. The provider list opens with [`default_provider`], because that is
+/// the id a machine with no key is told to store.
+pub fn unknown_id(id: &str) -> KeyError {
+    KeyError::new(format!("{}; {}", unknown_provider(id), unknown_tool(id)))
+}
+
+/// The refusal `key remove` gives a tool's id: that command exists for the provider table, so the sentence names
+/// the command that will work instead.
+///
+/// `None` for every id that is not a tool, a typo included: `key remove bogus` keeps its own "has no key" answer,
+/// because a typo is that command's business and not the other table's.
+pub fn refusal_for_remove(id: &str) -> Option<KeyError> {
+    tool(id).map(|_| {
+        KeyError::new(format!(
+            "{id} is a tool, not a model provider: use `holosmith key revoke {id}`"
+        ))
+    })
+}
+
+/// The refusal `key revoke` gives a model provider's id, for [`refusal_for_remove`]'s reason and with its mirror
+/// sentence. `None` for every id that is not a provider, a typo included.
+pub fn refusal_for_revoke(id: &str) -> Option<KeyError> {
+    provider(id).map(|_| {
+        KeyError::new(format!(
+            "{id} is a model provider, not a tool: use `holosmith key remove {id}`"
+        ))
+    })
 }
 
 /// The machine's key store: one path, and no cached copy. A write is a read-modify-write under a process lock,
@@ -275,10 +363,13 @@ pub struct Store {
     path: PathBuf,
 }
 
-/// The parsed shape of `keys.toml`: real keys by provider, and the dummy key each live session spends.
+/// The parsed shape of `keys.toml`: real keys by provider, real keys by tool, and the dummy key each live session
+/// spends.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Secrets {
     pub providers: BTreeMap<String, String>,
+    /// Tool credentials, keyed by [`TOOLS`] id. A `[providers]` row whose id names a tool is read as one of these.
+    pub tools: BTreeMap<String, String>,
     pub sessions: BTreeMap<String, String>,
 }
 
@@ -327,6 +418,13 @@ impl Store {
     /// Called at boot and before the key proxy starts. Both modes are enforced: the directory 0700 and the
     /// file 0600. A pre-existing directory is reset rather than trusted, because a secret left group-readable
     /// is the one failure mode this file cannot recover from by being read again.
+    ///
+    /// A file that already exists is prepared too, in the one way it needs: a legacy `[providers]` row whose id
+    /// names a tool moves into `[tools]` ([`normalize`](Self::normalize)). Nothing else about an existing file is
+    /// touched — not its whitespace and not its table order — so a deploy's "kept" file survives a boot unchanged.
+    /// The move is best effort: a row that names a tool already **reads** as a tool key without it, so a file this
+    /// step cannot rewrite is not a reason to refuse the boot that mounts it, and the proxy's own
+    /// [`load`](Self::load) still reports a file it cannot parse, per request, as it did before this step existed.
     pub fn ensure_file(&self) -> Result<(), KeyError> {
         let _guard = lock();
         let directory = self
@@ -338,6 +436,7 @@ impl Store {
             write_file(&self.path, &empty_text())?;
         } else {
             fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+            let _ = self.normalize_unlocked();
         }
         Ok(())
     }
@@ -394,9 +493,77 @@ impl Store {
         Ok(removed)
     }
 
-    /// The provider ids that have a real key, sorted by name: `key list`'s whole output.
+    /// Store one tool's real key, replacing an existing one. The tool must be in [`TOOLS`], for
+    /// [`set_provider`](Self::set_provider)'s reason: a key for an id no row names is a key nothing can spend.
+    pub fn set_tool(&self, tool: &str, key: &str) -> Result<(), KeyError> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(KeyError::new("the key is empty"));
+        }
+        if crate::key::tool(tool).is_none() {
+            return Err(unknown_tool(tool));
+        }
+        let _guard = lock();
+        let mut secrets = self.load()?;
+        secrets.tools.insert(tool.to_string(), key.to_string());
+        self.save_unlocked(&secrets)
+    }
+
+    /// Remove a tool's real key. `false` means there was none, which `key revoke` answers with a sentence and exit
+    /// 0: a key that is already gone is the state the operator asked for.
+    pub fn remove_tool(&self, tool: &str) -> Result<bool, KeyError> {
+        let _guard = lock();
+        let mut secrets = self.load()?;
+        let removed = secrets.tools.remove(tool).is_some();
+        if removed {
+            self.save_unlocked(&secrets)?;
+        }
+        Ok(removed)
+    }
+
+    /// The provider ids that have a real key, sorted by name: `key list`'s first half.
     pub fn providers(&self) -> Result<Vec<String>, KeyError> {
         Ok(self.load()?.providers.into_keys().collect())
+    }
+
+    /// The tool ids that have a real key, sorted by name: `key list`'s second half.
+    pub fn tools(&self) -> Result<Vec<String>, KeyError> {
+        Ok(self.load()?.tools.into_keys().collect())
+    }
+
+    /// The stored key for `tool`, from a read of the file on **every call**.
+    ///
+    /// No cached copy, deliberately: the read is the rotation mechanism. `key set linear` on a running machine
+    /// rewrites this file, and a caller that asks per request spends the new key on its next request with no restart
+    /// and nothing else touched (ADR-0098). `None` is "no key stored", which is a state and not an error.
+    pub fn tool_key(&self, tool: &str) -> Result<Option<String>, KeyError> {
+        Ok(self.load()?.tools.get(tool).cloned())
+    }
+
+    /// Move a legacy `[providers]` row whose id names a tool into `[tools]`, on disk. `true` means the file was
+    /// rewritten.
+    ///
+    /// [`load`](Self::load) already **reads** such a file correctly — the row is a tool key in memory and never a
+    /// provider — so nothing refuses it; this is what makes the file itself carry the shape this build renders, which
+    /// is what `server deploy`'s "kept" file and an operator reading it by hand both see. Only those rows move: a
+    /// file without one is left byte for byte alone, whatever its whitespace or table order.
+    pub fn normalize(&self) -> Result<bool, KeyError> {
+        let _guard = lock();
+        self.normalize_unlocked()
+    }
+
+    fn normalize_unlocked(&self) -> Result<bool, KeyError> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(KeyError::from(error)),
+        };
+        let (secrets, legacy_row) = parse_tables(&text)?;
+        if !legacy_row {
+            return Ok(false);
+        }
+        write_file(&self.path, &render(&secrets))?;
+        Ok(true)
     }
 
     /// The session's dummy key, minted on first use and stable afterwards.
@@ -469,9 +636,11 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 ///
 /// `pub(crate)` rather than private because the deploy writes this file's *creation* from its own step: the one
 /// spelling of "an empty key store" has to be the one `key list` reads, or a deploy would create a file the key
-/// commands then refuse to parse.
+/// commands then refuse to parse. It is [`render`] of the empty [`Secrets`] rather than a third spelling of the
+/// tables, so a table added there appears here without an edit — and because [`render`] writes `[tools]` only when
+/// a tool key is stored, this is the previous release's `[providers]\n[sessions]\n` exactly (ADR-0098).
 pub(crate) fn empty_text() -> String {
-    "[providers]\n[sessions]\n".to_string()
+    render(&Secrets::default())
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), KeyError> {
@@ -490,7 +659,22 @@ fn write_file(path: &Path, text: &str) -> Result<(), KeyError> {
 }
 
 fn parse(text: &str) -> Result<Secrets, KeyError> {
+    Ok(parse_tables(text)?.0)
+}
+
+/// [`parse`], and whether the text carried a `[providers]` row whose id names a tool.
+///
+/// That row is a file an earlier release wrote: `key set linear` had one table, so it stored a tool's key under
+/// `[providers]`, where [`models`] silently skipped it and nothing could spend it. The row is **read as a tool key**
+/// and not as a provider, so `models()` still names no tool; the flag is what lets [`Store::normalize`] rewrite the
+/// file into the shape this build renders, once, and only for a file that has such a row. A row whose id is neither
+/// a provider nor a tool stays exactly where it is — that is a stale id, not a mislaid table.
+///
+/// A file naming the same id in both tables is one this build never writes; `[tools]` wins, because that is the
+/// table the key belongs in.
+fn parse_tables(text: &str) -> Result<(Secrets, bool), KeyError> {
     let mut secrets = Secrets::default();
+    let mut legacy_row = false;
     let mut section = "";
     for (number, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -503,6 +687,7 @@ fn parse(text: &str) -> Result<Secrets, KeyError> {
         {
             section = match name.trim() {
                 "providers" => "providers",
+                "tools" => "tools",
                 "sessions" => "sessions",
                 other => {
                     return Err(KeyError::new(format!(
@@ -530,8 +715,15 @@ fn parse(text: &str) -> Result<Secrets, KeyError> {
             )));
         }
         match section {
+            "providers" if tool(key).is_some() => {
+                legacy_row = true;
+                secrets.tools.entry(key.to_string()).or_insert(value);
+            }
             "providers" => {
                 secrets.providers.insert(key.to_string(), value);
+            }
+            "tools" => {
+                secrets.tools.insert(key.to_string(), value);
             }
             "sessions" => {
                 secrets.sessions.insert(key.to_string(), value);
@@ -544,7 +736,7 @@ fn parse(text: &str) -> Result<Secrets, KeyError> {
             }
         }
     }
-    Ok(secrets)
+    Ok((secrets, legacy_row))
 }
 
 /// One TOML basic string, which is the only value shape this file writes. A string that is not quoted is
@@ -582,11 +774,23 @@ fn parse_string(text: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
+/// The file's text: `[providers]`, then `[tools]` **only when a tool key is stored**, then `[sessions]`.
+///
+/// The conditional table is what keeps a store without a tool key byte-identical to the file the release before
+/// this one writes, because that release's parser is a closed list: it refuses a file naming `[tools]` and answers
+/// 503 for every model call. A machine that never stored a tool key is therefore unaffected by a rollback; one that
+/// did makes its file readable again with `key revoke <id>` (ADR-0098, "Rollback").
 fn render(secrets: &Secrets) -> String {
     let mut out = String::new();
     out.push_str("[providers]\n");
     for (provider, key) in &secrets.providers {
         out.push_str(&format!("{provider} = {}\n", quoted(key)));
+    }
+    if !secrets.tools.is_empty() {
+        out.push_str("[tools]\n");
+        for (tool, key) in &secrets.tools {
+            out.push_str(&format!("{tool} = {}\n", quoted(key)));
+        }
     }
     out.push_str("[sessions]\n");
     for (session, dummy) in &secrets.sessions {
@@ -635,7 +839,8 @@ fn random_hex() -> String {
 ///
 /// `providers` is the set with a real key. An empty set writes an empty provider object, which is honest: pi
 /// will have no model available until the operator runs `key set`. The real key never appears here, which is
-/// the one property a session mount may not break.
+/// the one property a session mount may not break — and a tool's key is not a model provider, so it is not a row
+/// here either, whatever the store holds (ADR-0098).
 pub fn models(secrets: &Secrets, dummy: &str) -> String {
     let mut providers = serde_json::Map::new();
     for id in secrets.providers.keys() {
@@ -684,10 +889,15 @@ pub fn key_proxy_name(prefix: &str) -> String {
     format!("{prefix}{KEY_PROXY_NAME}")
 }
 
-/// The secret a `models.json` file may never contain: the real provider key. Kept here so a test can grep a
-/// whole session directory for it without re-spelling the rule.
+/// The secrets a `models.json` file may never contain: the real provider keys **and** the real tool keys. Kept here
+/// so a test can grep a whole session directory for one without re-spelling the rule: a session mount holds a dummy
+/// and no real key of either table.
 pub fn contains_real_key(secrets: &Secrets, text: &str) -> bool {
-    secrets.providers.values().any(|key| text.contains(key))
+    secrets
+        .providers
+        .values()
+        .chain(secrets.tools.values())
+        .any(|key| text.contains(key))
 }
 
 #[cfg(test)]
@@ -854,5 +1064,301 @@ mod tests {
                 other.id
             );
         }
+    }
+
+    /// The one tool row, exactly, and the four facts that make a tool key not a provider key.
+    ///
+    /// A tool key is a credential this machine holds, so it lives in the same 0600 file; it is not a model
+    /// provider, so no catalog row, no default and no `models.json` row may name it (ADR-0098). Those four facts are
+    /// the difference between "a second table" and "a provider row under another heading".
+    ///
+    #[test]
+    fn the_tools_table_names_one_host_and_no_tool_is_a_provider() {
+        assert_eq!(
+            TOOLS,
+            &[Tool {
+                id: "linear",
+                host: "mcp.linear.app",
+                auth: Auth::Bearer,
+                endpoints: &["/mcp", "/mcp/readonly"],
+            }],
+            "the tools this build holds a key for are one MCP host and the paths it serves"
+        );
+        assert_eq!(tool_ids(), vec!["linear"]);
+        assert_eq!(tool("linear").map(|row| row.host), Some("mcp.linear.app"));
+        assert!(
+            tool("not-a-tool").is_none(),
+            "an id no row names is not a tool"
+        );
+
+        assert!(provider("linear").is_none(), "linear is a provider row");
+        assert!(!provider_ids().contains(&"linear"));
+        assert_ne!(default_provider(), "linear");
+        for id in tool_ids() {
+            assert!(!provider_ids().contains(&id), "{id} is in both tables");
+        }
+
+        let scratch = Scratch::new("tool-not-provider");
+        let store = Store::from_data_root(&scratch.0);
+        store
+            .set_tool("linear", "lin_api_the_tool_key")
+            .expect("a tool key is storable");
+        let secrets = store.load().expect("the store reads");
+        assert!(
+            secrets.providers.is_empty(),
+            "a tool key landed in the provider table: {:?}",
+            secrets.providers
+        );
+        assert_eq!(
+            secrets.tools.get("linear").map(String::as_str),
+            Some("lin_api_the_tool_key")
+        );
+        let models = models(&secrets, "hs-dummy-test");
+        assert!(
+            !models.contains("linear"),
+            "models.json named the tool: {models}"
+        );
+        assert!(
+            !models.contains("lin_api_the_tool_key"),
+            "models.json leaked the tool key: {models}"
+        );
+    }
+
+    /// A tool key round-trips through the file, setting it again replaces the one row, and the file's own text is
+    /// the rendered `[tools]` shape between the two tables it has always had.
+    #[test]
+    fn a_tool_key_round_trips_replaces_itself_and_renders_under_tools() {
+        let scratch = Scratch::new("tool-round-trip");
+        let store = Store::from_data_root(&scratch.0);
+        store
+            .set_provider("anthropic", "sk-ant-real")
+            .expect("the provider key is storable");
+        store
+            .set_tool("linear", "lin_api_first")
+            .expect("the tool key is storable");
+        store
+            .set_tool("linear", "lin_api_second")
+            .expect("the tool key is replaceable");
+        assert_eq!(
+            fs::read_to_string(store.path()).expect("the file is readable"),
+            "[providers]\nanthropic = \"sk-ant-real\"\n[tools]\nlinear = \"lin_api_second\"\n\
+             [sessions]\n",
+            "the file is providers, then tools, then sessions, and one tool is one row"
+        );
+        let secrets = store.load().expect("the store reads");
+        assert_eq!(secrets.tools.len(), 1, "setting a tool twice left two rows");
+        assert_eq!(
+            store.tool_key("linear").expect("the store reads"),
+            Some("lin_api_second".to_string()),
+            "the second value did not win"
+        );
+        assert_eq!(store.tools().expect("the store reads"), vec!["linear"]);
+        assert!(
+            store.remove_tool("linear").expect("the store writes"),
+            "the stored tool key was not removed"
+        );
+        assert!(
+            !store.remove_tool("linear").expect("the store writes"),
+            "a second remove found something"
+        );
+        assert_eq!(store.tool_key("linear").expect("the store reads"), None);
+    }
+
+    /// `set_tool` refuses what `set_provider` refuses: an id no row names, and a key with nothing in it.
+    #[test]
+    fn set_tool_refuses_an_empty_key_and_an_id_no_row_names() {
+        let scratch = Scratch::new("tool-refusals");
+        let store = Store::from_data_root(&scratch.0);
+        let empty = store
+            .set_tool("linear", "  \n")
+            .expect_err("an empty key is refused")
+            .to_string();
+        assert_eq!(empty, "the key is empty");
+        let unknown = store
+            .set_tool("not-a-tool", "some-key")
+            .expect_err("an id no row names is refused")
+            .to_string();
+        assert!(
+            unknown.contains(&tool_ids().join(", ")),
+            "the refusal does not name the tools this build knows: {unknown}"
+        );
+        assert!(
+            store.load().expect("the store reads").tools.is_empty(),
+            "a refused set stored something"
+        );
+    }
+
+    /// A `[providers]` row whose id names a tool is a file an earlier release wrote: `load` reads it as a tool key
+    /// without refusing, and the next prepare of the file carries `[tools]` instead. An unknown provider id stays
+    /// exactly where it is.
+    #[test]
+    fn a_legacy_provider_row_naming_a_tool_is_read_and_persisted_as_a_tool_key() {
+        let scratch = Scratch::new("tool-legacy");
+        let store = Store::from_data_root(&scratch.0);
+        let path = store.path().to_path_buf();
+        fs::create_dir_all(path.parent().expect("the store has a directory"))
+            .expect("the secrets directory is creatable");
+        fs::write(
+            &path,
+            "[providers]\nlinear = \"lin_api_legacy\"\ngone-provider = \"sk-gone\"\n[sessions]\n",
+        )
+        .expect("the legacy file is writable");
+
+        let secrets = store
+            .load()
+            .expect("a file this build can normalize is not refused");
+        assert_eq!(
+            secrets.tools.get("linear").map(String::as_str),
+            Some("lin_api_legacy"),
+            "the legacy row is not read as a tool key"
+        );
+        assert!(
+            !secrets.providers.contains_key("linear"),
+            "the legacy row is still a provider"
+        );
+        assert_eq!(
+            secrets.providers.get("gone-provider").map(String::as_str),
+            Some("sk-gone"),
+            "an id that is neither a provider nor a tool was moved"
+        );
+
+        assert!(
+            store.normalize().expect("the store writes"),
+            "the file carrying a legacy row was not rewritten"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file is readable"),
+            "[providers]\ngone-provider = \"sk-gone\"\n[tools]\nlinear = \"lin_api_legacy\"\n\
+             [sessions]\n",
+            "the persisted form still carries the row under [providers], or lost the one beside it"
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("the file exists")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "the rewrite left the key file readable by others"
+        );
+        assert!(
+            !store.normalize().expect("the store writes"),
+            "a normalized file was rewritten again"
+        );
+
+        // The boot path prepares the file, so it is the one that migrates a machine's store.
+        fs::write(
+            &path,
+            "[providers]\nlinear = \"lin_api_legacy\"\n[sessions]\n",
+        )
+        .expect("the legacy file is writable");
+        store.ensure_file().expect("the store prepares the file");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file is readable"),
+            "[providers]\n[tools]\nlinear = \"lin_api_legacy\"\n[sessions]\n",
+            "preparing the file did not move the legacy row"
+        );
+    }
+
+    /// A file naming the same id in both tables is one this build never writes; `[tools]` wins, because that is
+    /// the table the key belongs in — in either order the two tables can appear, and the rewrite then leaves one row.
+    #[test]
+    fn the_tools_table_wins_when_a_file_names_one_id_in_both() {
+        let scratch = Scratch::new("tool-both-tables");
+        let store = Store::from_data_root(&scratch.0);
+        let path = store.path().to_path_buf();
+        fs::create_dir_all(path.parent().expect("the store has a directory"))
+            .expect("the secrets directory is creatable");
+        for (order, text) in [
+            (
+                "providers first",
+                "[providers]\nlinear = \"lin_api_old\"\n[tools]\nlinear = \"lin_api_new\"\n[sessions]\n",
+            ),
+            (
+                "tools first",
+                "[tools]\nlinear = \"lin_api_new\"\n[providers]\nlinear = \"lin_api_old\"\n[sessions]\n",
+            ),
+        ] {
+            fs::write(&path, text).expect("the file is writable");
+            assert_eq!(
+                store.tool_key("linear").expect("the store reads"),
+                Some("lin_api_new".to_string()),
+                "{order}: the [providers] row won"
+            );
+            assert!(
+                store.load().expect("the store reads").providers.is_empty(),
+                "{order}: the id is still a provider too"
+            );
+            store.normalize().expect("the store writes");
+            assert_eq!(
+                fs::read_to_string(&path).expect("the file is readable"),
+                "[providers]\n[tools]\nlinear = \"lin_api_new\"\n[sessions]\n",
+                "{order}: the rewrite left two rows for one id, or kept the losing value"
+            );
+        }
+    }
+
+    /// A file with no legacy row is left **byte for byte** alone: this is a migration of one row, not a formatter,
+    /// and a deploy's kept file (or an operator's) must survive a boot unchanged.
+    #[test]
+    fn normalize_leaves_a_file_without_a_legacy_row_alone() {
+        let scratch = Scratch::new("tool-no-legacy");
+        let store = Store::from_data_root(&scratch.0);
+        let path = store.path().to_path_buf();
+        fs::create_dir_all(path.parent().expect("the store has a directory"))
+            .expect("the secrets directory is creatable");
+        let untouched = "[providers]\nanthropic = \"sk-ant-real\"\n\n[sessions]\n";
+        fs::write(&path, untouched).expect("the file is writable");
+        assert!(
+            !store.normalize().expect("the store writes"),
+            "a file with no legacy row was rewritten"
+        );
+        store.ensure_file().expect("the store prepares the file");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file is readable"),
+            untouched,
+            "preparing the file rewrote one whose rows need no moving"
+        );
+
+        // Preparing the file is not the place to judge it: a boot that mounts an unparseable store still starts,
+        // and the proxy's own read is what reports the problem, per request, as it did before the move existed.
+        fs::write(&path, "[not-a-table]\n").expect("the file is writable");
+        store
+            .ensure_file()
+            .expect("an existing file is prepared, not judged");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file is readable"),
+            "[not-a-table]\n",
+            "a file this step cannot parse was rewritten"
+        );
+    }
+
+    /// One spelling of the empty store: what a deploy stages is what `key list` reads, table for table — and it is
+    /// the **previous release's** text exactly, because `[tools]` is written only when it holds a key.
+    ///
+    /// The conditional is pinned in both directions here: an empty store has no `[tools]` heading, and one stored
+    /// tool key is one heading and one row.
+    #[test]
+    fn the_empty_store_is_the_rendering_of_the_empty_secrets() {
+        assert_eq!(empty_text(), render(&Secrets::default()));
+        assert_eq!(
+            empty_text(),
+            "[providers]\n[sessions]\n",
+            "the empty store is not the file the release before the tool table writes"
+        );
+        assert_eq!(
+            parse(&empty_text()).expect("the empty store parses"),
+            Secrets::default()
+        );
+
+        let mut stored = Secrets::default();
+        stored
+            .tools
+            .insert("linear".to_string(), "lin_api_one".to_string());
+        assert_eq!(
+            render(&stored),
+            "[providers]\n[tools]\nlinear = \"lin_api_one\"\n[sessions]\n",
+            "a stored tool key does not render the table it is stored in"
+        );
     }
 }

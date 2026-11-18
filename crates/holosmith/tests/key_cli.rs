@@ -202,6 +202,309 @@ fn an_unknown_provider_is_refused_before_stdin_is_read() {
 }
 
 #[test]
+fn set_linear_stores_a_tool_key_under_tools_in_a_0600_file_and_never_prints_it() {
+    let directory = TempDir::new("tool-set");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let key = "lin_api_this-is-a-test-key";
+
+    let set = holosmith(
+        &["--config", config, "key", "set", "linear"],
+        Some(&format!("{key}\n")),
+    );
+    assert_eq!(set.status.code(), Some(0), "{}", stderr_of(&set));
+    assert_eq!(stdout_of(&set), "stored linear\n");
+    assert!(!stdout_of(&set).contains(key), "set printed the key");
+    assert!(!stderr_of(&set).contains(key), "set logged the key");
+
+    let secrets = directory.path().join("data/secrets");
+    assert_eq!(
+        fs::metadata(&secrets)
+            .expect("the secrets directory exists")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the secrets directory is 0700"
+    );
+    let file = secrets.join("keys.toml");
+    assert_eq!(
+        fs::metadata(&file)
+            .expect("the file exists")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "the key file is 0600"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).expect("the file is readable"),
+        format!("[providers]\n[tools]\nlinear = \"{key}\"\n[sessions]\n"),
+        "the key is stored under [tools] and nowhere else"
+    );
+}
+
+#[test]
+fn list_names_a_tool_distinguishably_and_setting_it_twice_leaves_one_value() {
+    let directory = TempDir::new("tool-list");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let first = "lin_api_first-value";
+    let second = "lin_api_second-value";
+    for key in [first, second] {
+        let set = holosmith(
+            &["--config", config, "key", "set", "linear"],
+            Some(&format!("{key}\n")),
+        );
+        assert_eq!(set.status.code(), Some(0), "{}", stderr_of(&set));
+        assert_eq!(stdout_of(&set), "stored linear\n");
+    }
+
+    let list = holosmith(&["--config", config, "key", "list"], None);
+    assert_eq!(list.status.code(), Some(0), "{}", stderr_of(&list));
+    assert_eq!(
+        stdout_of(&list),
+        "linear (tool)\n",
+        "a tool is listed once, and distinguishably from a provider id"
+    );
+    assert!(
+        !stdout_of(&list).contains(first),
+        "list printed the old key"
+    );
+    assert!(!stdout_of(&list).contains(second), "list printed the key");
+    assert!(!stderr_of(&list).contains(second), "list logged the key");
+
+    let store = holosmith::key::Store::from_data_root(&directory.path().join("data"));
+    assert_eq!(
+        store.tools().expect("the store reads"),
+        vec!["linear"],
+        "setting the same tool twice left two rows"
+    );
+    assert_eq!(
+        store.tool_key("linear").expect("the store reads"),
+        Some(second.to_string()),
+        "the second value did not win"
+    );
+}
+
+#[test]
+fn revoke_is_idempotent_and_the_value_is_gone_after_the_first() {
+    let directory = TempDir::new("tool-revoke");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let key = "lin_api_will-be-revoked";
+    let set = holosmith(
+        &["--config", config, "key", "set", "linear"],
+        Some(&format!("{key}\n")),
+    );
+    assert_eq!(set.status.code(), Some(0), "{}", stderr_of(&set));
+    let file = directory.path().join("data/secrets/keys.toml");
+    assert!(fs::read_to_string(&file).expect("readable").contains(key));
+
+    let first = holosmith(&["--config", config, "key", "revoke", "linear"], None);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr_of(&first));
+    assert_eq!(stdout_of(&first), "revoked linear\n");
+    assert!(
+        !fs::read_to_string(&file).expect("readable").contains(key),
+        "the revoked key is still in the file"
+    );
+
+    let again = holosmith(&["--config", config, "key", "revoke", "linear"], None);
+    assert_eq!(
+        again.status.code(),
+        Some(0),
+        "a second revoke is not an error: {}",
+        stderr_of(&again)
+    );
+    assert_eq!(stderr_of(&again), "", "a second revoke complained");
+    assert_eq!(
+        stdout_of(&again).lines().count(),
+        1,
+        "a second revoke printed {} lines",
+        stdout_of(&again).lines().count()
+    );
+
+    let list = holosmith(&["--config", config, "key", "list"], None);
+    assert_eq!(list.status.code(), Some(0), "{}", stderr_of(&list));
+    assert_eq!(stdout_of(&list), "", "the list is empty after revoke");
+}
+
+#[test]
+fn an_unknown_id_names_both_tables_and_each_command_names_the_other() {
+    let directory = TempDir::new("tool-cross-table");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+
+    let unknown = holosmith(
+        &["--config", config, "key", "set", "not-a-key-id"],
+        Some("sk-x\n"),
+    );
+    assert_eq!(unknown.status.code(), Some(1));
+    let refusal = stderr_of(&unknown);
+    assert!(
+        refusal.contains(&holosmith::key::provider_ids().join(", ")),
+        "the refusal does not name every provider: {refusal}"
+    );
+    assert!(
+        refusal.contains(&holosmith::key::tool_ids().join(", ")),
+        "the refusal does not name every tool: {refusal}"
+    );
+    assert!(
+        refusal.contains("not a provider this build knows")
+            && refusal.contains("not a tool this build knows"),
+        "the refusal does not name both tables: {refusal}"
+    );
+
+    let revoke = holosmith(&["--config", config, "key", "revoke", "anthropic"], None);
+    assert_eq!(revoke.status.code(), Some(1));
+    assert!(
+        stderr_of(&revoke).contains("use `holosmith key remove anthropic`"),
+        "a provider id given to revoke does not name `key remove`: {}",
+        stderr_of(&revoke)
+    );
+
+    let remove = holosmith(&["--config", config, "key", "remove", "linear"], None);
+    assert_eq!(remove.status.code(), Some(1));
+    assert!(
+        stderr_of(&remove).contains("use `holosmith key revoke linear`"),
+        "a tool id given to remove does not name `key revoke`: {}",
+        stderr_of(&remove)
+    );
+
+    // A typo is not the other table's id: `remove` keeps its own answer, which is the one a script reads as "nothing
+    // was stored under that name".
+    let typo = holosmith(&["--config", config, "key", "remove", "not-a-key-id"], None);
+    assert_eq!(typo.status.code(), Some(1));
+    assert_eq!(
+        stderr_of(&typo),
+        "holosmith: key remove: not-a-key-id has no key\n",
+        "a typo'd provider id is no longer `remove`'s own sentence"
+    );
+}
+
+#[test]
+fn a_tool_key_is_never_a_model_provider() {
+    let directory = TempDir::new("tool-not-provider");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let set = holosmith(
+        &["--config", config, "key", "set", "linear"],
+        Some("lin_api_not-a-model-key\n"),
+    );
+    assert_eq!(set.status.code(), Some(0), "{}", stderr_of(&set));
+
+    let store = holosmith::key::Store::from_data_root(&directory.path().join("data"));
+    let secrets = store.load().expect("the store reads");
+    assert!(
+        secrets.providers.is_empty(),
+        "a tool key landed in the provider table: {:?}",
+        secrets.providers
+    );
+    assert!(holosmith::key::provider("linear").is_none());
+    assert!(!holosmith::key::provider_ids().contains(&"linear"));
+    let models = holosmith::key::models(&secrets, "hs-dummy-test");
+    assert!(
+        !models.contains("linear"),
+        "models.json named a tool: {models}"
+    );
+    assert!(!models.contains("lin_api_not-a-model-key"));
+}
+
+/// Rotation is why the key is in the store and read per request: a writer in **another process** (`key set`, twice)
+/// rewrites the file, and the reader a forwarded request uses sees the new value on its next read — no restart, no
+/// cached copy, and nothing else in the secrets directory.
+///
+/// The wire-level proof — two real forwarded requests answered with two different keys — belongs to the proxy that
+/// serves these hosts, which is a later change: the key proxy in this tree routes model providers only, so there is
+/// no request here to send. What this pins is the half that would go wrong silently, a cached copy in the store.
+#[test]
+fn a_tool_key_rotation_is_seen_by_the_next_read_of_the_file() {
+    let directory = TempDir::new("tool-rotation");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let store = holosmith::key::Store::from_data_root(&directory.path().join("data"));
+
+    let first = holosmith(
+        &["--config", config, "key", "set", "linear"],
+        Some("lin_api_before-the-rotation\n"),
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", stderr_of(&first));
+    assert_eq!(stdout_of(&first), "stored linear\n");
+    assert_eq!(
+        store.tool_key("linear").expect("the store reads"),
+        Some("lin_api_before-the-rotation".to_string())
+    );
+    let before = fs::read_to_string(store.path()).expect("the file is readable");
+
+    let second = holosmith(
+        &["--config", config, "key", "set", "linear"],
+        Some("lin_api_after-the-rotation\n"),
+    );
+    assert_eq!(second.status.code(), Some(0), "{}", stderr_of(&second));
+    assert_eq!(stdout_of(&second), "stored linear\n");
+    assert_eq!(
+        store.tool_key("linear").expect("the store reads"),
+        Some("lin_api_after-the-rotation".to_string()),
+        "the second read saw the first key: the store cached it"
+    );
+
+    let after = fs::read_to_string(store.path()).expect("the file is readable");
+    assert_ne!(before, after, "the rotation did not reach the file");
+    assert!(after.contains("lin_api_after-the-rotation"));
+    assert!(
+        !after.contains("lin_api_before-the-rotation"),
+        "the old key is still in the file"
+    );
+    let mut names: Vec<String> = fs::read_dir(directory.path().join("data/secrets"))
+        .expect("the secrets directory is readable")
+        .map(|entry| {
+            entry
+                .expect("the entry is readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["keys.toml"],
+        "a write left a second file in the secrets directory"
+    );
+}
+
+/// The file an earlier release left: a tool key written under `[providers]`, because there was one table. It is
+/// listed as a tool, revoked as one, and the write that removes it leaves the file in this build's shape.
+#[test]
+fn a_legacy_providers_row_is_listed_as_a_tool_and_revoked_as_one() {
+    let directory = TempDir::new("tool-legacy");
+    let config = directory.config();
+    let config = config.to_str().expect("UTF-8");
+    let secrets = directory.path().join("data/secrets");
+    fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
+    let file = secrets.join("keys.toml");
+    fs::write(
+        &file,
+        "[providers]\nlinear = \"lin_api_legacy\"\n[sessions]\n",
+    )
+    .expect("the legacy file is writable");
+
+    let list = holosmith(&["--config", config, "key", "list"], None);
+    assert_eq!(list.status.code(), Some(0), "{}", stderr_of(&list));
+    assert_eq!(stdout_of(&list), "linear (tool)\n");
+    assert!(!stdout_of(&list).contains("lin_api_legacy"));
+
+    let revoke = holosmith(&["--config", config, "key", "revoke", "linear"], None);
+    assert_eq!(revoke.status.code(), Some(0), "{}", stderr_of(&revoke));
+    assert_eq!(stdout_of(&revoke), "revoked linear\n");
+    assert_eq!(
+        fs::read_to_string(&file).expect("the file is readable"),
+        "[providers]\n[sessions]\n",
+        "the rewritten file still carries the legacy row, or a [tools] table with nothing in it"
+    );
+}
+
+#[test]
 fn the_session_models_file_holds_the_dummy_key_and_never_the_real_one() {
     let directory = TempDir::new("models");
     let store = holosmith::key::Store::new(directory.path().join("secrets/keys.toml"));

@@ -64,7 +64,7 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
-    /// Store, list or remove the provider keys the key proxy uses.
+    /// Store, list or forget this machine's model provider keys and tool keys.
     Key {
         #[command(subcommand)]
         action: KeyAction,
@@ -396,23 +396,29 @@ pub enum ContainerAction {
     },
 }
 
-/// The three key subcommands.
+/// The four key subcommands.
 #[derive(Debug, Subcommand)]
 pub enum KeyAction {
-    /// Read one provider's key from stdin and store it, mode 0600.
+    /// Read one provider's or one tool's key from stdin and store it, mode 0600.
     ///
     /// A terminal is asked for the key and its echo is off, so Enter finishes it; a pipe is read to the end, which
-    /// is the form a script and `printf '…' | holosmith key set <provider>` use.
+    /// is the form a script and `printf '…' | holosmith key set <id>` use. A model provider's key is stored under
+    /// `[providers]`, where the key proxy swaps it in; a tool's key under `[tools]`, where `key revoke` owns it.
     Set {
-        /// The provider id (`opencode-go`, `anthropic`, …).
-        provider: String,
+        /// The provider id (`opencode-go`, `anthropic`, …) or the tool id (`linear`).
+        id: String,
     },
-    /// Print the providers that have a key. Never the values.
+    /// Print the providers and tools that have a key. Never the values.
     List,
-    /// Remove one provider's key.
+    /// Remove one model provider's key; a tool's is `key revoke`.
     Remove {
         /// The provider id (`opencode-go`, `anthropic`, …).
         provider: String,
+    },
+    /// Forget one tool's key. A tool with no key is not an error, so a second revoke exits 0.
+    Revoke {
+        /// The tool id (`linear`).
+        tool: String,
     },
 }
 

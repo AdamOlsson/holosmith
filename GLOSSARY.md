@@ -229,9 +229,10 @@ _Avoid_: Project root, workspace, repos dir
 
 **Secrets file**:
 The file at `<data>/secrets/keys.toml`, mode 0600, holding the provider API keys that the key proxy uses
-(`[providers]`) and the per-session dummy keys it validates (`[sessions]`). The config loader never reads it;
-`hs_key` is the only container that mounts anything of it, and what it mounts is the **directory**, because the
-file is written by rename and a file mount would pin the old inode (ADR-0050).
+(`[providers]`), the **tool keys** this machine holds (`[tools]`), and the per-session dummy keys it validates
+(`[sessions]`). The config loader never reads it; `hs_key` is the only container that mounts anything of it, and what
+it mounts is the **directory**, because the file is written by rename and a file mount would pin the old inode
+(ADR-0050).
 _Avoid_: Keys config, credentials file
 
 **VAPID keys**:
@@ -877,6 +878,17 @@ The per-session throwaway credential the agent holds instead of a real key. It i
 outside the key proxy, which is the point: the real key never enters a session mount, an environment variable or
 the agent's directory.
 _Avoid_: Session key, placeholder, fake token
+
+**Tool key**:
+A real credential for one tool's host rather than for a model provider — one row of `key::TOOLS` per host, `linear`
+at `mcp.linear.app` today — stored in the **secrets file** under `[tools]`, set by `key set <id>` and forgotten by
+`key revoke <id>`. A tool is not a provider: it has no catalog row, it is never the machine's default, and nothing in
+`models.json` names it. Its key lives in the store and not in a session's own `pi-home` because a file inside a
+session mount is a file the agent can read; **but nothing spends it yet**: a tool with no proxy in this build is a
+stored key, and the proxy that swaps the real value in — with the dummy the session would carry, as it does for a
+model — is a later change (ADR-0098). The store is read from disk per request, so `key set` will rotate the key with
+no restart.
+_Avoid_: MCP key, integration key, tool credential, provider
 
 **Egress proxy**:
 A **mode of this binary** (`holosmith proxy egress`), run as the `hs_egress` container on the `egress` network

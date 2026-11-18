@@ -8,6 +8,9 @@ ones a later reader would otherwise undo.
 
 ## The store is one file, and the dummy keys live in it too
 
+**Amended by ADR-0098:** there is a third table, `[tools]`, for a credential the key proxy does not route; the parser
+still accepts only the tables this file writes, and `[tools]` is written only while it holds a key.
+
 `<data>/secrets/keys.toml` (mode 0600) is the only file a real key is written to. It has two tables:
 
 ```toml
