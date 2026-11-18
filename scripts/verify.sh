@@ -12570,12 +12570,12 @@ case_server_deploy() {
   grep -q '^deploy: 6 steps: ' "$WORK/$name.online.out" ||
     fail "$name/online/summary" "no tally line: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
-  # The unit's bytes are the deliverable: `ExecStart` names this binary and the config the run installed, the file is
-  # in the user manager's directory beside that config (ADR-0088), and no child was run
-  # (`Tools` has no `systemctl` field at all, so this is a file's content and a log's silence).
+  # The unit's bytes are the deliverable: `ExecStart` names the release this run planted inside the install tree and
+  # the config the run installed, the file is in the user manager's directory beside that config (ADR-0088), and no
+  # child was run (`Tools` has no `systemctl` field at all, so this is a file's content and a log's silence).
   unit="$(unit_for "$WORK/config-deploy-online.toml")"
-  grep -q "^ExecStart=.* serve --config $WORK/config-deploy-online.toml$" "$unit" ||
-    fail "$name/online/unit" "the unit does not run this binary against the config the run installed: $(cat "$unit")"
+  grep -q "^ExecStart=$root/install/current/holosmith serve --config $WORK/config-deploy-online.toml$" "$unit" ||
+    fail "$name/online/unit" "the unit does not run the planted release against the config the run installed: $(cat "$unit")"
   assertions=$((assertions + 1))
   grep -q '^WantedBy=default.target$' "$unit" ||
     fail "$name/online/unit/target" "the unit is not enabled by the user manager: $(cat "$unit")"
@@ -13027,7 +13027,7 @@ case_install() {
   local name=case_install root="$repo_root/target/verify-install-$$"
   local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
   local passwd="$root/passwd" shims="$root/bin" logs="$root/logs"
-  local control preview status unit fake_uid log
+  local control preview status unit fake_uid log tag
   # `holder_pid` is assigned up front on purpose: a `local` with no value is **unset** in bash, and the EXIT trap that
   # runs after a `fail` in this function still sees its locals — so an unset one turns any failure into
   # `line N: holder_pid: unbound variable` and buries the sentence that mattered (`case_deploy_ssh` says it in full).
@@ -13182,18 +13182,32 @@ SHIM
   check "$name/first/loginctl" \
     "$(printf '%s\n' 'loginctl show-user operator --property=Linger --value' 'loginctl enable-linger')" \
     "$(cat "$logs/loginctl.log")"
-  # The unit is the user manager's file beside the config, 0644, enabled by `default.target`, and it names the
-  # binary that wrote it and the config this run installed — and it carries no `User=`/`Group=` or a mount directive,
-  # because a user unit runs as its owner and any one of them would make systemd enable `PrivateUsers=` (ADR-0088 D3).
+  # The unit is the user manager's file beside the config, 0644, enabled by `default.target`, and it names **the
+  # release this run planted inside the install tree** rather than the file it was started from — which is what makes
+  # where the artifact was downloaded stop mattering — and the config this run installed. It carries no
+  # `User=`/`Group=` or a mount directive, because a user unit runs as its owner and any one of them would make
+  # systemd enable `PrivateUsers=` (ADR-0088 D3).
   unit="$(unit_for "$config")"
   [ -f "$unit" ] || fail "$name/unit" "the run wrote no unit at $unit: $(cat "$root/first.out")"
   assertions=$((assertions + 1))
   check "$name/unit/mode" 644 "$(stat -c '%a' "$unit")"
-  for target in 'WantedBy=default.target' "ExecStartPre=$artifact doctor --quick" \
-    "ExecStart=$artifact serve --config $config"; do
+  for target in 'WantedBy=default.target' "ExecStartPre=$tree/current/holosmith doctor --quick" \
+    "ExecStart=$tree/current/holosmith serve --config $config"; do
     grep -qxF "$target" "$unit" || fail "$name/unit/line" "the unit does not carry '$target': $(cat "$unit")"
     assertions=$((assertions + 1))
   done
+  # And the tree behind that path: `current` is a relative link to `releases/<the artifact's own tag>`, the release
+  # holds the artifact's bytes, and its digest file is the digest `sha256sum -c` checks (ADR-0094).
+  tag="$("$artifact" version | sed -n 's/^git_tag //p')"
+  [ -n "$tag" ] || fail "$name/tree/tag" "the artifact reports no git tag, so no release could be seeded"
+  check "$name/tree/current" "releases/$tag" "$(readlink "$tree/current" 2>/dev/null)"
+  cmp -s "$artifact" "$tree/releases/$tag/holosmith" ||
+    fail "$name/tree/release" "the planted release is not the artifact's bytes"
+  assertions=$((assertions + 1))
+  printf '%s  holosmith\n' "$(sha256sum "$artifact" | cut -d' ' -f1)" >"$root/digest.expected"
+  cmp -s "$root/digest.expected" "$tree/releases/$tag/holosmith.sha256" ||
+    fail "$name/tree/digest" "the release's digest file is not the artifact's digest"
+  assertions=$((assertions + 1))
   for absent in '^User=' '^Group=' '^PrivateTmp=' '^ProtectSystem=' '^ProtectHome=' '^ReadWritePaths=' '^PrivateUsers='; do
     if grep -q "$absent" "$unit"; then
       fail "$name/unit/absent" "the unit carries '$absent', which a user unit cannot have: $(cat "$unit")"
@@ -13367,13 +13381,16 @@ SHIM
   status=0
   terse_home install --config "$config" --root "$tree" >"$root/out" 2>"$root/err" || status=$?
   check "$name/exit" 0 "$status"
-  # The one line a pipe cannot know: the port the kernel gave this case.
+  # The two lines a pipe cannot know: the port the kernel gave this case, and this case's own home, which is the
+  # nearest directory that exists to a data root that does not — the clause a `satisfied` preflight line carries about
+  # which filesystem was measured, and about the port the fixture's own responder holds.
   cat >"$expected" <<'REPORT'
 1. preflight ✓
+    there is no data root yet, so the filesystem that will hold it (@HOME@) is what was measured; the control port is held — a re-run on a serving machine is not a failure here
 2. files ✓ (7 actions)
 3. images –
 4. proxies –
-5. service ✓ (1 action)
+5. service ✓ (3 actions)
     still yours to run: systemctl --user daemon-reload; systemctl --user enable --now holosmith.service
 6. health ✓
 unit ✓
@@ -13382,7 +13399,8 @@ health ✓
 url: http://localhost:@PORT@
 next: holosmith hub host add <name> <url>
 REPORT
-  sed "s/@PORT@/$control/" "$expected" >"$expected.1" && mv "$expected.1" "$expected"
+  sed -e "s/@PORT@/$control/" -e "s|@HOME@|$home|" "$expected" >"$expected.1" &&
+    mv "$expected.1" "$expected"
   if ! diff -u "$expected" "$root/out" >"$root/diff"; then
     fail "$name/report" "the terse report is not the shape an operator reads: $(cat "$root/diff")"
   fi
@@ -13747,7 +13765,7 @@ case_server_service() {
   check "$name/unit/mode" 644 "$(stat -c '%a' "$unit")"
   for target in 'UMask=0077' 'NoNewPrivileges=yes' 'LockPersonality=yes' 'RestrictSUIDSGID=yes' \
     'RestrictNamespaces=yes' 'RestrictRealtime=yes' 'SystemCallFilter=@system-service' \
-    'Restart=on-failure' "ExecStartPre=$artifact doctor --quick" 'WantedBy=default.target'; do
+    'Restart=on-failure' "ExecStartPre=$root/install/current/holosmith doctor --quick" 'WantedBy=default.target'; do
     grep -qxF "$target" "$unit" || fail "$name/unit/line" "the unit does not carry '$target': $(cat "$unit")"
     assertions=$((assertions + 1))
   done

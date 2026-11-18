@@ -131,6 +131,11 @@ the link does not resolve, so step 5 renders the unit for the binary this run is
 plain path — and a refusal at step 1 would make that repair unreachable. The line gains one clause naming it
 (`LINK_NOT_LIVE`). `serve` is unaffected: it refuses on `preflight::check`'s three, never on this list.
 
+**Amended by ADR-0094:** the repair is no longer a plain path. Step 5 plants the running binary as a release and
+re-points `current` at it, so the machine boots again *through* the link — which also means the third arm above ("the
+machine that has not promoted") is now the machine deployed by an older release or one whose seed fell back, not the
+machine deployed by this one.
+
 `release::Release::live` is the reader for "does it resolve", so there is no second spelling of what is live: the
 finding asks `live()` and `release::unit_executable` (the one `ExecStart=` reader, which a promotion already uses to
 seed its first release) and nothing else.
@@ -173,3 +178,6 @@ through `current`" is the unit's `ExecStart=` plus the stand-in's argv — never
 machine whose `current` was broken, the unit names the deployed binary and the tree is still broken; the next promotion
 seeds a release from that binary and re-points the link. A `holosmith release --repair` is the verb that would do it in
 place, and it is not this story's.
+
+**Amended by ADR-0094:** a deploy re-points the link itself. Step 5 plants the running binary as a release and switches
+`current` to it, so the verb this paragraph asks for is `server deploy` and the tree is no longer left broken.

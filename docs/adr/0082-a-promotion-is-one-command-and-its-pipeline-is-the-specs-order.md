@@ -107,6 +107,12 @@ actually starts — the only fact that says what a machine is running, and the r
 - **no unit at all**: refused. A promotion restarts a service; a machine that has none is a machine that has not been
   deployed.
 
+**Amended by ADR-0094:** a machine that has never promoted no longer writes the unit it wrote before. Step 5 plants
+the binary it is running as a release (`releases/<its own tag>/`) and renders `ExecStart` through `current` for that
+too, so a fresh deploy and a promotion leave one shape and the path the binary was downloaded to stops being what the
+unit runs. The paragraph above stands for the *preferring* half — a live tree is still read and never reseeded — and
+this one adds the half it was missing.
+
 The promotion then renders the unit through `deploy::unit_text` with `ExecStart=<install>/opt/holosmith/current/holosmith`
 and `ExecStartPre=` the same binary, and writes it only when the bytes differ. `deploy`'s step 5 now prefers that same
 path (`Release::live`) when `current` resolves, so a later `server deploy` neither undoes a promotion nor rewrites a
@@ -246,6 +252,8 @@ second writer of the state machine's rows for one ending, and the spec says "on 
   about `server deploy`'s behaviour changed: it passes its own `VersionInfo::current()`.
 - `deploy`'s step 5 renders `ExecStart` through `current` when a release tree resolves. A machine that has never
   promoted writes exactly the unit it wrote before.
+  **Amended by ADR-0094:** that last sentence is no longer true — a machine that has never promoted gets a release
+  planted out of the binary this run is, and its unit runs through `current` too.
 - `reconcile` brings back one more kind of row. `serve`'s boot on a machine that has drained resumes what the drain
   stopped, which is what item 10 step 6 asked for and what the drain's reason word was for.
 - One follow-up, recorded rather than fixed: `ExecStartPre=doctor --quick` refuses a newer database, so a rollback

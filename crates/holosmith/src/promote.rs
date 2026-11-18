@@ -693,7 +693,8 @@ fn previous_release(release: &Release, root: &Root) -> Result<Previous, String> 
     let bytes = std::fs::read(&exe).map_err(|error| {
         format!(
             "the unit's `ExecStart` names {}, which could not be read ({error}): that binary is the release a \
-             rollback goes back to",
+             rollback goes back to, and `holosmith server deploy` is the command that writes a unit naming a release \
+             this machine holds",
             exe.display()
         )
     })?;

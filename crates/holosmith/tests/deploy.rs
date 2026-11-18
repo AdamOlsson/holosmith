@@ -2682,17 +2682,21 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     let tools = real_tools(&dir);
     let exe = std::env::current_exe().expect("this test's own path is readable");
     // The spec's block, byte for byte: a rendering that matches itself would prove nothing about the file an
-    // operator's systemd reads.
-    let expected = format!(
-        "[Unit]\nDescription=Holosmith server\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n\
-         UMask=0077\nNoNewPrivileges=yes\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\
-         RestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallFilter=@system-service\n\
-         ExecStartPre={exe} doctor --quick\nExecStart={exe} serve --config {config}\n\
-         Restart=on-failure\nRestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s\n\n\
-         [Install]\nWantedBy=default.target\n",
-        exe = exe.display(),
-        config = root.config_file().display(),
-    );
+    // operator's systemd reads. The program is the only thing that differs between the two renderings below — the
+    // binary this test is running, and the release the deploy plants from it.
+    let block = |exe: &Path| {
+        format!(
+            "[Unit]\nDescription=Holosmith server\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n\
+             UMask=0077\nNoNewPrivileges=yes\nLockPersonality=yes\nRestrictSUIDSGID=yes\n\
+             RestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallFilter=@system-service\n\
+             ExecStartPre={exe} doctor --quick\nExecStart={exe} serve --config {config}\n\
+             Restart=on-failure\nRestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s\n\n\
+             [Install]\nWantedBy=default.target\n",
+            exe = exe.display(),
+            config = root.config_file().display(),
+        )
+    };
+    let expected = block(&exe);
     assert_eq!(
         deploy::unit_text(&exe, Role::Server, &root),
         expected,
@@ -2703,10 +2707,13 @@ fn the_unit_is_the_bytes_this_binary_renders_and_the_machine_reads_enabled() {
     let step = line(&first, DeployStep::Service);
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
     let unit = root.unit();
+    // The file is the rendering for the release the deploy planted from this binary, not for the path it was started
+    // from: a unit that named the latter would be a machine that stops booting the moment the download is gone.
+    let planted = block(&root.current().join("holosmith"));
     assert_eq!(
         std::fs::read_to_string(&unit).expect("the unit is readable"),
-        expected,
-        "the unit is not the bytes this binary renders"
+        planted,
+        "the unit does not run the release the deploy planted"
     );
     assert_eq!(mode(&unit), 0o644, "the unit is not 0644");
     for line in [
@@ -2944,8 +2951,9 @@ fn a_release_tree_makes_the_unit_run_through_current() {
     );
 
     // A release tree whose `current` names a directory with no binary in it is *not* a live release (`Release::live`
-    // answers `None`), and the unit must fall back to the binary this run is — a unit pointing through a `current`
-    // that cannot start would be an install that never boots again.
+    // answers `None`), so step 5 repairs it: it plants this binary as a release of its own and points `current` at
+    // that — a unit pointing through a `current` that cannot start would be an install that never boots again, and a
+    // unit naming whatever path this run was started from would be the same break one download later.
     std::fs::remove_file(release.binary("v0.1.0")).expect("the release binary is removable");
     let broken = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
     assert!(
@@ -2964,7 +2972,7 @@ fn a_release_tree_makes_the_unit_run_through_current() {
     assert!(
         line(&broken, DeployStep::Preflight)
             .sentence
-            .contains("step 5 rewrites"),
+            .contains("step 5 plants"),
         "the preflight line does not say what repairs the tree: {}",
         line(&broken, DeployStep::Preflight).sentence
     );
@@ -2974,14 +2982,384 @@ fn a_release_tree_makes_the_unit_run_through_current() {
         "{}",
         line(&broken, DeployStep::Service).sentence
     );
+    // The repair is the seed: `releases/<this binary's own tag>/holosmith` holds the running bytes, and `current` — a
+    // relative link — names it, so the unit's `ExecStart` resolves again.
+    let tag = holosmith::version::VersionInfo::current().git_tag;
+    assert!(
+        release.binary(&tag).is_file(),
+        "the broken tree was not repaired with a release named after this binary ({tag})"
+    );
+    assert_eq!(
+        release.link(),
+        Some(PathBuf::from(format!("releases/{tag}"))),
+        "`current` does not point at the release this run planted"
+    );
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
+    let live = format!("{}/holosmith", root.current().display());
+    assert!(
+        unit.contains(&format!("ExecStart={live} serve")),
+        "the repaired unit does not run through `current`:\n{unit}"
+    );
+    assert!(
+        unit.contains(&format!("ExecStartPre={live} doctor --quick")),
+        "the repaired unit's pre-line does not run the release it starts:\n{unit}"
+    );
+}
+
+// ---- a tree with no release in it is planted from the binary this run is -----------------------------
+
+/// A fresh install leaves the unit running a binary **inside the install tree**, not the file it was started from.
+///
+/// The release directory is named after this binary's own git tag and holds its exact bytes and their digest,
+/// `current` is a **relative** link to that directory, and the unit names `current/holosmith` — which is what makes
+/// the path the download landed in stop mattering. The second run finds the tree live and rewrites nothing, because
+/// the same rule that plants it is the one that keeps a later `deploy` from undoing a promotion.
+#[test]
+fn a_fresh_tree_is_seeded_with_the_binary_this_run_is() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-seed-fresh");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    assert_eq!(
+        line(&report, DeployStep::Service).word,
+        Word::Changed,
+        "{}",
+        line(&report, DeployStep::Service).sentence
+    );
+
+    let exe = std::env::current_exe().expect("this test's own path is readable");
+    let running = std::fs::read(&exe).expect("this test's own bytes are readable");
+    let tag = holosmith::version::VersionInfo::current().git_tag;
+    let release = holosmith::release::Release::of(&root);
+    let planted = release.binary(&tag);
+    assert_eq!(
+        std::fs::read(&planted).expect("the planted release is readable"),
+        running,
+        "the planted release is not the bytes this run is running"
+    );
+    assert_eq!(
+        std::fs::read_to_string(release.dir_of(&tag).join(holosmith::release::DIGEST))
+            .expect("the planted digest is readable"),
+        format!(
+            "{}  holosmith\n",
+            images::digest(&exe).expect("the running binary is readable")
+        ),
+        "the release's digest file is not this binary's digest"
+    );
+    // Relative, so the tree stays movable — and it is what the unit resolves at every (re)start.
+    assert_eq!(
+        release.link(),
+        Some(PathBuf::from(format!("releases/{tag}"))),
+        "`current` is not a relative link to the release this run planted"
+    );
+    let live = root.current().join("holosmith");
     let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
-        !unit.contains("current/holosmith"),
-        "the unit points through a `current` with no binary behind it:\n{unit}"
+        unit.contains(&format!("ExecStart={} serve", live.display())),
+        "the unit does not run the release the deploy planted:\n{unit}"
     );
-    let exe = std::env::current_exe().expect("the test binary's path is readable");
+    assert!(
+        unit.contains(&format!("ExecStartPre={} doctor --quick", live.display())),
+        "the unit's pre-line does not run the release it starts:\n{unit}"
+    );
+
+    // The second run: the tree is live, so step 5 is a read over the same bytes — every artefact the first run wrote
+    // is untouched, down to the planted binary's mtime.
+    let unit1 = std::fs::read(root.unit()).expect("the unit is readable");
+    let planted_at = std::fs::metadata(&planted)
+        .and_then(|meta| meta.modified())
+        .expect("the planted release's mtime reads");
+    let again = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !again.failed(),
+        "the second hub run failed:\n{}",
+        again.render()
+    );
+    assert_eq!(
+        line(&again, DeployStep::Service).word,
+        Word::Satisfied,
+        "a deploy over a tree it planted itself rewrote the unit: {}",
+        line(&again, DeployStep::Service).sentence
+    );
+    assert_eq!(
+        release.history(),
+        vec![tag.clone()],
+        "the second run planted a second release"
+    );
+    assert_eq!(
+        std::fs::metadata(&planted)
+            .and_then(|meta| meta.modified())
+            .expect("the planted release's mtime reads"),
+        planted_at,
+        "the second run rewrote the release's binary"
+    );
+    assert_eq!(
+        std::fs::read(root.unit()).expect("the unit is readable"),
+        unit1,
+        "the second run rewrote the unit"
+    );
+
+    // The plan counts what it would do. `current` removed with the release intact is the state a `rm current`
+    // hand-repair leaves: the tree still holds this binary and the digest that names it, so the only write is the
+    // switch — a `Release` action there would claim a rewrite of two files that already say what they should.
+    std::fs::remove_file(root.current()).expect("the link is removable");
+    let relinked = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !relinked.failed(),
+        "the hub run over a tree with no `current` failed:\n{}",
+        relinked.render()
+    );
+    let step = line(&relinked, DeployStep::Service);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    assert!(
+        step.sentence.starts_with("1 action; ") && !step.sentence.contains("from this binary"),
+        "the plan claims a release write the run would not perform: {}",
+        step.sentence
+    );
+    assert_eq!(
+        release.link(),
+        Some(PathBuf::from(format!("releases/{tag}"))),
+        "the switch did not put `current` back"
+    );
+
+    // A `current` the tree cannot explain is **taken over**, and the line says which target it replaced: a link that
+    // moved with no word is the one thing a `(1 action)` cannot show, and a promotion refuses this same state rather
+    // than guessing what the previous release was.
+    std::fs::remove_file(root.current()).expect("the link is removable");
+    std::os::unix::fs::symlink("/somewhere/else", root.current())
+        .expect("a link to another path is creatable");
+    let taken_over = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !taken_over.failed(),
+        "the hub run over an unexplained `current` failed:\n{}",
+        taken_over.render()
+    );
+    let step = line(&taken_over, DeployStep::Service);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    assert!(
+        step.sentence.contains("/somewhere/else")
+            && step.sentence.contains("not a release of this tree"),
+        "the line does not say which link it replaced: {}",
+        step.sentence
+    );
+    assert_eq!(
+        release.link(),
+        Some(PathBuf::from(format!("releases/{tag}"))),
+        "the takeover did not point `current` at this run's release"
+    );
+}
+
+// ---- what stops the seed, and what the line says about it -------------------------------------------
+
+/// The `placement` arm: a `releases/<this binary's tag>/holosmith` that already holds **different** bytes cannot be
+/// planted, so step 5 falls back to the binary this run is running — one action, the unit, and the refusal in the
+/// sentence.
+///
+/// This is the arm ADR-0094 D4 promises costs the seed and not the install, and the one a machine trips when a tree
+/// has been seeded by a build whose bytes the tag does not describe. The release is left as it was found, because one
+/// directory holding two binaries is the ambiguity a rollback cannot resolve (ADR-0082 D4).
+#[test]
+fn a_release_holding_another_binary_falls_back_to_this_run() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-seed-refused");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    // Another binary under this run's own tag, before the run: the one state the tree refuses to overwrite.
+    let tag = holosmith::version::VersionInfo::current().git_tag;
+    let release = holosmith::release::Release::of(&root);
+    let other = b"#!/bin/sh\nexit 1\n";
+    let placeholder = dir.file("other-holosmith");
+    std::fs::write(&placeholder, other).expect("the fixture binary is writable");
+    let other_digest = images::digest(&placeholder).expect("the fixture binary is readable");
+    release
+        .write(&tag, other, &other_digest)
+        .expect("a release is writable");
+
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    let step = line(&report, DeployStep::Service);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    assert!(
+        step.sentence.starts_with("1 action; "),
+        "the step planned more than the unit's own write: {}",
+        step.sentence
+    );
+    assert!(
+        step.sentence.contains("no release was planted")
+            && step.sentence.contains("already holds a different binary"),
+        "the line does not say why the tree was not seeded: {}",
+        step.sentence
+    );
+    // The refused release is untouched, no `current` was made for a release the run did not write, and the unit names
+    // the binary this run is running — which is the whole point of falling back rather than failing.
+    assert_eq!(
+        std::fs::read(release.binary(&tag)).expect("the release is readable"),
+        other,
+        "the refused release was rewritten"
+    );
+    assert_eq!(
+        release.link(),
+        None,
+        "the run pointed `current` at a release it refused to write"
+    );
+    let exe = std::env::current_exe().expect("this test's own path is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
     assert!(
         unit.contains(&format!("ExecStart={} serve", exe.display())),
-        "the unit does not fall back to the deployed binary:\n{unit}"
+        "the unit does not name the binary this run is running:\n{unit}"
+    );
+    assert!(
+        unit.contains(&format!("ExecStartPre={} doctor --quick", exe.display())),
+        "the unit's pre-line does not run the binary this run is running:\n{unit}"
+    );
+}
+
+/// A live release holding **different** bytes is left alone — and the `satisfied` line an operator reads says so:
+/// both digests, and the one command that does replace a live release.
+///
+/// `server deploy` after a `cargo build` is the case: the unit keeps naming the release that is live, because that is
+/// what keeps a deploy from undoing a promotion. The clause has to survive into the **default** rendering, or the
+/// operator who ran the quick start's command is told `5. service ✓` and nothing else.
+#[test]
+fn a_live_release_that_is_not_this_run_is_named_on_the_line() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-live-remark");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    // A live release that is not this binary: what a promotion of another build leaves behind.
+    let release = holosmith::release::Release::of(&root);
+    std::fs::create_dir_all(release.releases()).expect("the releases directory is creatable");
+    let other = b"#!/bin/sh\nexit 0\n";
+    let placeholder = dir.file("v0.1.0-holosmith");
+    std::fs::write(&placeholder, other).expect("the fixture binary is writable");
+    let live_digest = images::digest(&placeholder).expect("the fixture binary is readable");
+    release
+        .write("v0.1.0", other, &live_digest)
+        .expect("a release is writable");
+    release.switch("v0.1.0").expect("the release is live");
+
+    let first = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(!first.failed(), "the hub run failed:\n{}", first.render());
+    assert_eq!(
+        line(&first, DeployStep::Service).word,
+        Word::Changed,
+        "{}",
+        line(&first, DeployStep::Service).sentence
+    );
+
+    // The second run finds the unit it wrote and the release it did not touch: `satisfied`, with the clause.
+    let again = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(
+        !again.failed(),
+        "the second hub run failed:\n{}",
+        again.render()
+    );
+    let step = line(&again, DeployStep::Service);
+    assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
+    let exe = std::env::current_exe().expect("this test's own path is readable");
+    let own = images::digest(&exe).expect("this test's own bytes are readable");
+    assert!(
+        step.sentence.contains(&own[..12]) && step.sentence.contains(&live_digest[..12]),
+        "the satisfied line does not name both binaries: {}",
+        step.sentence
+    );
+    assert!(
+        step.sentence.contains("holosmith upgrade"),
+        "the satisfied line does not name what does replace a live release: {}",
+        step.sentence
+    );
+    // And the clause is in the report an operator actually reads, not only in `--verbose`.
+    assert!(
+        again
+            .render()
+            .contains("    this run's binary is not the live release's"),
+        "the default report dropped the clause: {}",
+        again.render()
+    );
+    // The tree is as it was: one release, still live, still those bytes.
+    assert_eq!(release.history(), vec!["v0.1.0".to_string()]);
+    assert_eq!(
+        std::fs::read(release.binary("v0.1.0")).expect("the release is readable"),
+        other,
+        "the deploy rewrote a live release"
+    );
+}
+
+/// The **write** arm: a `current` that is a plain directory — the state ADR-0084's table names — stops the switch, and
+/// the run falls back once rather than failing step 5 with no unit at all.
+///
+/// No read can see this one: `Release::link` answers `None` for anything that is not a symlink, so the seed looks
+/// fresh and the failure arrives at `rename(2)`. The unit still lands, naming the binary this run is running, which is
+/// what the deploy wrote before it seeded anything — and the entry the operator made is not deleted to make room.
+#[test]
+fn a_current_that_is_a_directory_still_leaves_a_unit() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-seed-unwritable");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.role = Role::Hub;
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let tools = real_tools(&dir);
+    let machine = Fake::new();
+
+    // `current` as a directory holding something: a `rename` onto it fails, which is the one failure only the write
+    // can find.
+    std::fs::create_dir_all(root.current()).expect("a plain directory is creatable");
+    std::fs::write(root.current().join("note"), "the operator's own entry\n")
+        .expect("the entry is writable");
+
+    let report = deploy::run_as(&deployed, &root, &tools, &machine, false, Kind::Hub);
+    assert!(!report.failed(), "the hub run failed:\n{}", report.render());
+    let step = line(&report, DeployStep::Service);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    assert!(
+        step.sentence.starts_with("1 action; "),
+        "the failed switch stayed in the plan: {}",
+        step.sentence
+    );
+    assert!(
+        step.sentence.contains("no release was planted")
+            && step.sentence.contains("could not be replaced"),
+        "the line does not carry the write's own reason: {}",
+        step.sentence
+    );
+    let exe = std::env::current_exe().expect("this test's own path is readable");
+    let unit = std::fs::read_to_string(root.unit()).expect("the unit is readable");
+    assert!(
+        unit.contains(&format!("ExecStart={} serve", exe.display())),
+        "the fallback did not write a unit naming this run:\n{unit}"
+    );
+    assert!(
+        root.current().is_dir(),
+        "the run replaced an entry it did not understand"
     );
 }

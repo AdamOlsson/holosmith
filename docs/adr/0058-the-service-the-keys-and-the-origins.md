@@ -132,6 +132,11 @@ copies the artifact to `/usr/local/bin/holosmith` and runs the deploy from there
 because both commands' default is `/etc/holosmith/config.toml` and that is the file step 2 wrote at the path the
 default names: a flag would be a second spelling of one default.
 
+**Amended by ADR-0094:** the premise's first clause no longer holds — the deploy plants the binary it is running as
+`releases/<tag>/` inside the install tree and renders both lines through `current/holosmith`. The decision survives
+untouched and is what makes that safe: a path, never a bare name, and the fallback arms still name
+`std::env::current_exe()` rather than `holosmith`.
+
 `satisfied` is the bytes **and** the machine. The file must equal the rendering, and on a privileged install
 `systemctl is-enabled holosmith.service` must exit 0 — one word and one exit code, the question "would a boot start
 this?", which is why it is the comparison rather than a parse of some other command's prose. The apply is `install
