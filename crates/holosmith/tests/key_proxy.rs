@@ -1,8 +1,8 @@
-//! The key proxy's listener and dummy-key check.
+//! The two key-swapping proxies' listeners and their dummy-key check.
 //!
-//! The forwarding half is a real TLS connection to a provider and is the verification; what this file
-//! proves without the internet is the part that must never be wrong: a request with no valid dummy never
-//! reaches a provider, a known provider with no stored key answers 503, and the route parser cannot be told a
+//! The forwarding half is a real TLS connection to a provider or a tool's host, and is the verification; what this
+//! file proves without the internet is the part that must never be wrong: a request with no valid dummy never
+//! reaches a host, a known provider or tool with no stored key answers 503, and neither route parser can be told a
 //! host.
 
 use std::io::{Read, Write};
@@ -18,6 +18,7 @@ use holosmith::deleter::Deleter;
 use holosmith::events::StreamRegistry;
 use holosmith::key::{KEY_PROXY_ALIAS, KEY_PROXY_PORT, Store};
 use holosmith::keyproxy;
+use holosmith::mcpproxy;
 use holosmith::runtime::Backend;
 use holosmith::sessions::{Session, Status};
 use holosmith::worktree::Retained;
@@ -198,4 +199,121 @@ async fn the_delete_flow_revokes_the_sessions_dummy_key() {
 fn the_names_are_the_alias_and_the_port_the_models_file_uses() {
     assert_eq!(KEY_PROXY_ALIAS, "key-proxy");
     assert_eq!(KEY_PROXY_PORT, 8080);
+    assert_eq!(mcpproxy::MCP_PROXY_ALIAS, "mcp-proxy");
+    assert_eq!(mcpproxy::MCP_PROXY_PORT, 8090);
+    assert_ne!(
+        mcpproxy::MCP_PROXY_ALIAS,
+        KEY_PROXY_ALIAS,
+        "one alias for two containers would be one route to two different keys"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mcp_proxy_answers_a_request_with_no_dummy_before_it_is_forwarded() {
+    // An MCP request is authenticated by the session's dummy, exactly as a model call is: the session network is the
+    // first half of "only sessions", and this is the second. Nothing is forwarded, so no key is spent and no host is
+    // contacted.
+    let directory = TempDir::new("mcp-no-key");
+    let store = Arc::new(Store::new(directory.path.join("keys.toml")));
+    store
+        .set_tool("linear", "lin_api_the_tool_key")
+        .expect("a tool key is storable");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("the bound address");
+    let serve = tokio::spawn(mcpproxy::serve(listener, Arc::clone(&store)));
+    waiting(address);
+    let response = exchange(
+        address,
+        "POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Length: 2\r\n\r\n{}",
+    );
+    assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+    assert!(response.contains("dummy key"), "{response}");
+    serve.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_dummy_with_no_stored_tool_key_names_the_command_that_stores_one() {
+    let directory = TempDir::new("mcp-no-tool");
+    let store = Arc::new(Store::new(directory.path.join("keys.toml")));
+    let dummy = store.dummy_for("0123456789abcdef").expect("a dummy");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("the bound address");
+    let serve = tokio::spawn(mcpproxy::serve(listener, Arc::clone(&store)));
+    waiting(address);
+    for target in ["/linear/mcp", "/linear/mcp/readonly"] {
+        let response = exchange(
+            address,
+            &format!(
+                "POST {target} HTTP/1.1\r\nHost: mcp-proxy:8090\r\nAuthorization: Bearer {dummy}\r\n\
+                 Content-Length: 2\r\n\r\n{{}}"
+            ),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 503 "),
+            "{target}: {response}"
+        );
+        assert!(response.contains("key set linear"), "{target}: {response}");
+    }
+    serve.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dummy_is_checked_before_the_tool_is_and_the_route_comes_from_the_table() {
+    // A route this build does not hold a key for is refused 403 without the store being asked, and a bad dummy on a
+    // route it does hold is 401: the two refusals are different facts and an operator reads them as such.
+    let directory = TempDir::new("mcp-route");
+    let store = Arc::new(Store::new(directory.path.join("keys.toml")));
+    let dummy = store.dummy_for("0123456789abcdef").expect("a dummy");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("the bound address");
+    let serve = tokio::spawn(mcpproxy::serve(listener, Arc::clone(&store)));
+    waiting(address);
+    let unknown_tool = exchange(
+        address,
+        "POST /not-a-tool/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\n\r\n",
+    );
+    assert!(unknown_tool.starts_with("HTTP/1.1 403 "), "{unknown_tool}");
+    assert!(
+        unknown_tool.contains("linear"),
+        "the refusal does not name the tools this build knows: {unknown_tool}"
+    );
+    let unknown_endpoint = exchange(
+        address,
+        "POST /linear/sse HTTP/1.1\r\nHost: mcp-proxy:8090\r\n\r\n",
+    );
+    assert!(
+        unknown_endpoint.starts_with("HTTP/1.1 403 "),
+        "{unknown_endpoint}"
+    );
+    assert!(
+        unknown_endpoint.contains("/mcp/readonly"),
+        "the refusal does not name the endpoints the row serves: {unknown_endpoint}"
+    );
+    let bad_dummy = exchange(
+        address,
+        "POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\nAuthorization: Bearer hs-dummy-not-a-session\r\n\r\n",
+    );
+    assert!(bad_dummy.starts_with("HTTP/1.1 401 "), "{bad_dummy}");
+    assert!(
+        bad_dummy.contains("not valid for any session"),
+        "{bad_dummy}"
+    );
+    // And the dummy this machine minted is the one that gets past the check, which is what makes the two refusals
+    // above about the route rather than about a machine with no sessions.
+    let known = exchange(
+        address,
+        &format!(
+            "POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\nAuthorization: Bearer {dummy}\r\n\
+             Content-Length: 2\r\n\r\n{{}}"
+        ),
+    );
+    assert!(known.starts_with("HTTP/1.1 503 "), "{known}");
+    serve.abort();
 }

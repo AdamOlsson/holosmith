@@ -135,10 +135,10 @@ pub fn network_listing_prefix(network_prefix: &str) -> String {
 
 /// The egress proxy's container for a run whose container prefix is `prefix`: `hs_egress`, or `smoke_hs_egress`.
 ///
-/// Prefixed for the same reason the session's names are, and it is not cosmetic: a boot `rm -f`s both proxies and
+/// Prefixed for the same reason the session's names are, and it is not cosmetic: a boot `rm -f`s every proxy and
 /// starts them again from **its own** config (the key proxy mounts *its* key store), so an unprefixed smoke run
 /// would replace the machine's live key proxy with one holding an empty store and drop the egress proxy's per-session
-/// network joins. With the prefix, the smoke run owns two containers of its own and removes them when it is done.
+/// network joins. With the prefix, the smoke run owns containers of its own and removes them when it is done.
 pub fn proxy_name(prefix: &str) -> String {
     format!("{prefix}{PROXY_NAME}")
 }
@@ -442,7 +442,7 @@ impl ContainerSettings {
 
 /// One path's owner, as `(uid, gid)`, or `None` when it cannot be read.
 ///
-/// One function for the two containers that name an identity — a session's and [`KeyProxy`], which reads it from the
+/// One function for the containers that name an identity — a session's, and both keyed proxies, which read it from the
 /// key store's file — because "who owns the thing the container must write" is one question (ADR-0087).
 pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
     let metadata = std::fs::metadata(path).ok()?;
@@ -677,6 +677,66 @@ impl EgressProxy {
     }
 }
 
+/// The directory a key-swapping proxy container mounts: `keys`'s parent.
+///
+/// **The directory, not the file.** [`crate::key::Store`] writes `keys.toml` by temp-file-and-rename, because the file
+/// must never be observable half-written; a *file* bind mount pins the inode, so a container started before the first
+/// create would go on reading the file as it was at mount time. Every session's dummy is written by that rename, so a
+/// file mount makes the proxy answer `bad-key` for every session that was created after it started — which is all of
+/// them. The V3 run measured exactly that (`session=- … status=bad-key`); a directory mount resolves `keys.toml` at
+/// read time, so a rename inside it is visible.
+pub(crate) fn secrets_directory(keys: &Path) -> PathBuf {
+    // `parent` answers `Some("")` for a bare filename, so the empty case is the one that needs the fallback.
+    keys.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| keys.to_path_buf(), Path::to_path_buf)
+}
+
+/// The `docker run` arguments the two key-swapping proxies share: detached, on the machine's `egress` network under
+/// `alias`, restarting, unprivileged, run as the key store's owner with the store's directory mounted read-only.
+///
+/// One function because the two containers differ in their name, their alias and the subcommand they run, and every
+/// other flag is load-bearing in the same way: a second spelling of `--cap-drop ALL` would be a place to forget it, and
+/// a second spelling of the mount would be a place to mount the file instead of its directory.
+pub(crate) fn keyed_proxy_arguments(name: &str, alias: &str, keys: &Path) -> Vec<String> {
+    let mount = secrets_directory(keys).display().to_string();
+    let mut arguments = vec![
+        "run".to_string(),
+        "--detach".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--network".to_string(),
+        crate::docker::EGRESS_NETWORK.to_string(),
+        "--network-alias".to_string(),
+        alias.to_string(),
+        "--restart".to_string(),
+        "unless-stopped".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+    ];
+    // **Run as the key store's owner.** The store is a 0700 directory and a 0600 file belonging to the user `serve`
+    // (or `server deploy`) runs as, and `--cap-drop ALL` takes `DAC_OVERRIDE` with everything else: a container running
+    // as uid 0 without that capability cannot read a file owned by the machine's user. It then fails to prepare the
+    // store it can see, exits 1, and `--restart unless-stopped` loops it — which is exactly what the first gate run
+    // measured, because the image the proxies ran *before* that story happened to carry uid 1000 as its user. Taking
+    // the owner from the file makes the identity a fact rather than an accident of the base image, and it is the same
+    // rule a session's container follows (ADR-0035). No owner (a path that is not there yet) means no flag; the
+    // starters refuse that case before they ask for this vector.
+    if let Some((uid, gid)) = owner_of(keys) {
+        arguments.push("--user".to_string());
+        arguments.push(format!("{uid}:{gid}"));
+    }
+    arguments.extend([
+        // The only mount of the key store anywhere in this build, and a directory for `secrets_directory`'s reason. A
+        // session's container never names it.
+        "-v".to_string(),
+        format!("{mount}:{mount}:ro"),
+    ]);
+    arguments
+}
+
 /// The machine's key proxy container (spec item 2): one `hs_key`, on `egress`, joined to every
 /// session network under the alias `key-proxy`.
 ///
@@ -713,62 +773,16 @@ impl KeyProxy {
         }
     }
 
-    /// The directory the proxy container mounts: `keys`'s parent.
-    ///
-    /// **The directory, not the file.** [`crate::key::Store`] writes `keys.toml` by temp-file-and-rename,
-    /// because the file must never be observable half-written; a *file* bind mount pins the inode, so a
-    /// container started before the first create would go on reading the file as it was at mount time. Every
-    /// session's dummy is written by that rename, so a file mount makes the proxy answer `bad-key` for every
-    /// session that was created after it started — which is all of them. the V3 run measured exactly that
-    /// (`session=- … status=bad-key`); a directory mount resolves `keys.toml` at read time, so a rename inside
-    /// it is visible.
+    /// The directory the proxy container mounts: `keys`'s parent ([`secrets_directory`]).
     pub fn mount(&self) -> PathBuf {
-        // `parent` answers `Some("")` for a bare filename, so the empty case is the one that needs the fallback.
-        self.keys
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map_or_else(|| self.keys.clone(), Path::to_path_buf)
+        secrets_directory(&self.keys)
     }
 
     /// The `docker run` arguments, from `run` to the last `--keys`.
     pub fn run_args(&self) -> Vec<String> {
-        let keys = self.keys.display().to_string();
-        let mount = self.mount().display().to_string();
-        let mut arguments = vec![
-            "run".to_string(),
-            "--detach".to_string(),
-            "--name".to_string(),
-            self.name.clone(),
-            "--network".to_string(),
-            crate::docker::EGRESS_NETWORK.to_string(),
-            "--network-alias".to_string(),
-            crate::key::KEY_PROXY_ALIAS.to_string(),
-            "--restart".to_string(),
-            "unless-stopped".to_string(),
-            "--cap-drop".to_string(),
-            "ALL".to_string(),
-            "--security-opt".to_string(),
-            "no-new-privileges".to_string(),
-        ];
-        // **Run as the key store's owner.** The store is a 0700 directory and a 0600 file belonging to the user
-        // `serve` (or `server deploy`) runs as, and `--cap-drop ALL` takes `DAC_OVERRIDE` with everything else: a
-        // container running as uid 0 without that capability cannot read a file owned by the machine's user. It
-        // then fails to prepare the store it can see, exits 1, and `--restart unless-stopped` loops it — which is
-        // exactly what the first gate run measured, because the image the proxies ran *before* this story
-        // happened to carry uid 1000 as its user. Taking the owner from the file makes the identity a fact
-        // rather than an accident of the base image, and it is the same rule a session's container follows
-        // (ADR-0035). No owner (a path that is not there yet) means no flag; `start_key` refuses that case before
-        // it asks for this vector.
-        if let Ok(metadata) = std::fs::metadata(&self.keys) {
-            use std::os::unix::fs::MetadataExt as _;
-            arguments.push("--user".to_string());
-            arguments.push(format!("{}:{}", metadata.uid(), metadata.gid()));
-        }
+        let mut arguments =
+            keyed_proxy_arguments(&self.name, crate::key::KEY_PROXY_ALIAS, &self.keys);
         arguments.extend([
-            // The only mount of the key store anywhere in this build, and a directory for `mount`'s reason. A
-            // session's container never names it.
-            "-v".to_string(),
-            format!("{mount}:{mount}:ro"),
             "--entrypoint".to_string(),
             crate::images::BINARY_IN_IMAGE.to_string(),
             self.image.clone(),
@@ -777,7 +791,64 @@ impl KeyProxy {
             "--listen".to_string(),
             format!("0.0.0.0:{}", crate::key::KEY_PROXY_PORT),
             "--keys".to_string(),
-            keys,
+            self.keys.display().to_string(),
+        ]);
+        arguments
+    }
+}
+
+/// The machine's MCP proxy container (ADR-0099): one `hs_mcp`, on `egress`, joined to a session's network under the
+/// alias `mcp-proxy`.
+///
+/// [`KeyProxy`]'s shape — the same image, the same store mounted the same way, the same hardening — with one
+/// difference that is the whole reason it exists: **it is joined by the egress proxy's condition, not
+/// unconditionally.** A model call must work with Internet access off, so `hs_key` is on every session network; a
+/// tool's host must not be reachable with it off, so `hs_mcp` joins only the networks whose row says the session may
+/// reach the internet (`DockerBackend::apply_proxy`). That is ADR-0046's "the checkbox is topology" holding for the
+/// second kind of credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpProxy {
+    /// The image the container runs, from [`crate::images::proxy_image`].
+    pub image: String,
+    /// Its container name: `hs_mcp`, with this run's container prefix in front of it
+    /// ([`crate::mcpproxy::mcp_proxy_name`]).
+    pub name: String,
+    /// `<data>/secrets/keys.toml`, read by the proxy inside the container. What is mounted is its directory
+    /// ([`McpProxy::mount`]).
+    pub keys: PathBuf,
+}
+
+impl McpProxy {
+    /// The machine's MCP proxy: the proxy image's name and the key file's path.
+    ///
+    /// Nothing here can fail, for [`EgressProxy::of`]'s reason.
+    pub fn of(config: &Config) -> Self {
+        Self {
+            image: crate::images::proxy_image(),
+            name: crate::mcpproxy::mcp_proxy_name(&config.container_prefix),
+            keys: config.secrets_path(),
+        }
+    }
+
+    /// The directory the proxy container mounts: `keys`'s parent ([`secrets_directory`]).
+    pub fn mount(&self) -> PathBuf {
+        secrets_directory(&self.keys)
+    }
+
+    /// The `docker run` arguments, from `run` to the last `--keys`.
+    pub fn run_args(&self) -> Vec<String> {
+        let mut arguments =
+            keyed_proxy_arguments(&self.name, crate::mcpproxy::MCP_PROXY_ALIAS, &self.keys);
+        arguments.extend([
+            "--entrypoint".to_string(),
+            crate::images::BINARY_IN_IMAGE.to_string(),
+            self.image.clone(),
+            "proxy".to_string(),
+            "mcp".to_string(),
+            "--listen".to_string(),
+            format!("0.0.0.0:{}", crate::mcpproxy::MCP_PROXY_PORT),
+            "--keys".to_string(),
+            self.keys.display().to_string(),
         ]);
         arguments
     }
@@ -839,6 +910,7 @@ mod tests {
         );
         assert_eq!(proxy_name(""), "hs_egress");
         assert_eq!(crate::key::key_proxy_name(""), "hs_key");
+        assert_eq!(crate::mcpproxy::mcp_proxy_name(""), "hs_mcp");
         assert_eq!(container_listing_prefix(""), "s_");
         assert_eq!(network_listing_prefix(""), "agents_");
 
@@ -852,14 +924,15 @@ mod tests {
         );
         assert_eq!(proxy_name("smoke_"), "smoke_hs_egress");
         assert_eq!(crate::key::key_proxy_name("smoke_"), "smoke_hs_key");
+        assert_eq!(crate::mcpproxy::mcp_proxy_name("smoke_"), "smoke_hs_mcp");
         assert_eq!(container_listing_prefix("smoke_"), "smoke_s_");
         assert_eq!(network_listing_prefix("smoke_"), "smoke_agents_");
     }
 
     /// The whole smoke config's effect on names, through the settings the backend is built from: the session's
-    /// container, its network, and **both** proxies — the ones an unprefixed smoke boot would replace on the machine.
+    /// container, its network, and **all three** proxies — the ones an unprefixed smoke boot would replace on the machine.
     #[test]
-    fn a_smoke_config_names_the_container_the_network_and_both_proxies() {
+    fn a_smoke_config_names_the_container_the_network_and_all_three_proxies() {
         let config = Config {
             container_prefix: "smoke_".to_string(),
             network_prefix: "smoke_".to_string(),
@@ -894,6 +967,9 @@ mod tests {
         let key = KeyProxy::of(&config);
         assert_eq!(key.name, "smoke_hs_key");
         assert!(key.run_args().iter().any(|word| word == "smoke_hs_key"));
+        let mcp = McpProxy::of(&config);
+        assert_eq!(mcp.name, "smoke_hs_mcp");
+        assert!(mcp.run_args().iter().any(|word| word == "smoke_hs_mcp"));
     }
 
     /// The five mounts: spec item 1's four, then the agent's own directory (spec item 2).
@@ -1344,6 +1420,55 @@ mod tests {
                 "key",
                 "--listen",
                 "0.0.0.0:8080",
+                "--keys",
+                "/var/lib/holosmith/secrets/keys.toml",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_mcp_proxy_is_the_key_proxy_s_shape_under_its_own_name_and_alias() {
+        // The third container's whole difference from `hs_key` is which name and alias it takes and which subcommand
+        // it runs: the store is mounted the same way, and the hardening is the same hardening. A tool's host must be
+        // reachable only when a session's row says the session may reach the internet, and that difference is
+        // `DockerBackend`'s join (`apply_proxy`), not a flag here.
+        let proxy = McpProxy {
+            image: crate::images::proxy_image(),
+            name: crate::mcpproxy::MCP_PROXY_NAME.to_string(),
+            keys: PathBuf::from("/var/lib/holosmith/secrets/keys.toml"),
+        };
+        let arguments = proxy.run_args();
+        let flag = |name: &str| -> String {
+            arguments[arguments.iter().position(|a| a == name).expect(name) + 1].clone()
+        };
+        assert_eq!(arguments[0], "run");
+        assert_eq!(flag("--name"), crate::mcpproxy::MCP_PROXY_NAME);
+        assert_eq!(flag("--network"), crate::docker::EGRESS_NETWORK);
+        assert_eq!(flag("--network-alias"), crate::mcpproxy::MCP_PROXY_ALIAS);
+        assert_eq!(flag("--restart"), "unless-stopped");
+        assert_eq!(flag("--cap-drop"), "ALL");
+        assert_eq!(flag("--security-opt"), "no-new-privileges");
+        assert_eq!(
+            flag("-v"),
+            "/var/lib/holosmith/secrets:/var/lib/holosmith/secrets:ro",
+            "the store is mounted as its directory, for the key proxy's rename reason"
+        );
+        assert_eq!(
+            proxy.mount(),
+            PathBuf::from("/var/lib/holosmith/secrets"),
+            "the store is mounted by its directory, the key proxy's rule"
+        );
+        let image = arguments
+            .iter()
+            .position(|argument| *argument == crate::images::proxy_image())
+            .expect("the image is in the run vector");
+        assert_eq!(
+            &arguments[image + 1..],
+            [
+                "proxy",
+                "mcp",
+                "--listen",
+                "0.0.0.0:8090",
                 "--keys",
                 "/var/lib/holosmith/secrets/keys.toml",
             ]

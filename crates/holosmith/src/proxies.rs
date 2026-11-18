@@ -1,8 +1,8 @@
-//! The machine's two proxies, started by one recipe (spec item 2 and item 10 step 4).
+//! The machine's three proxies, started by one recipe (spec item 2 and item 10 step 4).
 //!
-//! Two callers have to end with one `hs_egress` and one `hs_key` running on the machine's `egress` network:
-//! `serve`'s boot, and `server deploy`'s step 4. ADR-0056 records why the recipe lives here rather than in either
-//! of them — the two entry points must start **the same two containers the same way**, and a deployed machine's
+//! Two callers have to end with one `hs_egress`, one `hs_key` and one `hs_mcp` running on the machine's `egress`
+//! network: `serve`'s boot, and `server deploy`'s step 4. ADR-0056 records why the recipe lives here rather than in
+//! either of them — the two entry points must start **the same containers the same way**, and a deployed machine's
 //! proxies drifting from a hand-run `serve`'s is the kind of difference nobody would think to compare. Every piece
 //! of the recipe is load-bearing and each has its own doc comment below:
 //!
@@ -13,7 +13,7 @@
 //! - **The `is_file` checks.** `-v` of a path the daemon cannot see creates an empty root-owned *directory*, so a
 //!   key file that is not a file is a start that cannot work — said in the words of what is actually
 //!   wrong rather than about the container it turned into (ADR-0035's measurement).
-//! - **The image is checked first.** Both containers run `holosmith-proxy:<version>`, built by `server deploy`'s
+//! - **The image is checked first.** All three containers run `holosmith-proxy:<version>`, built by `server deploy`'s
 //!   step 3 from the Dockerfile embedded in this binary, and a machine that has never deployed has no
 //!   such image: `docker run` would then try to *pull* a name that is not in any registry, which fails with a
 //!   sentence about a registry rather than about the step that has not run (ADR-0057).
@@ -36,9 +36,10 @@
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::container::{self, EgressProxy, KeyProxy};
+use crate::container::{self, EgressProxy, KeyProxy, McpProxy};
 use crate::docker::Docker;
 use crate::key;
+use crate::mcpproxy;
 
 /// How long one daemon call may take before it is "did not start" — the proxy start's bound.
 ///
@@ -46,17 +47,18 @@ use crate::key;
 /// run on a slow machine unpacks an image, and a `serve` boot and a deploy step must give a proxy the same room.
 pub const START_TIMEOUT: Duration = container::PROXY_START_TIMEOUT;
 
-/// The two proxies' container names for this run, in the order [`running`] answers: `[egress, key]`.
+/// The three proxies' container names for this run, in the order [`running`] answers: `[egress, key, mcp]`.
 ///
-/// A function of the config rather than a constant, because a smoke run's two proxies are its own
-/// (`smoke_hs_egress`, `smoke_hs_key`): an unprefixed start would replace the machine's live key proxy — whose mount
-/// is *its* key store — with one holding an empty store, and drop the egress proxy's per-session network joins. A
+/// A function of the config rather than a constant, because a smoke run's three proxies are its own
+/// (`smoke_hs_egress`, `smoke_hs_key`, `smoke_hs_mcp`): an unprefixed start would replace the machine's live proxy whose
+/// mount is *its* key store — with one holding an empty store, and drop the egress proxy's per-session network joins. A
 /// caller that names one at a time (`doctor`'s proxy findings, a teardown) composes it the same way from its own
 /// config, so no reader of a name spells the prefix itself.
-pub fn names(config: &Config) -> [String; 2] {
+pub fn names(config: &Config) -> [String; 3] {
     [
         container::proxy_name(&config.container_prefix),
         key::key_proxy_name(&config.container_prefix),
+        mcpproxy::mcp_proxy_name(&config.container_prefix),
     ]
 }
 
@@ -103,7 +105,7 @@ pub trait Containers {
 
     /// Replace a container: force-remove one by this name, then run `args` detached under `bound`.
     ///
-    /// One method rather than two, because the order is the contract and both proxies' doc comments explain it:
+    /// One method rather than two, because the order is the contract and the three proxies' doc comments explain it:
     /// `--restart unless-stopped` keeps a stopped container's name, so a start without the removal first fails
     /// with Docker's "name already in use" rather than with anything about this machine.
     fn replace(&self, name: &str, args: &[String], bound: Duration) -> Result<(), String>;
@@ -175,14 +177,7 @@ pub fn start_egress(config: &Config, containers: &dyn Containers) -> Result<Star
 /// the real one, over TLS, from a directory mounted read-only ([`KeyProxy::mount`]). The key file is created
 /// (mode 0600) before the start, because it is a mount source and a mount of a missing path is a directory.
 pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started, String> {
-    let store = key::Store::from_data_root(&config.data_root);
-    if let Err(error) = store.ensure_file() {
-        return Err(format!(
-            "no key proxy was started: the key file {} could not be prepared ({error}), and a mount of a missing \
-             source is an empty directory",
-            store.path().display()
-        ));
-    }
+    store_for(config, "key proxy")?;
     let proxy = KeyProxy::of(config);
     image_there(
         containers,
@@ -190,38 +185,6 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
         "key proxy",
         "no session's dummy key can be swapped for the real one without it",
     )?;
-    if !proxy.keys.is_file() {
-        return Err(format!(
-            "no key proxy was started: the key file {} is not a file, and mounting it would give the proxy a \
-             directory to read as TOML",
-            proxy.keys.display()
-        ));
-    }
-    // **The file and the directory it lives in must have one owner.** The container runs as the key file's owner
-    // (`KeyProxy::run_args`) because `--cap-drop ALL` takes root's `DAC_OVERRIDE`, and it must then traverse the
-    // mounted *directory*, which is 0700. One `--user` cannot satisfy both when they disagree, and the failure is
-    // a container that cannot stat the file it was mounted, exits 1 and restarts forever — which arrives as a
-    // network error two layers away. So this refuses with a sentence naming both, because no flag can be right
-    // and the operator is the only one who can choose.
-    if let (Some(file), Some(directory)) = (
-        std::fs::metadata(&proxy.keys).ok(),
-        std::fs::metadata(proxy.mount()).ok(),
-    ) {
-        use std::os::unix::fs::MetadataExt as _;
-        if (file.uid(), file.gid()) != (directory.uid(), directory.gid()) {
-            return Err(format!(
-                "no key proxy was started: {} belongs to {}:{} and the directory it is mounted through, {}, to \
-                 {}:{} — the container runs as the file's owner, so it could not read the directory (mode 0700), \
-                 and a container that cannot stat its mount exits and restarts forever (`chown -R` one of them)",
-                proxy.keys.display(),
-                file.uid(),
-                file.gid(),
-                proxy.mount().display(),
-                directory.uid(),
-                directory.gid()
-            ));
-        }
-    }
     containers.replace(&proxy.name, &proxy.run_args(), START_TIMEOUT)?;
     Ok(Started {
         container: proxy.name,
@@ -229,21 +192,101 @@ pub fn start_key(config: &Config, containers: &dyn Containers) -> Result<Started
     })
 }
 
-/// `[egress, key]`, in that order: whether each proxy's container is running.
+/// Start the machine's MCP proxy container, replacing one an earlier run left behind.
 ///
-/// The read half of the pair above, and the whole of `server deploy` step 4's state read: a container that is
-/// running is what makes a second deploy honestly `satisfied` rather than a re-application. `serve` never asks
-/// (its boot always replaces them), which is why the answer is a plain pair of booleans.
-///
-/// The config is the value the starters are handed, and it is what the two names are composed from ([`names`]).
-pub fn running(config: &Config, containers: &dyn Containers) -> [bool; 2] {
-    let [egress, key] = names(config);
-    [containers.running(&egress), containers.running(&key)]
+/// The second reader of the key store, and the one that spends a **tool** key: it validates the session's dummy,
+/// swaps in the tool's real key for a host [`crate::key::TOOLS`] names, and forwards over TLS. It mounts the same
+/// directory as the key proxy and is started the same way — what differs is which session networks it is joined to,
+/// and that is [`crate::backend::DockerBackend`]'s decision rather than this recipe's (ADR-0099).
+pub fn start_mcp(config: &Config, containers: &dyn Containers) -> Result<Started, String> {
+    store_for(config, "MCP proxy")?;
+    let proxy = McpProxy::of(config);
+    image_there(
+        containers,
+        &proxy.image,
+        "MCP proxy",
+        "a session's tool calls can reach no host without it",
+    )?;
+    containers.replace(&proxy.name, &proxy.run_args(), START_TIMEOUT)?;
+    Ok(Started {
+        container: proxy.name,
+        allow: 0,
+    })
 }
 
-/// The one check both starters make before asking the daemon to run anything: the image is on this machine.
+/// Prepare the key store for a key-swapping proxy and refuse the two states no container can work in.
 ///
-/// Both proxies run the same tag, so the sentence is one shape with two subjects — the container that was not
+/// Both readers of the store mount its **directory** read-only, as the store's owner, so both need the same three
+/// facts checked before a `docker run` — and the sentences name `what` so an operator reading a boot's warning knows
+/// which container it is about:
+///
+/// * the store is created if it is not there ([`crate::key::Store::ensure_file`]), because a mount source that is
+///   missing becomes an empty directory the proxy would then read as TOML;
+/// * the file is a **file**, for the same reason;
+/// * the file and the directory it lives in have **one owner**. The container runs as the key file's owner
+///   (`container::keyed_proxy_arguments`) because `--cap-drop ALL` takes root's `DAC_OVERRIDE`, and it must then
+///   traverse the mounted directory, which is 0700. One `--user` cannot satisfy both when they disagree, and the
+///   failure is a container that cannot stat the file it was mounted, exits 1 and restarts forever — which arrives as
+///   a network error two layers away. So this refuses with a sentence naming both, because no flag can be right and
+///   the operator is the only one who can choose.
+fn store_for(config: &Config, what: &str) -> Result<key::Store, String> {
+    // The path the container mounts, not a second derivation of it: `Config::secrets_path` is what `KeyProxy::of` and
+    // `McpProxy::of` put in the run vector, so checking one file and mounting another cannot happen.
+    let store = key::Store::new(config.secrets_path());
+    if let Err(error) = store.ensure_file() {
+        return Err(format!(
+            "no {what} was started: the key file {} could not be prepared ({error}), and a mount of a missing source \
+             is an empty directory",
+            store.path().display()
+        ));
+    }
+    let keys = store.path();
+    if !keys.is_file() {
+        return Err(format!(
+            "no {what} was started: the key file {} is not a file, and mounting it would give the proxy a directory \
+             to read as TOML",
+            keys.display()
+        ));
+    }
+    let mounted = container::secrets_directory(keys);
+    if let (Some(file), Some(directory)) =
+        (container::owner_of(keys), container::owner_of(&mounted))
+        && file != directory
+    {
+        return Err(format!(
+            "no {what} was started: {} belongs to {}:{} and the directory it is mounted through, {}, to {}:{} — \
+             the container runs as the file's owner, so it could not read the directory (mode 0700), and a \
+             container that cannot stat its mount exits and restarts forever (`chown -R` one of them)",
+            keys.display(),
+            file.0,
+            file.1,
+            mounted.display(),
+            directory.0,
+            directory.1
+        ));
+    }
+    Ok(store)
+}
+
+/// `[egress, key, mcp]`, in that order: whether each proxy's container is running.
+///
+/// The read half of the starters above, and the whole of `server deploy` step 4's state read: a container that is
+/// running is what makes a second deploy honestly `satisfied` rather than a re-application. `serve` never asks
+/// (its boot always replaces them), which is why the answer is a plain three of booleans.
+///
+/// The config is the value the starters are handed, and it is what the three names are composed from ([`names`]).
+pub fn running(config: &Config, containers: &dyn Containers) -> [bool; 3] {
+    let [egress, key, mcp] = names(config);
+    [
+        containers.running(&egress),
+        containers.running(&key),
+        containers.running(&mcp),
+    ]
+}
+
+/// The one check all three starters make before asking the daemon to run anything: the image is on this machine.
+///
+/// All three proxies run the same tag, so the sentence is one shape with two subjects — the container that was not
 /// started, and what the machine is without it. The fix is named as the command rather than as a story, because
 /// an operator reading a `serve` boot's warning has a terminal and not a backlog.
 fn image_there(
@@ -269,7 +312,7 @@ mod tests {
 
     /// A daemon that owns one image and records every `docker run` it was asked for.
     ///
-    /// The two starters ask [`Containers::image_exists`] before they ask for a container, so this is the whole of
+    /// The three starters ask [`Containers::image_exists`] before they ask for a container, so this is the whole of
     /// what a start needs to be driven without a daemon: the image's presence, and the argv it would have run.
     struct Fake {
         image: bool,
@@ -329,6 +372,7 @@ mod tests {
         for (what, started) in [
             ("egress proxy", start_egress(&config, &absent)),
             ("key proxy", start_key(&config, &absent)),
+            ("MCP proxy", start_mcp(&config, &absent)),
         ] {
             let sentence = started.expect_err("there is no image for the container to run");
             for fact in [
@@ -363,8 +407,14 @@ mod tests {
                 .container,
             key::KEY_PROXY_NAME
         );
+        assert_eq!(
+            start_mcp(&config, &present)
+                .expect("the image is there")
+                .container,
+            mcpproxy::MCP_PROXY_NAME
+        );
         let ran = present.ran.borrow();
-        assert_eq!(ran.len(), 2, "a start ran {ran:?}");
+        assert_eq!(ran.len(), 3, "a start ran {ran:?}");
         for args in ran.iter() {
             assert!(
                 args.iter().any(|a| *a == crate::images::proxy_image()),

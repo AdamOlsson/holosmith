@@ -192,7 +192,7 @@ fn tls(
         .map_err(|error| format!("the TLS client for {host} could not be started ({error})"))?;
     {
         // The handle is **held**, not dropped: closing `s_client`'s stdin makes it send its close-notify before the
-        // response arrives (`keyproxy::forward` measured that), so `Connection: close` in the head is what ends the
+        // response arrives (`relay::forward` measured that), so `Connection: close` in the head is what ends the
         // exchange. A request is a few hundred octets, far inside a pipe's buffer, so this write cannot block — the
         // wait that needs a bound is the one below.
         let stdin = child

@@ -73,8 +73,8 @@ calls from another machine only if that peer's **tailnet node name** is in `allo
 `<data_root>/secrets/keys.toml` (mode 0600) is **not** a config key: `holosmith key set <id>` owns it, and `key list`
 never prints a value. It has three tables. `[providers]` holds the model-provider keys the key proxy swaps in, and
 `[sessions]` the dummy key each live session spends; `[tools]` holds one key per tool host — `linear` is the one this
-build knows, so `key set linear` stores it and `key revoke linear` forgets it — and the table is written only while it
-holds a key, because the release before this one refuses a file that names it, so a machine holding a tool key has to
+build knows, so `key set linear` stores it, `holosmith proxy mcp` spends it, and `key revoke linear` forgets it — and
+the table is written only while it holds a key, because the release before this one refuses a file that names it, so a machine holding a tool key has to
 `key revoke` it before switching back (ADR-0098). A tool is not a provider: it has no model row and nothing in
 `models.json` names it. A `[providers]` row whose id names a tool is a row an operator added by hand before the tool
 table existed: it is read as a tool key, and the next write of the file — any `key set`, or a boot that starts the key
@@ -102,8 +102,10 @@ deploy and never regenerated (ADR-0058).
 | `[egress] allow` | string array | `[]` | The domains the egress proxy lets a session reach, through `CONNECT` on 443. Lowercase bare domains: no scheme, port, path or wildcard; duplicates refused. Empty means a session has **no** Internet. |
 
 A session's network is `--internal`: the only ways out are the key proxy (provider calls, with a per-session dummy
-key) and, when Internet access is on, the egress proxy for the allow-list. Provider keys never enter a container
-(ADR-0045, ADR-0048).
+key) and, when Internet access is on, the egress proxy for the allow-list and the MCP proxy for a tool's host. The
+key proxy is joined either way, because a model call must work with the checkbox off; the other two are the checkbox,
+which is why a tool's key is spent through a container of its own rather than as a route on the key proxy (ADR-0099).
+Provider and tool keys never enter a container (ADR-0045, ADR-0048, ADR-0098).
 
 ## When a session stops, and what it costs
 

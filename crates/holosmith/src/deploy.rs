@@ -32,7 +32,7 @@
 //! - **Step 1 is [`crate::doctor`]'s list, not a second one.** `serve`'s refusal, `doctor`'s line and this step's
 //!   failure carry the same sentences (ADR-0028, ADR-0054). The one divergence is `ports`, downgraded from a
 //!   failure to a remark, and its doc comment says why.
-//! - **The proxies' recipe lives in [`crate::proxies`].** A deploy and a boot must start the same two containers
+//! - **The proxies' recipe lives in [`crate::proxies`].** A deploy and a boot must start the same containers
 //!   the same way (ADR-0056), and this module is the caller that fails the step instead of warning.
 //!
 //! # The root and the config, and why nothing here escalates
@@ -142,7 +142,7 @@ const LINK_NOT_LIVE: &str = "; the unit's `ExecStart` resolves through a `curren
 /// the machine ends up with, and [`Kind::group`]/[`Kind::skip`] are the two places a hub's half is not a server's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `holosmith server deploy`: the six steps, the daemon's group asked about, and both proxies.
+    /// `holosmith server deploy`: the six steps, the daemon's group asked about, and all three proxies.
     Server,
     /// `holosmith hub deploy`: steps 1, 2, 5 and 6; no image, no proxy, and no daemon group.
     Hub,
@@ -191,11 +191,12 @@ impl Kind {
         match (self, step) {
             (Self::Hub, DeployStep::Images) => Some(
                 "a hub builds no images: `holosmith-proxy` and `agent-image` are what a session's container and the \
-                 machine's two proxies run, and a hub runs no containers (spec item 10 §6)",
+                 machine's three proxies run, and a hub runs no containers (spec item 10 §6)",
             ),
             (Self::Hub, DeployStep::Proxies) => Some(
-                "a hub starts no proxies: `hs_egress` is a session's only route out and `hs_key` is the only thing \
-                 that holds a real provider key, and a hub has neither",
+                "a hub starts no proxies: `hs_egress` is a session's only route out, `hs_key` is the only thing \
+                 that holds a real provider key and `hs_mcp` the only thing that spends a tool's, and a hub has \
+                 none of the three",
             ),
             _ => None,
         }
@@ -248,7 +249,7 @@ pub enum DeployStep {
     Files,
     /// 3. The two images embedded in the binary.
     Images,
-    /// 4. The `egress` network and the machine's two proxies.
+    /// 4. The `egress` network and the machine's three proxies.
     Proxies,
     /// 5. The systemd unit, rendered into the root.
     Service,
@@ -314,7 +315,7 @@ impl DeployStep {
             Self::Images => {
                 "building the two images — a first install downloads pi, so this takes minutes"
             }
-            Self::Proxies => "starting the `egress` network and the machine's two proxies",
+            Self::Proxies => "starting the `egress` network and the machine's three proxies",
             Self::Service => "writing the systemd unit",
             Self::Health => "asking `/api/health` and `doctor --full` about the machine",
         }
@@ -766,7 +767,7 @@ impl Default for Tools {
 /// Run the six steps in the spec's order and answer the report: a **server** deploy.
 ///
 /// This is [`run_as`] with [`Kind::Server`], which is what the name means: the six steps, the daemon's group and
-/// both proxies. `holosmith hub deploy` calls [`run_as`] with its own half. Every one of these three is quiet: a
+/// its proxies. `holosmith hub deploy` calls [`run_as`] with its own half. Every one of these three is quiet: a
 /// deploy's report is the whole of what it prints, so the run tells a sink nothing ([`run_as_with`] is where a caller
 /// that has someone to tell comes in).
 pub fn run(
@@ -1826,15 +1827,15 @@ fn image_remark(config: &Config) -> String {
     )
 }
 
-/// Step 4: the machine's `egress` network and its two proxies.
+/// Step 4: the machine's `egress` network and its three proxies.
 ///
-/// The read is a real measurement of the daemon — [`proxies::running`] for the two containers and
+/// The read is a real measurement of the daemon — [`proxies::running`] for the three containers and
 /// `docker network ls` for the network — which is what makes a second deploy honestly `satisfied` rather than a
 /// re-application. Everything present is exactly the state a deploy is for, so the apply only runs when something
 /// is missing.
 ///
 /// **`[egress] allow` is not reconciled here, and that is the design rather than a gap.** The list is an argument
-/// of `docker run`, so a changed allow-list takes effect on the next `serve` boot, which replaces both proxies
+/// of `docker run`, so a changed allow-list takes effect on the next `serve` boot, which replaces every proxy
 /// unconditionally (ADR-0037). Comparing a running container's arguments with the vector this deploy would pass
 /// was rejected: it is a second reading of [`crate::container::EgressProxy::run_args`] and would drift from the
 /// first. So a deploy ensures the proxies are **up**, and the boot is what makes them current — which is also what
@@ -1846,19 +1847,20 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
     let network = machine
         .network_names(docker::EGRESS_NETWORK, proxies::START_TIMEOUT)
         .is_ok_and(|names| names.iter().any(|name| name == docker::EGRESS_NETWORK));
-    let [egress, key] = proxies::running(config, machine);
-    // The names this run's config composes: `hs_egress`/`hs_key` on a deployed machine, and a smoke config's own two
-    // if a deploy is ever run with one.
+    let [egress, key, mcp] = proxies::running(config, machine);
+    // The names this run's config composes: `hs_egress`/`hs_key`/`hs_mcp` on a deployed machine, and a smoke
+    // config's own three if a deploy is ever run with one.
     let names = proxies::names(config);
-    if network && egress && key {
+    if network && egress && key && mcp {
         return Line {
             step: DeployStep::Proxies,
             word: Word::Satisfied,
             sentence: format!(
-                "{} is there and {} and {} are running on it",
+                "{} is there and {}, {} and {} are running on it",
                 docker::EGRESS_NETWORK,
                 names[0],
-                names[1]
+                names[1],
+                names[2]
             ),
             fix: None,
         };
@@ -1877,6 +1879,11 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
             key,
             names[1].as_str(),
             "the only thing that holds a real provider key",
+        ),
+        (
+            mcp,
+            names[2].as_str(),
+            "the only thing that spends a tool's real key",
         ),
     ] {
         if !running {
@@ -1903,6 +1910,9 @@ fn proxies_line(config: &Config, machine: &dyn Machine, dry_run: bool) -> Line {
         return failed(DeployStep::Proxies, sentence);
     }
     if let Err(sentence) = proxies::start_key(config, machine) {
+        return failed(DeployStep::Proxies, sentence);
+    }
+    if let Err(sentence) = proxies::start_mcp(config, machine) {
         return failed(DeployStep::Proxies, sentence);
     }
     Line {

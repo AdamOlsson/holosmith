@@ -24,7 +24,7 @@
 //! **What it deliberately does not do.** No provider call is made, so the key proxy is started and joined and never
 //! exercised — that is V3's by-hand run, and the ADR says so in as many words. Nothing on the machine is named
 //! without the `smoke_` prefix, and the run removes what it made: its session's container and network (by the delete),
-//! its own two proxies, and its root, unless `HOLOSMITH_KEEP_SCRATCH=1` (the convention the Docker tests use).
+//! its own proxies, and its root, unless `HOLOSMITH_KEEP_SCRATCH=1` (the convention the Docker tests use).
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
@@ -914,12 +914,13 @@ fn stop(server: &mut std::process::Child) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the two proxies this run started: they are detached with `--restart unless-stopped`, so nothing else
+/// Remove the proxies this run started: they are detached with `--restart unless-stopped`, so nothing else
 /// would ever take them away.
 fn remove_proxies(docker: &Docker) -> Result<(), String> {
     let names = [
         crate::container::proxy_name(PREFIX),
         crate::key::key_proxy_name(PREFIX),
+        crate::mcpproxy::mcp_proxy_name(PREFIX),
     ];
     let mut left = Vec::new();
     for name in &names {

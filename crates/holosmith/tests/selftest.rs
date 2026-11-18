@@ -247,9 +247,8 @@ fn a_listener_on_the_proxy_alias_is_what_the_off_case_looks_for() {
         attached.reached
     );
     // And the decision turns that report into the proxy's own sentence, not the bridge's.
-    let Outcome::Failed(sentence) =
-        selftest::decide(&attached, &targets, holosmith::container::PROXY_NAME)
-    else {
+    let names = selftest::Names::of(&holosmith::config::Config::default());
+    let Outcome::Failed(sentence) = selftest::decide(&attached, &targets, &names) else {
         panic!("the report must refuse the boot");
     };
     assert!(

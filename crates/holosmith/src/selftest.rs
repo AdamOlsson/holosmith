@@ -48,22 +48,27 @@ use crate::preflight::{Check, Complaint};
 /// tell what it was, and so the orphan sweep a later change owns can leave it alone.
 pub const NETWORK: &str = "holosmith-selftest";
 
-/// The three names one self-test uses, composed from the run's two prefixes.
+/// The names one self-test uses, composed from the run's two prefixes.
 ///
-/// The probe's network and the two proxy containers are the self-test's only names, and since a smoke run owns a
-/// machine's names as well as its own, all three carry its prefix: a smoke boot probes `smoke_holosmith-selftest`,
-/// joins `smoke_hs_egress`/`smoke_hs_key`, and never touches the running machine's proxies. Composed in one place so a
-/// caller cannot pass a network and a proxy that disagree about which run they belong to.
+/// The probe's network and the machine's proxy containers are the self-test's only names, and since a smoke run owns a
+/// machine's names as well as its own, all of them carry its prefix: a smoke boot probes
+/// `smoke_holosmith-selftest`, joins `smoke_hs_egress`/`smoke_hs_key`, requires `smoke_hs_mcp`'s alias to be silent,
+/// and never touches the running machine's proxies. Composed in one place so a caller cannot pass a network and a proxy that disagree about which run they
+/// belong to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Names {
     pub egress: String,
     pub key: String,
+    /// The MCP proxy. It is **not** joined to the probe's network by this test, and that is the point: it shares the
+    /// egress proxy's condition, so a session that asked for no internet access must reach neither — which makes
+    /// [`MCP_PROXY_TARGET`] one of the addresses nothing may answer on.
+    pub mcp: String,
     pub network: String,
 }
 
 impl Names {
     /// The names a run with this config uses. A config with both prefixes empty is a normal machine:
-    /// `holosmith-selftest`, `hs_egress`, `hs_key`.
+    /// `holosmith-selftest`, `hs_egress`, `hs_key`, `hs_mcp`.
     ///
     /// The config is taken **whole** rather than as two `&str`s: two sibling strings of one type can be passed the
     /// wrong way round, and that mistake is invisible whenever the two are equal — which is every machine but a
@@ -72,6 +77,7 @@ impl Names {
         Self {
             egress: crate::container::proxy_name(&config.container_prefix),
             key: crate::key::key_proxy_name(&config.container_prefix),
+            mcp: crate::mcpproxy::mcp_proxy_name(&config.container_prefix),
             network: format!("{}{NETWORK}", config.network_prefix),
         }
     }
@@ -94,6 +100,21 @@ pub const PUBLIC: &str = "1.1.1.1:443";
 /// only the key proxy answers. A target nothing answers today would prove nothing, which is why it is one entry
 /// and not two with a comment.
 pub const PROXY_TARGET: &str = "egress-proxy:3128";
+
+/// The MCP proxy's alias, which **must not answer** on a network whose session asked for no internet access.
+///
+/// It is [`PROXY_TARGET`]'s second half rather than a third kind of target: `hs_mcp` is joined by the egress proxy's
+/// condition (`DockerBackend::apply_proxy`), so a probe that reached it would be proving that a tool's host is
+/// reachable with the checkbox off. ADR-0099 is why the container exists at all; this constant is why the boot
+/// measures it.
+pub const MCP_PROXY_TARGET: &str = "mcp-proxy:8090";
+
+/// The addresses that answer "a proxy, where nothing may": the egress proxy's alias and the MCP proxy's.
+///
+/// A report that reached one of these is the wiring finding — a join that should not have happened — and anything else
+/// is the isolation one. Both are targets no session network with internet access off may reach, which is what makes
+/// the list a property of the checkbox rather than of one container.
+pub const PROXY_TARGETS: [&str; 2] = [PROXY_TARGET, MCP_PROXY_TARGET];
 
 /// The key proxy's alias, which **must answer** on a session network (spec item 2).
 ///
@@ -227,9 +248,13 @@ impl Runner for Docker {
     }
 
     fn targets(&self) -> Vec<String> {
-        // The proxy is asked about first only in this comment: the probe asks all of them at once, and a proxy
+        // The proxies are asked about first only in this comment: the probe asks all of them at once, and a proxy
         // that answers is `connected` — reached, by the rule the whole test rests on.
-        let mut targets = vec![PUBLIC.to_string(), PROXY_TARGET.to_string()];
+        let mut targets = vec![
+            PUBLIC.to_string(),
+            PROXY_TARGET.to_string(),
+            MCP_PROXY_TARGET.to_string(),
+        ];
         // The host, when this daemon's default bridge has a gateway to be reached through. A machine whose
         // daemon reports none (a rootless daemon, or no bridge at all) is not guessed at: the internet target
         // is still measured, and the sentence says which targets were tried.
@@ -318,7 +343,7 @@ pub fn run_with(runner: &dyn Runner, names: &Names, image: &str) -> Outcome {
     key_pair(runner, names, image);
     runner.remove_network(network);
     match report {
-        Ok(report) => decide(&report, &targets, &names.egress),
+        Ok(report) => decide(&report, &targets, names),
         Err(error) => Outcome::Unknown(format!(
             "the probe container could not be run, so this machine's isolation was not measured ({error}); \
              check that the image `{image}` exists on this machine and that `docker run` works without a tty"
@@ -427,19 +452,20 @@ fn key_pair(runner: &dyn Runner, names: &Names, image: &str) {
 ///
 /// Split out so the three answers are one function of one report — the shape `crate::exit::classify` has, and
 /// for the same reason: the decision is the thing worth testing, and the machine is the thing worth not needing.
-pub fn decide(report: &Report, targets: &[String], egress: &str) -> Outcome {
+pub fn decide(report: &Report, targets: &[String], names: &Names) -> Outcome {
     match report.code {
         0 => Outcome::Passed,
         // Two findings, two sentences: a proxy that answers where nothing should leave is a wiring mistake
         // (the session's `network` flag not reaching the topology), and one sentence that named both would be a
         // checklist instead of the one thing to go and look at. A direct leak is the worse answer and wins.
         REACHED if !leaked(report) => Outcome::Failed(format!(
-            "the egress proxy answered on the probe's internal network ({}) — sessions that asked for no internet \
-             access would reach it anyway: check that nothing joins {} to a network at startup and that a session's \
+            "a proxy answered on the probe's internal network ({}) — sessions that asked for no internet access \
+             would reach it anyway: check that nothing joins {} or {} to a network at startup and that a session's \
              network is joined only when its row says it may be; `docker network inspect <network>` lists what \
              is attached",
             report.reached.trim(),
-            egress,
+            names.egress,
+            names.mcp,
         )),
         REACHED => Outcome::Failed(format!(
             "a container on an internal network reached {} — this machine would run sessions that are not \
@@ -465,8 +491,9 @@ pub fn decide(report: &Report, targets: &[String], egress: &str) -> Outcome {
     }
 }
 
-/// Whether anything other than the egress proxy was reached — the question that decides which of the two
-/// `REACHED` sentences an operator reads.
+/// Whether anything other than a proxy was reached — the question that decides which of the two `REACHED` sentences
+/// an operator reads, where "a proxy" is either of [`PROXY_TARGETS`]: the egress proxy and the MCP proxy share one
+/// condition, so both are wiring findings when they answer and neither is a leak.
 ///
 /// The report's `reached` field is the probe's own words: `target verdict` pairs, comma-separated, in the order the
 /// probe printed them. The target is everything before the last space, because a target is `host:port` and a
@@ -484,28 +511,29 @@ fn leaked(report: &Report) -> bool {
             None => entry,
         })
         .collect();
-    targets.is_empty() || targets.iter().any(|target| *target != PROXY_TARGET)
+    targets.is_empty() || targets.iter().any(|target| !PROXY_TARGETS.contains(target))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The names a machine with no prefixes uses: `holosmith-selftest`, `hs_egress`, `hs_key`.
+    /// The names a machine with no prefixes uses: `holosmith-selftest`, `hs_egress`, `hs_key`, `hs_mcp`.
     fn machine() -> Names {
         Names::of(&crate::config::Config::default())
     }
 
-    /// The ruling rests on, as one test: a prefix reaches **all three** names, and the empty prefix changes
-    /// none of them. The five-name version of this claim is `tests/reconcile.rs`'s and `tests/container.rs`'s; this is
-    /// the half that would otherwise silently keep probing the machine's proxies from a smoke boot.
+    /// The ruling rests on, as one test: a prefix reaches **every** name, and the empty prefix changes none of them.
+    /// The version of this claim that also reads the run vectors is `tests/reconcile.rs`'s and `tests/container.rs`'s;
+    /// this is the half that would otherwise silently keep probing the machine's proxies from a smoke boot.
     #[test]
-    fn a_prefix_reaches_the_probe_network_and_both_proxies() {
+    fn a_prefix_reaches_the_probe_network_and_every_proxy() {
         assert_eq!(
             Names::of(&crate::config::Config::default()),
             Names {
                 egress: "hs_egress".to_string(),
                 key: "hs_key".to_string(),
+                mcp: "hs_mcp".to_string(),
                 network: NETWORK.to_string(),
             }
         );
@@ -518,9 +546,49 @@ mod tests {
             Names {
                 egress: "smoke_hs_egress".to_string(),
                 key: "smoke_hs_key".to_string(),
+                mcp: "smoke_hs_mcp".to_string(),
                 network: "smoke_holosmith-selftest".to_string(),
             }
         );
+    }
+
+    /// The MCP proxy is measured as a thing that must **not** answer, and its address is the alias a session would
+    /// dial — not the container's name, for [`PROXY_TARGET`]'s reason.
+    #[test]
+    fn the_mcp_proxy_is_one_of_the_addresses_nothing_may_reach() {
+        assert_eq!(
+            MCP_PROXY_TARGET,
+            format!(
+                "{}:{}",
+                crate::mcpproxy::MCP_PROXY_ALIAS,
+                crate::mcpproxy::MCP_PROXY_PORT
+            ),
+            "the probe's target is the address a session's MCP configuration carries"
+        );
+        assert!(
+            !MCP_PROXY_TARGET.contains(crate::mcpproxy::MCP_PROXY_NAME),
+            "the alias and the container name are two strings, and the probe asks the alias"
+        );
+        let targets = Docker::new(None).targets();
+        assert!(
+            targets.contains(&MCP_PROXY_TARGET.to_string()),
+            "a machine's probe does not ask about the MCP proxy: {targets:?}"
+        );
+        // A report that reached it is the wiring finding, not the isolation one: the container is joined by the
+        // egress proxy's condition, so it is the same checkbox that would have failed.
+        let reached = Report {
+            code: REACHED,
+            reached: format!("{MCP_PROXY_TARGET} connected"),
+            complaint: String::new(),
+        };
+        let Outcome::Failed(sentence) = decide(&reached, &targets, &machine()) else {
+            panic!("a proxy that answers where nothing should leave is a finding");
+        };
+        assert!(
+            sentence.contains(MCP_PROXY_TARGET) || sentence.contains("hs_mcp"),
+            "{sentence}"
+        );
+        assert!(!sentence.contains("--iptables=false"), "{sentence}");
     }
 
     /// The same ruling one step further: the *sentence* a leak produces names **this run's** proxy. A smoke boot that
@@ -538,7 +606,7 @@ mod tests {
             container_prefix: "smoke_".to_string(),
             ..crate::config::Config::default()
         });
-        let Outcome::Failed(sentence) = decide(&reached, &targets, &smoke.egress) else {
+        let Outcome::Failed(sentence) = decide(&reached, &targets, &smoke) else {
             panic!("a proxy that answers where nothing should leave is a finding");
         };
         assert!(
@@ -771,18 +839,18 @@ mod tests {
             complaint: String::new(),
         };
         assert_eq!(
-            decide(&report(0, ""), &targets, &machine().egress),
+            decide(&report(0, ""), &targets, &machine()),
             Outcome::Passed
         );
         assert!(matches!(
-            decide(&report(REACHED, "x:1 refused"), &targets, &machine().egress),
+            decide(&report(REACHED, "x:1 refused"), &targets, &machine()),
             Outcome::Failed(_)
         ));
         // The probe's own protocol is 9; anything else is a probe that did not finish, which is unknown.
         for code in [1, 2, 126, 127, 137] {
             assert!(
                 matches!(
-                    decide(&report(code, ""), &targets, &machine().egress),
+                    decide(&report(code, ""), &targets, &machine()),
                     Outcome::Unknown(_)
                 ),
                 "{code}"
@@ -792,7 +860,7 @@ mod tests {
         let Outcome::Failed(sentence) = decide(
             &report(REACHED, "172.17.0.1:2375 refused"),
             &targets,
-            &machine().egress,
+            &machine(),
         ) else {
             panic!("a refusal is a reach");
         };
@@ -819,7 +887,7 @@ mod tests {
         let Outcome::Failed(sentence) = decide(
             &report(&format!("{PROXY_TARGET} connected")),
             &targets,
-            &machine().egress,
+            &machine(),
         ) else {
             panic!("a proxy that answers on a network that asked for no internet is a finding");
         };
@@ -840,7 +908,7 @@ mod tests {
         let Outcome::Failed(sentence) = decide(
             &report(&format!("{PUBLIC} connected,{PROXY_TARGET} connected")),
             &targets,
-            &machine().egress,
+            &machine(),
         ) else {
             panic!("a reached public address is always a finding");
         };
@@ -856,7 +924,7 @@ mod tests {
                     complaint: String::new(),
                 },
                 &targets,
-                &machine().egress,
+                &machine(),
             ),
             Outcome::Passed
         );
@@ -947,7 +1015,7 @@ mod tests {
                 complaint: String::new(),
             },
             &targets,
-            &machine().egress,
+            &machine(),
         ) else {
             panic!("an unattributed finding is a finding");
         };

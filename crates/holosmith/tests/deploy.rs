@@ -1,4 +1,4 @@
-//! `server deploy`: the seven steps, the words, the install tree and the two proxies (spec item 10).
+//! `server deploy`: the seven steps, the words, the install tree and the proxies (spec item 10).
 //!
 //! These tests drive [`deploy::run`] over a machine they build, and that is the same discipline `tests/doctor.rs`
 //! established for the same reason: a deploy is a set of claims about *a host* — its daemon, its git, its paths —
@@ -36,6 +36,7 @@ use holosmith::docker;
 use holosmith::doctor;
 use holosmith::images::{self, Expectation, Kind as ImageKind};
 use holosmith::key;
+use holosmith::mcpproxy;
 use holosmith::preflight;
 use holosmith::progress::Progress;
 use holosmith::proxies;
@@ -297,6 +298,7 @@ fn config(docker_host: Option<String>) -> Config {
 struct Fake {
     egress: AtomicBool,
     key: AtomicBool,
+    mcp: AtomicBool,
     network: AtomicBool,
     calls: Mutex<Vec<Vec<String>>>,
     /// The labels `docker image inspect` would answer for each tag: a tag absent from the map is no such image.
@@ -317,6 +319,7 @@ impl Fake {
         Self {
             egress: AtomicBool::new(false),
             key: AtomicBool::new(false),
+            mcp: AtomicBool::new(false),
             network: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
             labels: Mutex::new(BTreeMap::new()),
@@ -442,6 +445,7 @@ impl proxies::Containers for Fake {
         match name {
             container::PROXY_NAME => self.egress.load(Ordering::SeqCst),
             key::KEY_PROXY_NAME => self.key.load(Ordering::SeqCst),
+            mcpproxy::MCP_PROXY_NAME => self.mcp.load(Ordering::SeqCst),
             _ => false,
         }
     }
@@ -476,6 +480,7 @@ impl proxies::Containers for Fake {
         match name {
             container::PROXY_NAME => self.egress.store(true, Ordering::SeqCst),
             key::KEY_PROXY_NAME => self.key.store(true, Ordering::SeqCst),
+            mcpproxy::MCP_PROXY_NAME => self.mcp.store(true, Ordering::SeqCst),
             _ => {}
         }
         Ok(())
@@ -484,7 +489,7 @@ impl proxies::Containers for Fake {
 
 impl doctor::Machine for Fake {
     /// The state the same fake answers [`proxies::Containers`]' question with. Step 7 runs `doctor --full`, which
-    /// reads the two proxies, so a run meant to reach the end has to see what step 4 started — otherwise the deploy
+    /// reads every proxy, so a run meant to reach the end has to see what step 4 started — otherwise the deploy
     /// would fail on a finding about the containers it had just brought up.
     fn running(&self, name: &str) -> bool {
         <Self as proxies::Containers>::running(self, name)
@@ -1882,7 +1887,7 @@ fn a_build_that_failed_says_so_in_its_note() {
 // ---- step 4 and the refusal --------------------------------------------------------------
 
 #[test]
-fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
+fn step_four_starts_all_three_proxies_and_the_second_run_reads_running() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-proxies");
     let socket = dir.file("docker.sock");
@@ -1954,8 +1959,9 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
     );
     assert!(
         step.sentence.contains(container::PROXY_NAME)
-            && step.sentence.contains(key::KEY_PROXY_NAME),
-        "the read does not name both containers: {}",
+            && step.sentence.contains(key::KEY_PROXY_NAME)
+            && step.sentence.contains(mcpproxy::MCP_PROXY_NAME),
+        "the read does not name every container: {}",
         step.sentence
     );
     assert_eq!(
@@ -2215,7 +2221,7 @@ fn a_hub_deploy_on_a_server_machine_installs_the_union() {
 #[test]
 fn a_server_deploy_on_a_hub_machine_installs_the_union() {
     // The other direction, and the one the deleted `refusal` used to forbid. Everything the server half needs is
-    // here — a daemon that answers, an image build, two proxies — because a `server deploy` is the seven steps
+    // here — a daemon that answers, an image build, the proxies — because a `server deploy` is the seven steps
     // whatever the machine's config says; only the file it leaves is different.
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-union-server");

@@ -20,7 +20,8 @@ comes from. [Back to README](../README.md).
                     provisioner ──► Docker container (pi) on an internal network
                           │              │
                     git worktree         ├─ key proxy  (provider key never enters)
-                    agent/<id>           └─ egress proxy (allow-listed HTTPS)
+                    agent/<id>           ├─ MCP proxy  (tool key never enters, only with Internet access)
+                                         └─ egress proxy (allow-listed HTTPS)
 ```
 
 **One binary, three roles.** Holosmith is one static binary, and the same binary is a server (runs sessions), a hub
@@ -46,8 +47,9 @@ is hardened read-only for hooks and config. Merges and pushes run on the host as
 so a project must be one you can push from.
 
 **Isolation is topology.** A session gets an `--internal` network. The only routes out are the key proxy (provider
-calls, with a per-session dummy key) and, when Internet access is enabled, the egress proxy (CONNECT/443,
-allow-list). Previews run on a separate listener and origin.
+calls, with a per-session dummy key — always joined, because a model call works either way) and, when Internet access
+is enabled, the egress proxy (CONNECT/443, allow-list) and the MCP proxy (a tool's stored key, for the hosts
+`key::TOOLS` names). Previews run on a separate listener and origin.
 
 **Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes.
 `holosmith build` compiles in a pinned builder container; `smoke` proves a candidate against the real daemon with a

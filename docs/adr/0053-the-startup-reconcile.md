@@ -90,7 +90,7 @@ which goes unless its row is a delete in progress.**
   the registration too; an unregistered one (a killed start, before git ever heard of it) goes through the
   filesystem. `Worktree::remove` is told `Retained::Unknown`, which keeps the branch: "there is no row to ask"
   must never mean "delete".
-- A name that is not the convention — `hs_egress`, `hs_key`, an operator's own container — is not the build's.
+- A name that is not the convention — `hs_egress`, `hs_key`, `hs_mcp`, an operator's own container — is not the build's.
   The id must be 16 lowercase hex characters (`sessions::is_id`, ADR-0011), and Docker's `name=` filter is only
   a cheap pre-selection because it matches substrings.
 

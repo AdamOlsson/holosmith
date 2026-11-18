@@ -4,8 +4,8 @@ This is spec item 10 §1 and §7, V2, and the CLI's `holosmith doctor [--quick o
 acceptance, which is also the issue body, is:
 
 > `--quick`: Linux with systemd where applicable, Docker reachable, git ≥ 2.38, Tailscale logged in, free disk
-> ≥ `min_free_gb`, required ports free. `--full` adds: egress self-test, network-off probe, `hs_egress`/`hs_key`
-> up, agent image pi version equals the pinned pi version. **V2 gate:** `git merge-tree --write-tree` exits 0
+> ≥ `min_free_gb`, required ports free. `--full` adds: egress self-test, network-off probe, `hs_egress`/`hs_key`/
+> `hs_mcp` up, agent image pi version equals the pinned pi version. **V2 gate:** `git merge-tree --write-tree` exits 0
 > for a clean merge and 1 with paths for a conflict; if the git version lacks it, the trial-merge fallback is
 > implemented. Exit non-zero on any failure, with one actionable line per failure. `ExecStartPre` uses
 > `--quick`, so a broken machine does not start serving sessions.
@@ -131,11 +131,13 @@ exactly one failure.
 `--full` adds four things and starts nothing that outlives it:
 
 - **`network`** is `selftest::run` itself. Its bare probe **is the network-off probe**: a container on a temporary
-  internal network that must reach neither the internet, nor the host, nor the egress proxy's alias; the
-  proxy-joined pass is the second half (ADR-0044/ADR-0046). The temporary network and the `--rm` probe container
-  are removed inside `run`, and the gate asserts the network's absence afterwards.
-- **`proxy`** is two lines, `hs_egress` and `hs_key`, read with `Docker::running` and **never started**: `serve`
-  owns them (ADR-0045/ADR-0048), a stopped container keeps its name, and the sentence says to restart the server.
+  internal network that must reach neither the internet, nor the host, nor either conditional proxy's alias
+  (`hs_egress`, `hs_mcp`); the proxy-joined pass is the second half (ADR-0044/ADR-0046/ADR-0099). The temporary
+  network and the `--rm` probe container are removed inside `run`, and the gate asserts the network's absence
+  afterwards.
+- **`proxy`** is three lines, `hs_egress`, `hs_key` and `hs_mcp`, read with `Docker::running` and **never started**:
+  `serve` owns them (ADR-0045/ADR-0048/ADR-0099), a stopped container keeps its name, and the sentence says to
+  restart the server.
 - **`image`** is its own question on demand: `agent::version_of` (a `docker run --rm --network none pi
   --version`) and `agent::version_check`, so the sentence a mismatch produces is the one a session fails with. An
   image that will not run is a failure naming the build step and `agent_image`, which is what makes the failing
@@ -157,6 +159,6 @@ line per failure. That is recorded rather than claimed as a file written.
 database in each schema state, and a real git for the trial — and both directions of the projection.
 `case_doctor_quick` runs the shipped artifact three times (passing, a held port, an absent daemon) and asserts one
 line per check, the exit code and the sentences; `case_doctor_full` boots the artifact's own Docker `serve` and
-runs `doctor --full` while the machine serves — ports pass because `/api/health` answers, both proxies are up,
+runs `doctor --full` while the machine serves — ports pass because `/api/health` answers, all three proxies are up,
 the image's pi is the pinned one, the self-test passes and leaves no network; and `case_schema_newer` gains the
 `doctor --quick` run that refuses the schema-99 database ADR-0047 promised it would.

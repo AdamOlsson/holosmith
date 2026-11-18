@@ -12,7 +12,7 @@
 //!    nothing else: `systemctl --user` resolves the **name** [`UNIT_NAME`] in that manager's own search path, so a
 //!    child there would reach the account's unit rather than this one. The unit goes first because it is what would
 //!    restart anything.
-//! 2. **The two proxies**: `docker rm --force hs_egress hs_key`.
+//! 2. **The proxies**: `docker rm --force hs_egress hs_key hs_mcp`.
 //! 3. **The machine's network**: `docker network rm egress`. After the containers, because a network with an
 //!    endpoint refuses to be removed (the rule `docker::remove_network` already follows).
 //! 4. **The data**: kept, unless `--purge`.
@@ -112,7 +112,7 @@ impl fmt::Display for Word {
 pub enum What {
     /// The systemd unit.
     Unit,
-    /// `hs_egress` and `hs_key`.
+    /// `hs_egress`, `hs_key` and `hs_mcp`.
     Proxies,
     /// The machine's `egress` network.
     Network,
@@ -543,15 +543,15 @@ fn remove(path: &Path, recursive: bool, tools: &Tools) -> Result<(), String> {
     ))
 }
 
-/// Step 2: the two proxies.
+/// Step 2: the proxies.
 ///
 /// The read is **existence**, not `running`: `--restart unless-stopped` keeps a stopped proxy's name and its
-/// definition, so a teardown that removed only running ones would leave two containers behind that a later boot has
-/// to work around.
+/// definition, so a teardown that removed only running ones would leave containers behind that a later boot has to
+/// work around.
 fn proxies(config: &Config, machine: &dyn Machines) -> Line {
-    // The names this run's config composes (`hs_egress`/`hs_key`, or a smoke run's `smoke_hs_egress`/`smoke_hs_key`,
-    // ) — the same two [`crate::proxies::names`] answers, so a teardown and a boot never disagree about which
-    // containers are "the proxies".
+    // The names this run's config composes (`hs_egress`/`hs_key`/`hs_mcp`, or a smoke run's `smoke_hs_egress`/
+    // `smoke_hs_key`/`smoke_hs_mcp`) — the same three [`crate::proxies::names`] answers, so a teardown and a boot never
+    // disagree about which containers are "the proxies".
     let names = crate::proxies::names(config);
     let existing: Vec<&str> = names
         .iter()
@@ -562,7 +562,7 @@ fn proxies(config: &Config, machine: &dyn Machines) -> Line {
         return Line {
             what: What::Proxies,
             word: Word::Nothing,
-            sentence: format!("neither {} nor {} is on this machine", names[0], names[1]),
+            sentence: format!("none of {} is on this machine", names.join(", ")),
         };
     }
     for name in &existing {

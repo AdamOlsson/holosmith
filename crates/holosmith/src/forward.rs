@@ -20,7 +20,7 @@
 //!   four seconds** while the same request over 1.1 answered headers at once. Hence a decoder.
 //! - **No new dependency.** Hyper's `client` feature would do the decoding for us and costs `want` (ADR-0051
 //!   measured that and refused it for the preview listener). This build has hand-written a SHA-256, an AEAD, a
-//!   ustar writer and a DER writer to avoid one crate (ADR-0071), and `keyproxy::read_chunked` already decodes
+//!   ustar writer and a DER writer to avoid one crate (ADR-0071), and `relay::read_chunked` already decodes
 //!   chunked by hand — bounded, because a key proxy's body must be; this is its streaming sibling.
 //! - **The bound is on the answer's head, never on its body.** Item 3's streams do not end, so a bound that
 //!   covered the body would truncate an event stream. [`TIMEOUT`] and [`SLOW_TIMEOUT`] cover the connect, the
@@ -726,7 +726,7 @@ enum Piece {
 /// Take whatever whole piece the buffer already holds, advancing the state by one step.
 ///
 /// The whole state machine, and deliberately a *streaming* one: a chunk is handed on as soon as it is complete, so a
-/// dev-sized upload and an event stream are the same code with different pacing. `keyproxy::read_chunked` is the
+/// dev-sized upload and an event stream are the same code with different pacing. `relay::read_chunked` is the
 /// bounded sibling and stays separate — it answers one `Vec<u8>` because a key proxy's body has a cap and its head
 /// and body are one value there.
 fn piece(buffer: &mut Vec<u8>, state: &mut Decode) -> Piece {

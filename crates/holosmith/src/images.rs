@@ -79,7 +79,7 @@ pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 /// sentence rather than hanging a deploy nobody is watching.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(1200);
 
-/// `holosmith-proxy:<version>`: the image the machine's two proxies run, named from this binary.
+/// `holosmith-proxy:<version>`: the image the machine's three proxies run, named from this binary.
 ///
 /// The version rather than `latest`: an upgraded binary must build and name a different image, and a tag an
 /// operator can read back is the one fact `docker image ls` shows of what a deploy installed.

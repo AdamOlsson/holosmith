@@ -281,8 +281,8 @@ fn list_names_a_tool_distinguishably_and_setting_it_twice_leaves_one_value() {
         "setting the same tool twice left two rows"
     );
     assert_eq!(
-        store.tool_key("linear").expect("the store reads"),
-        Some(second.to_string()),
+        holosmith::key::Store::tool_key(&store.load().expect("the store reads"), "linear"),
+        Some(second),
         "the second value did not win"
     );
 }
@@ -411,12 +411,12 @@ fn a_tool_key_is_never_a_model_provider() {
 }
 
 /// Rotation is why the key is in the store and read per request: a writer in **another process** (`key set`, twice)
-/// rewrites the file, and the reader a forwarded request uses sees the new value on its next read — no restart, no
-/// cached copy, and nothing else in the secrets directory.
+/// rewrites the file, and the reader a forwarded request uses — `Store::load` and then `Store::tool_key` on that one
+/// read — sees the new value on its next read: no restart, no cached copy, and nothing else in the secrets directory.
 ///
-/// The wire-level proof — two real forwarded requests answered with two different keys — belongs to the proxy that
-/// serves these hosts, which is a later change: the key proxy in this tree routes model providers only, so there is
-/// no request here to send. What this pins is the half that would go wrong silently, a cached copy in the store.
+/// The wire-level proof — two real forwarded requests answered with two different keys — belongs to a real MCP call
+/// through the MCP proxy, which needs a key and the internet (ADR-0099's unmeasured half). What this pins is the half
+/// that would go wrong silently, a cached copy in the store.
 #[test]
 fn a_tool_key_rotation_is_seen_by_the_next_read_of_the_file() {
     let directory = TempDir::new("tool-rotation");
@@ -431,8 +431,8 @@ fn a_tool_key_rotation_is_seen_by_the_next_read_of_the_file() {
     assert_eq!(first.status.code(), Some(0), "{}", stderr_of(&first));
     assert_eq!(stdout_of(&first), "stored linear\n");
     assert_eq!(
-        store.tool_key("linear").expect("the store reads"),
-        Some("lin_api_before-the-rotation".to_string())
+        holosmith::key::Store::tool_key(&store.load().expect("the store reads"), "linear"),
+        Some("lin_api_before-the-rotation")
     );
     let before = fs::read_to_string(store.path()).expect("the file is readable");
 
@@ -443,8 +443,8 @@ fn a_tool_key_rotation_is_seen_by_the_next_read_of_the_file() {
     assert_eq!(second.status.code(), Some(0), "{}", stderr_of(&second));
     assert_eq!(stdout_of(&second), "stored linear\n");
     assert_eq!(
-        store.tool_key("linear").expect("the store reads"),
-        Some("lin_api_after-the-rotation".to_string()),
+        holosmith::key::Store::tool_key(&store.load().expect("the store reads"), "linear"),
+        Some("lin_api_after-the-rotation"),
         "the second read saw the first key: the store cached it"
     );
 

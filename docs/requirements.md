@@ -9,7 +9,7 @@ install` on a `role = "hub"` config asks neither Docker nor git question.
 | Dependency | Why |
 | --- | --- |
 | Linux with systemd | `holosmith install` enables `holosmith.service` in your user manager, and linger is what starts it at boot |
-| Docker Engine | every session is a container on its own `--internal` network, with two proxies beside it |
+| Docker Engine | every session is a container on its own `--internal` network, with three proxies beside it: `hs_egress`, `hs_key` and `hs_mcp` |
 | git 2.38 or newer | a session is a worktree plus an `agent/<id>` branch; merges use `git merge-tree --write-tree` |
 | a provider key | `opencode-go` (the default), `anthropic`, `openai` and nine more — a name it does not know is refused with the full list |
 | free space | `min_free_gb` (default **20** GB) on the data root: checked before a boot and before a create |
@@ -63,8 +63,10 @@ as yourself: the file's owner must be the data root's owner, or
 the key proxy reads the store per request, and the container only ever holds a per-session dummy.
 
 A tool's credential lives in the same file: `holosmith key set <tool-id>` stores one — `linear` is the tool this build
-knows — and `holosmith key revoke <tool-id>` forgets it. The proxy that spends a tool key is a later change, so this is
-a stored key nothing spends yet (ADR-0098).
+knows — and `holosmith key revoke <tool-id>` forgets it. The MCP proxy (`hs_mcp`, reached by a session at
+`http://mcp-proxy:8090/<tool>/<endpoint>` with the session's dummy key) spends it, and it is joined to a session's
+network only when that session allows Internet access, so a tool's host is never reachable with the checkbox off
+(ADR-0098, ADR-0099).
 
 ## Install versus deploy
 

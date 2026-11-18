@@ -181,7 +181,7 @@ impl Deliver for SslClient {
         };
         // A request is a few hundred octets — far inside a pipe's buffer — so this write cannot block; the wait that
         // needs a bound is the one below. The handle is **held**, not dropped: closing `s_client`'s stdin makes it
-        // send its close-notify before the response arrives (`crate::keyproxy::forward` measured that), so
+        // send its close-notify before the response arrives (`crate::relay::forward` measured that), so
         // `Connection: close` in the request head is what ends the exchange.
         stdin.write_all(request).map_err(|error| {
             format!(

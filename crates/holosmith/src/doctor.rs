@@ -3,7 +3,7 @@
 //! The command is two depths of **one list**, because that is how the spec uses it: `doctor --quick` is what
 //! `server deploy` step 1 runs and what the unit file runs as `ExecStartPre` (item 10 §5), and `doctor --full`
 //! is item 10 §7 — run *after* the deploy, once the machine is already serving — which adds the egress
-//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the two proxies' state and the
+//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state and the
 //! agent image's pi version.
 //!
 //! Three rules hold the design together:
@@ -256,7 +256,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
         };
         let isolation = selftest::Names::of(config);
         findings.push(network(machine, &isolation, image, docker_ok, because));
-        // The two proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
+        // The proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
         // (`smoke_hs_egress`) rather than at the machine's.
         let names = proxies::names(config);
         findings.push(proxy(machine, &names[0], PROXY_ALIAS, docker_ok, because));
@@ -264,6 +264,13 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
             machine,
             &names[1],
             KEY_PROXY_ALIAS,
+            docker_ok,
+            because,
+        ));
+        findings.push(proxy(
+            machine,
+            &names[2],
+            crate::mcpproxy::MCP_PROXY_ALIAS,
             docker_ok,
             because,
         ));
