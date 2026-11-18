@@ -44,8 +44,42 @@ pub struct Provider {
     pub host: &'static str,
     /// The path prefix the provider's real API expects. An empty string is Anthropic's shape: pi appends
     /// `/v1/messages` itself. OpenAI-shaped APIs expect `/v1` before the endpoint.
+    ///
+    /// The prefix a request whose endpoint matches no [`Shape`] gets. It is the prefix of the shape this
+    /// build measured the row with, which is why a row with shapes still reads as one triple.
     pub base_path: &'static str,
-    /// Where the real key goes in the upstream request.
+    /// Where the real key goes in the upstream request, for the requests that match no [`Shape`].
+    pub auth: Auth,
+    /// The API shapes this host serves beyond the row's own (host, [`base_path`](Self::base_path),
+    /// [`auth`](Self::auth)) triple. Empty for every row but `opencode-go`.
+    ///
+    /// A shape exists because a provider publishes more than one API under one host, and **the shape is a
+    /// property of the model**: pi's bundled catalog is the only component that knows which one a model
+    /// speaks, and it says so in the path it appends to the `baseUrl` this build writes — `/v1/messages` for
+    /// an `anthropic-messages` model, `/chat/completions` for an `openai-completions` one. A row per shape
+    /// would need pi to know a provider id its catalog does not carry, with the model metadata (context
+    /// window, cost, reasoning levels) copied into `models.json` beside it.
+    ///
+    /// A shape is still **not** a request-controlled route: the host stays the row's, both the endpoints and
+    /// the base paths are constants here, and a `..` is refused whatever matched (ADR-0097).
+    pub shapes: &'static [Shape],
+}
+
+/// One API shape a provider's host serves: the endpoint pi appends to the `baseUrl` it was given, the base
+/// path that provider publishes the endpoint under, and the header that shape's own client sends the key in.
+///
+/// The three travel together because they change together: a host that serves a second API usually serves it
+/// under a different path and reads the key from a different header. Taking any one of them from the request
+/// instead is the request-controlled route ADR-0050 refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    /// The endpoint pi appends, with its leading `/` — `/v1/messages`, `/chat/completions` — matched exactly
+    /// (or as a prefix ending at a `/`, and the longest endpoint wins, so a shape naming a longer endpoint is
+    /// not shadowed by one of its prefixes).
+    pub endpoint: &'static str,
+    /// The base path the provider serves that endpoint under. The forwarded path is this, then the endpoint.
+    pub base_path: &'static str,
+    /// Where the real key goes in this shape's request.
     pub auth: Auth,
 }
 
@@ -56,6 +90,36 @@ pub enum Auth {
     XApiKey,
     /// OpenAI-compatible `Authorization: Bearer …`.
     Bearer,
+}
+
+impl Provider {
+    /// The base path and the header the request whose appended endpoint is `endpoint` must be forwarded with.
+    ///
+    /// `endpoint` is the path pi appended after `/\<provider\>`, with its leading `/`: `/v1/messages`,
+    /// `/chat/completions`, or the empty string when pi appended nothing. A shape is selected by an exact endpoint
+    /// match (or the endpoint and then further `/`-separated segments), and the **longest** endpoint wins. An
+    /// endpoint that matches no shape answers the row's own [`base_path`](Self::base_path) and
+    /// [`auth`](Self::auth), so every row without shapes — and every endpoint of a row with them that pi did not
+    /// name — routes exactly as it did before shapes existed.
+    pub fn shape_for(&self, endpoint: &str) -> (&'static str, Auth) {
+        let matched = self
+            .shapes
+            .iter()
+            .filter(|shape| is_endpoint(endpoint, shape.endpoint))
+            .max_by_key(|shape| shape.endpoint.len());
+        match matched {
+            Some(shape) => (shape.base_path, shape.auth),
+            None => (self.base_path, self.auth),
+        }
+    }
+}
+
+/// Whether `path` is `endpoint`, or `endpoint` and then further segments under it.
+fn is_endpoint(path: &str, endpoint: &str) -> bool {
+    match path.strip_prefix(endpoint) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// The providers this build knows how to forward to.
@@ -69,82 +133,107 @@ pub enum Auth {
 /// (ADR-0050, ADR-0093), so the first run asks for a key the repository has actually used. The rows are matched
 /// by id ([`provider`]), so the order matters only to the sentences that enumerate them.
 pub const PROVIDERS: &[Provider] = &[
-    // opencode.ai's Go gateway serves two API shapes under one host, and a row is one (host, path, auth)
-    // triple — so this row is the anthropic-messages shape, which is what pi's `claude-haiku-5-5` (the model
-    //  verified V3 with) speaks. The openai-completions shape would be a second row,
-    // `opencode-go-openai`, with `/inference/go/openai/v1` and `Bearer`; ADR-0050 says why that is a row rather
-    // than a per-request choice.
+    // opencode.ai's Go gateway serves more than one API under one host — `anthropic-messages` under
+    // `/inference/go/anthropic` and `openai-completions` under `/inference/go/openai/v1` — and pi's bundled
+    // catalog names which one a model speaks by the path it appends (`/v1/messages`, `/chat/completions`). So
+    // this row carries a shape per endpoint and keeps the anthropic triple as its own default, which is the
+    // shape V3 was measured with: `opencode-go/claude-haiku-5-5`. ADR-0050 predicted the openai shape as a
+    // second row and ADR-0097 records why it is a shape on this one instead, and lists the endpoints
+    // exactly.
     Provider {
         id: "opencode-go",
         host: "opencode.ai",
         base_path: "/inference/go/anthropic",
         auth: Auth::XApiKey,
+        shapes: &[
+            Shape {
+                endpoint: "/v1/messages",
+                base_path: "/inference/go/anthropic",
+                auth: Auth::XApiKey,
+            },
+            Shape {
+                endpoint: "/chat/completions",
+                base_path: "/inference/go/openai/v1",
+                auth: Auth::Bearer,
+            },
+        ],
     },
     Provider {
         id: "anthropic",
         host: "api.anthropic.com",
         base_path: "",
         auth: Auth::XApiKey,
+        shapes: &[],
     },
     Provider {
         id: "openai",
         host: "api.openai.com",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "openrouter",
         host: "openrouter.ai",
         base_path: "/api/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "deepseek",
         host: "api.deepseek.com",
         base_path: "",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "mistral",
         host: "api.mistral.ai",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "groq",
         host: "api.groq.com",
         base_path: "/openai/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "xai",
         host: "api.x.ai",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "fireworks",
         host: "api.fireworks.ai",
         base_path: "/inference/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "together",
         host: "api.together.xyz",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "cerebras",
         host: "api.cerebras.ai",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
     Provider {
         id: "nvidia",
         host: "integrate.api.nvidia.com",
         base_path: "/v1",
         auth: Auth::Bearer,
+        shapes: &[],
     },
 ];
 
@@ -701,5 +790,69 @@ mod tests {
             refusal.ends_with(&provider_ids().join(", ")),
             "the refusal does not name the whole table: {refusal}"
         );
+    }
+
+    /// `opencode-go` serves two APIs under one host, and the table says so exactly: two endpoints, two base
+    /// paths, two headers, and the anthropic triple as the row's own default.
+    ///
+    /// A model's API shape is the catalog's fact, not the row's (ADR-0097): pi's bundled catalog names an
+    /// `openai-completions` model `opencode-go/deepseek-v4.1-flash` and an `anthropic-messages` one
+    /// `opencode-go/claude-haiku-5-5`, and appends `/chat/completions` or `/v1/messages` to the base URL this
+    /// build wrote. A row that took one shape only 404s every model of the other — the defect this table fixes.
+    /// The row's own `base_path` stays Anthropic's so a tail that names no shape routes as it always has.
+    ///
+    #[test]
+    fn opencode_go_names_one_shape_per_endpoint_and_every_other_row_names_none() {
+        let row = provider("opencode-go").expect("the measured provider is a row");
+        assert_eq!(row.base_path, "/inference/go/anthropic");
+        assert_eq!(row.auth, Auth::XApiKey);
+        assert_eq!(
+            row.shapes,
+            &[
+                Shape {
+                    endpoint: "/v1/messages",
+                    base_path: "/inference/go/anthropic",
+                    auth: Auth::XApiKey,
+                },
+                Shape {
+                    endpoint: "/chat/completions",
+                    base_path: "/inference/go/openai/v1",
+                    auth: Auth::Bearer,
+                },
+            ],
+            "the shapes are the two API roots opencode.ai publishes for this key, and nothing else"
+        );
+        assert_eq!(
+            row.shape_for("/v1/messages"),
+            ("/inference/go/anthropic", Auth::XApiKey)
+        );
+        assert_eq!(
+            row.shape_for("/chat/completions"),
+            ("/inference/go/openai/v1", Auth::Bearer)
+        );
+        assert_eq!(
+            row.shape_for("/something/else"),
+            (row.base_path, row.auth),
+            "a tail that names no shape must keep the row's own triple"
+        );
+        assert_eq!(
+            row.shape_for("/v1/messagesfoo"),
+            (row.base_path, row.auth),
+            "an endpoint is matched exactly, not as a prefix of a longer segment"
+        );
+
+        for other in PROVIDERS.iter().filter(|row| row.id != "opencode-go") {
+            assert!(
+                other.shapes.is_empty(),
+                "{} carries a shape this test does not pin",
+                other.id
+            );
+            assert_eq!(
+                other.shape_for("/chat/completions"),
+                (other.base_path, other.auth),
+                "{} answered another row's shape",
+                other.id
+            );
+        }
     }
 }

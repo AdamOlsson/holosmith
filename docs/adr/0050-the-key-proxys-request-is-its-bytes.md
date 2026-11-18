@@ -52,6 +52,13 @@ row for the openai shape would be `opencode-go-openai` with `/inference/go/opena
 the table needs to change for it, and `models.json` would then need the `models` array V4's fallback names. The
 table stays exact — a missing provider is a refusal that names what is supported.
 
+**Amended by ADR-0097: that second row was not added.** A machine whose only key is `opencode-go` got `404 status
+code (no body)` for every `openai-completions` model, because a row here serves one of the two shapes and pi said
+which one in the path it appended. The row now carries a small, exact `shapes` table — an endpoint pi appends, the
+base path for it, and the header — and the proxy selects from it. What stays true from this record: a row's host
+and paths are constants in `key.rs`, a request cannot name either, and the table stays exact, so an endpoint no
+shape names is forwarded as it was before.
+
 ## What the three checks measured
 
 - **V3 passes.** A real session (`opencode-go/claude-haiku-5-5`, `thinking = "max"`) answers with text deltas, a

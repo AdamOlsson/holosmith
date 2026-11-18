@@ -65,6 +65,9 @@ pub const OPENSSL: &str = "openssl";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub provider: &'static Provider,
+    /// The header this request's shape carries the key in, selected from the endpoint pi appended. It is the
+    /// row's own [`auth`](Provider::auth) for every request that matches no [`Shape`](crate::key::Shape).
+    pub auth: Auth,
     /// The path the provider's API expects, with the key proxy's `/<provider>` prefix removed.
     pub path: String,
 }
@@ -75,6 +78,12 @@ impl Route {
     /// The provider segment is matched exactly against [`key::PROVIDERS`]. A path that does not start with
     /// `/`, a provider this build does not know, or a `..` segment is refused with a sentence: there is no
     /// fallback host to send it to.
+    ///
+    /// **The tail selects the shape.** What pi appended after `/\<provider\>` is the endpoint its bundled
+    /// catalog says the model speaks, and a row that serves more than one API names a base path and a header
+    /// per endpoint ([`Provider::shape_for`]). A row without shapes, and a tail a row with shapes does not
+    /// name, keep the row's own path and header, so this is the one place a shape is chosen and everything
+    /// else about routing is unchanged.
     pub fn parse(target: &str) -> Result<Self, RouteError> {
         let (path, query) = match target.split_once('?') {
             Some((path, query)) => (path, Some(query)),
@@ -92,12 +101,16 @@ impl Route {
             provider: id.to_string(),
         })?;
         let tail = segments.next().unwrap_or_default();
-        let mut path = format!(
-            "{}{}",
-            provider.base_path,
-            if tail.is_empty() { "" } else { "/" }
-        );
-        path.push_str(tail);
+        // The endpoint as a path: the split dropped the `/` after the provider id, and a shape names
+        // `/v1/messages`, the spelling pi and the provider both use. The forwarded path is the shape's base path
+        // and then this.
+        let endpoint = if tail.is_empty() {
+            String::new()
+        } else {
+            format!("/{tail}")
+        };
+        let (base_path, auth) = provider.shape_for(&endpoint);
+        let mut path = format!("{base_path}{endpoint}");
         if path.is_empty() {
             path.push('/');
         }
@@ -108,7 +121,11 @@ impl Route {
             Some(query) => format!("{path}?{query}"),
             None => path,
         };
-        Ok(Self { provider, path })
+        Ok(Self {
+            provider,
+            auth,
+            path,
+        })
     }
 }
 
@@ -258,6 +275,10 @@ pub fn parse(head: &str) -> Result<Head, RouteError> {
 /// `Host` is replaced by the provider's host, and the provider's auth header is replaced by the real key.
 /// Everything else is passed through — an Anthropic `anthropic-beta` or an OpenAI `OpenAI-Beta` is part of the
 /// request's meaning, not of the transport.
+///
+/// The header the key goes in is the **route's**, not the row's: the endpoint pi appended selected the shape,
+/// and a shape whose client sends `Authorization: Bearer` carries no `x-api-key` even when the row's own
+/// default is Anthropic's.
 pub fn upstream(head: &Head, real_key: &str, body: &[u8]) -> Vec<u8> {
     let mut out = format!("{} {} HTTP/1.1\r\n", head.method, head.route.path);
     out.push_str(&format!("Host: {}\r\n", head.route.provider.host));
@@ -282,7 +303,7 @@ pub fn upstream(head: &Head, real_key: &str, body: &[u8]) -> Vec<u8> {
         }
         out.push_str(&format!("{name}: {value}\r\n"));
     }
-    match head.route.provider.auth {
+    match head.route.auth {
         Auth::XApiKey => out.push_str(&format!("x-api-key: {real_key}\r\n")),
         Auth::Bearer => out.push_str(&format!("Authorization: Bearer {real_key}\r\n")),
     }
@@ -858,6 +879,105 @@ mod tests {
         let text = String::from_utf8(upstream(&parsed, "sk-real", b"{}")).expect("utf-8");
         assert!(text.contains("Authorization: Bearer sk-real\r\n"), "{text}");
         assert!(text.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn an_opencode_go_route_takes_its_shape_from_the_endpoint_pi_appended() {
+        // One row, two APIs under one host, and the model's shape is what pi appends: an
+        // `anthropic-messages` model sends `/v1/messages` to `/inference/go/anthropic` with `x-api-key`, and an
+        // `openai-completions` model sends `/chat/completions` to `/inference/go/openai/v1` with `Bearer`. The
+        // defect: the row's own anthropic prefix was used for both, so every openai-completions model was
+        // forwarded to `/inference/go/anthropic/chat/completions` and answered `404 status code (no body)`.
+        let anthropic = Route::parse("/opencode-go/v1/messages").expect("a route");
+        assert_eq!(anthropic.provider.host, "opencode.ai");
+        assert_eq!(anthropic.path, "/inference/go/anthropic/v1/messages");
+        assert_eq!(anthropic.auth, Auth::XApiKey);
+        let parsed = parse(&head("/opencode-go/v1/messages")).expect("a head");
+        let text = String::from_utf8(upstream(&parsed, "sk-real", b"{}")).expect("utf-8");
+        assert!(text.starts_with("POST /inference/go/anthropic/v1/messages HTTP/1.1\r\n"));
+        assert!(text.contains("Host: opencode.ai\r\n"), "{text}");
+        assert!(text.contains("x-api-key: sk-real\r\n"), "{text}");
+        assert!(!text.contains("Authorization:"), "{text}");
+
+        let openai = Route::parse("/opencode-go/chat/completions").expect("a route");
+        assert_eq!(openai.provider.host, "opencode.ai");
+        assert_eq!(openai.path, "/inference/go/openai/v1/chat/completions");
+        assert_eq!(openai.auth, Auth::Bearer);
+        let parsed = parse(&head("/opencode-go/chat/completions")).expect("a head");
+        let text = String::from_utf8(upstream(&parsed, "sk-real", b"{}")).expect("utf-8");
+        assert!(
+            text.starts_with("POST /inference/go/openai/v1/chat/completions HTTP/1.1\r\n"),
+            "{text}"
+        );
+        assert!(text.contains("Authorization: Bearer sk-real\r\n"), "{text}");
+        assert!(
+            !text.contains("x-api-key"),
+            "the shape's header is the only one that carries a key: {text}"
+        );
+    }
+
+    #[test]
+    fn a_query_string_survives_the_shape_s_rewrite() {
+        let route = Route::parse("/opencode-go/chat/completions?stream=true").expect("a route");
+        assert_eq!(
+            route.path,
+            "/inference/go/openai/v1/chat/completions?stream=true"
+        );
+        let route = Route::parse("/anthropic/v1/messages?beta=1").expect("a route");
+        assert_eq!(route.path, "/v1/messages?beta=1");
+    }
+
+    #[test]
+    fn a_row_without_shapes_keeps_its_own_path_and_header_whatever_the_endpoint() {
+        for (target, path, auth) in [
+            ("/anthropic/v1/messages", "/v1/messages", Auth::XApiKey),
+            (
+                "/anthropic/chat/completions",
+                "/chat/completions",
+                Auth::XApiKey,
+            ),
+            (
+                "/openai/chat/completions",
+                "/v1/chat/completions",
+                Auth::Bearer,
+            ),
+            (
+                "/groq/chat/completions",
+                "/openai/v1/chat/completions",
+                Auth::Bearer,
+            ),
+        ] {
+            let route = Route::parse(target).expect("a route");
+            assert_eq!(route.path, path, "{target}");
+            assert_eq!(route.auth, auth, "{target}");
+        }
+    }
+
+    #[test]
+    fn a_dummy_key_never_survives_into_the_upstream_request() {
+        // The client's header is stripped whatever shape selected the request and whatever header it carried: pi
+        // sends the dummy in `x-api-key` for one shape and `Authorization: Bearer` for the other, and the
+        // upstream request must carry the real key in the selected shape's header and nothing else.
+        for target in [
+            "/opencode-go/v1/messages",
+            "/opencode-go/chat/completions",
+            "/anthropic/v1/messages",
+        ] {
+            for header in ["x-api-key: hs-dummy-x", "Authorization: Bearer hs-dummy-y"] {
+                let parsed = parse(&format!(
+                    "POST {target} HTTP/1.1\r\nHost: key-proxy:8080\r\n{header}\r\n\r\n"
+                ))
+                .expect("a head");
+                let text = String::from_utf8(upstream(&parsed, "sk-real", b"")).expect("utf-8");
+                assert!(!text.contains("hs-dummy"), "{target}: {text}");
+                assert!(text.contains("sk-real"), "{target}: {text}");
+                assert_eq!(
+                    text.matches("sk-real").count(),
+                    1,
+                    "the key must appear once, in one header: {target}: {text}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

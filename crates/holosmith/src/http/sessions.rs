@@ -200,6 +200,38 @@ fn is_thinking_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
 }
 
+/// The refusal a create whose `model` names a provider this machine cannot serve gets, or `None`.
+///
+/// A model string may name its provider as `<provider>/<model>` — the pair `agent::seed` splits into pi's
+/// `defaultProvider` and `defaultModel` — and pi then resolves the model from that provider's catalog inside the
+/// session, with the base URL and the dummy key `key::models` wrote. A provider this build does not forward to, or
+/// one this machine holds no key for, is therefore a session whose first prompt fails inside a container, where
+/// the operator sees a status line and not which key was missing. So it is refused here, before a row exists, and
+/// the sentence names the command that fixes it.
+///
+/// **A bare model id is allowed**, whatever it names: pi's bundled catalog is the only list of model ids this build
+/// has, and the quick start's `claude-sonnet-4.5` names no provider at all. Only a non-empty first segment is a
+/// claim about this machine's providers.
+///
+/// The key store is read only when the model names a provider, so a bare id's create does not touch the file.
+fn model_provider_refusal(state: &AppState, model: &str) -> Option<ApiError> {
+    let (named, _) = model.split_once('/')?;
+    if named.is_empty() {
+        return None;
+    }
+    let Some(provider) = key::provider(named) else {
+        return Some(ApiError::unknown_model_provider(named));
+    };
+    let store = key::Store::from_data_root(&state.config.data_root);
+    match store.load() {
+        Ok(secrets) if secrets.providers.contains_key(provider.id) => None,
+        Ok(_) => Some(ApiError::provider_without_key(provider.id)),
+        // A key file this machine cannot read is not "no key": the operator may well hold one. The sessions list
+        // answers `internal` for the same reason, and `internal` logs the operation and the error once.
+        Err(error) => Some(internal("keys", error)),
+    }
+}
+
 /// A create's decisions in their fixed order: body shape and unknown field (`parse_body`), the
 /// key, then project, model, thinking (ADR-0012). Pinned by `the_precedence_is_...` below,
 /// because an order that is not written down is an order that changes when the code moves.
@@ -266,6 +298,10 @@ pub async fn create(
     // the disk floor is the third of that family and the same kind of fact — the *machine's*, not the
     // session's — so it is asked second, and again instead of the project's read: a full machine needs no `git`
     // process to answer itself. In the same order the resume asks it, and for the same reason.
+    //
+    // The model's provider is the fourth, and it is asked before the project's read for the disk floor's reason:
+    // the key store is one file and the project's answer is a `git` child, and no repository can make a provider
+    // this machine holds no key for servable.
     let refusal = if state.config.role == crate::config::Role::Hub {
         // **A hub has no sessions** (the spec's `Roles`: "a hub-only machine.. creates no sessions").
         // First of the machine's refusals, before the drain and the floor, because it is the fact that makes the
@@ -276,6 +312,8 @@ pub async fn create(
         Some(ApiError::draining())
     } else if let Some(floor) = crate::http::disk::refusal(state).await {
         Some(floor)
+    } else if let Some(unserved) = model_provider_refusal(state, &parsed.model) {
+        Some(unserved)
     } else {
         refuse_project(state, &parsed.project).await
     };

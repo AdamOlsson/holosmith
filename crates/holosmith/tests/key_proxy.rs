@@ -116,6 +116,39 @@ async fn a_valid_dummy_with_no_stored_provider_key_is_a_503() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn either_shape_of_a_provider_without_a_key_names_that_provider() {
+    // `opencode-go` serves two APIs under one host, and the row selects one of them from the endpoint pi
+    // appended. Neither selection changes which provider's key is looked for: a machine with no `opencode-go` key
+    // answers both with the one sentence that names `key set`, before any TLS client is started.
+    let directory = TempDir::new("no-provider-shapes");
+    let store = Arc::new(Store::new(directory.path.join("keys.toml")));
+    let dummy = store.dummy_for("0123456789abcdef").expect("a dummy");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("the bound address");
+    let serve = tokio::spawn(keyproxy::serve(listener, Arc::clone(&store)));
+    waiting(address);
+    for target in ["/opencode-go/v1/messages", "/opencode-go/chat/completions"] {
+        let response = exchange(
+            address,
+            &format!(
+                "POST {target} HTTP/1.1\r\nHost: key-proxy:8080\r\nx-api-key: {dummy}\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 503 "),
+            "{target}: {response}"
+        );
+        assert!(
+            response.contains("key set opencode-go"),
+            "{target}: {response}"
+        );
+    }
+    serve.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_delete_flow_revokes_the_sessions_dummy_key() {
     let directory = TempDir::new("revoke");
     let store = Store::new(directory.path.join("secrets/keys.toml"));

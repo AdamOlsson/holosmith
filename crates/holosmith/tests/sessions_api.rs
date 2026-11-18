@@ -12,7 +12,7 @@ use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::error::{
     BAD_BODY, BAD_CLIENT, BAD_IDEMPOTENCY_KEY, BAD_MODEL, BAD_PROJECT, BAD_THINKING, CAP_REACHED,
-    MISSING_IDEMPOTENCY_KEY, UNKNOWN_FIELD,
+    MISSING_IDEMPOTENCY_KEY, PROVIDER_WITHOUT_KEY, UNKNOWN_FIELD,
 };
 use holosmith::http::{self, AppState};
 use holosmith::sessions::state::Trigger;
@@ -70,6 +70,29 @@ fn body_with_model(model: &str) -> String {
 fn body_with_thinking(thinking: &str) -> String {
     format!(r#"{{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"{thinking}"}}"#)
 }
+
+/// A default config whose data root is this test's own.
+///
+/// A create reads the key store when its model names a provider, so a test left on the default data root would
+/// answer from the keys of the machine running it: a developer with an `opencode-go` key would see a create where CI
+/// sees a refusal.
+fn config_in(dir: &TempDir) -> Config {
+    Config {
+        data_root: dir.path().join("data"),
+        ..Config::default()
+    }
+}
+
+/// A key store at this test's data root, in the shape `holosmith key set` writes.
+fn write_keys(dir: &TempDir, text: &str) {
+    let secrets = dir.file("data/secrets");
+    std::fs::create_dir_all(&secrets).expect("the secrets directory is creatable");
+    std::fs::write(secrets.join("keys.toml"), text).expect("the key file is writable");
+}
+
+/// The model the tests below name, on the provider whose row serves two API shapes: pi's catalog calls it
+/// `openai-completions`, the shape that answered `404 status code (no body)` while the row had one prefix for both.
+const KEYED_MODEL: &str = "opencode-go/deepseek-v4.1-flash";
 
 /// The ADR-0008 envelope: the status, `content-type: application/json`, and exactly two keys
 /// whose `code` is `code`. A status-only assertion is how a broken contract passes a test.
@@ -140,18 +163,24 @@ fn live_count(state: &AppState) -> u64 {
         .expect("the live count reads")
 }
 
-/// Stop an idle session the way the product does — spec item 8's `idle` + `evict` row, through
-/// the one state function. A create provisions in the background, so the
-/// test waits for `idle` rather than writing a state the table does not allow.
-async fn stop_idle_session(state: &AppState, id: &str) {
+/// Wait for a session to reach `idle`: a create provisions in the background, so a test that needs the
+/// provisioner done waits for the state rather than writing one the table does not allow.
+async fn wait_idle(state: &AppState, id: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while locked_row(state, id).status != Status::Idle {
         assert!(
             std::time::Instant::now() < deadline,
-            "the session never left starting"
+            "the session never reached idle"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// Stop an idle session the way the product does — spec item 8's `idle` + `evict` row, through
+/// the one state function. A create provisions in the background, so the
+/// test waits for `idle` rather than writing a state the table does not allow.
+async fn stop_idle_session(state: &AppState, id: &str) {
+    wait_idle(state, id).await;
     state
         .transitioner()
         .apply(id, Trigger::Evict, Some("the test's reason"))
@@ -291,6 +320,157 @@ async fn the_shape_rules_accept_their_own_values() {
     assert_eq!(row.project, "my.repo_2-x");
     assert_eq!(row.model, "claude-sonnet-4.5");
     assert_eq!(row.thinking, "high");
+    served.finish().await.expect("a clean shutdown");
+}
+
+// ---- the model's provider ---------------------------------------------------------------
+
+#[tokio::test]
+async fn a_model_naming_a_provider_without_a_key_is_422_provider_without_key() {
+    // The pair pi resolves inside the session: `<provider>/<model>`. A provider this machine holds no key for is a
+    // session whose first prompt fails in a container, so it is refused before a row exists and the sentence names
+    // the command that makes it servable.
+    let dir = TempDir::new("api-provider-no-key");
+    let state = state_in(&dir, config_in(&dir));
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let body = body_with_model(KEYED_MODEL);
+    let refused = post_create(served.addr, Some("no-key"), &body).await;
+    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&refused.body).expect("an envelope is JSON");
+    let message = envelope["message"].as_str().expect("a message");
+    assert!(
+        message.contains("holosmith key set opencode-go"),
+        "the sentence does not name the next step: {message}"
+    );
+    assert_eq!(live_count(&state), 0, "a refused model wrote a row");
+
+    // The same model with the key stored creates: the refusal is the missing key, not the provider. The store is
+    // read per request, so a `key set` between two creates is enough.
+    write_keys(
+        &dir,
+        "[providers]\nopencode-go = \"not-a-real-key\"\n[sessions]\n",
+    );
+    let allowed = post_create(served.addr, Some("with-key"), &body).await;
+    let (id, _) = assert_created(&allowed);
+    assert_eq!(locked_row(&state, &id).model, KEYED_MODEL);
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_model_naming_an_unknown_provider_is_refused_even_when_this_machine_has_keys() {
+    // The other half of the same code: a provider segment this build does not forward to is refused whatever the
+    // key store holds — a machine with one key is not a machine that serves every provider.
+    let dir = TempDir::new("api-provider-unknown");
+    write_keys(
+        &dir,
+        "[providers]\nanthropic = \"sk-ant-not-a-real-key\"\n[sessions]\n",
+    );
+    let state = state_in(&dir, config_in(&dir));
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let refused = post_create(
+        served.addr,
+        Some("unknown-provider"),
+        &body_with_model("not-a-provider/some-model"),
+    )
+    .await;
+    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&refused.body).expect("an envelope is JSON");
+    let message = envelope["message"].as_str().expect("a message");
+    assert!(
+        message.contains("does not forward to") && message.contains("holosmith key set"),
+        "the sentence does not name the table and the command: {message}"
+    );
+    assert!(
+        !refused.body.contains("not-a-real-key"),
+        "the refusal echoed a key: {}",
+        refused.body
+    );
+    assert_eq!(live_count(&state), 0);
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_bare_model_id_still_creates_on_a_machine_with_no_keys() {
+    // A model id without a `/` names no provider, so this build has nothing to check it against: pi's bundled
+    // catalog is the only list of model ids, and `claude-sonnet-4.5` is the quick start's. A data root with no
+    // secrets directory at all is the machine this must not refuse.
+    let dir = TempDir::new("api-bare-model");
+    let state = state_in(&dir, config_in(&dir));
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    assert!(!dir.file("data/secrets/keys.toml").exists());
+    let (id, _) = assert_created(&post_create(served.addr, Some("bare"), BODY).await);
+    assert_eq!(locked_row(&state, &id).model, "claude-sonnet-4.5");
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_retried_create_answers_its_row_after_the_key_went_away() {
+    // The refusal is decided after the idempotency key's lookup, so a retry whose first attempt made a row still
+    // answers that row: the client cannot tell whether its first request arrived, and a `422` for a session that
+    // exists would be an answer no retry can act on.
+    let dir = TempDir::new("api-provider-retry");
+    write_keys(
+        &dir,
+        "[providers]\nopencode-go = \"not-a-real-key\"\n[sessions]\n",
+    );
+    let state = with_stub(state_in(&dir, config_in(&dir)), fast_stub());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let body = body_with_model(KEYED_MODEL);
+    let (first, _) = assert_created(&post_create(served.addr, Some("retry"), &body).await);
+    // Provisioning writes the session's dummy into the same file, so the test waits for it before rewriting the
+    // store: an idle session is the row that says the create's own work is done.
+    wait_idle(&state, &first).await;
+    write_keys(&dir, "[providers]\n[sessions]\n");
+
+    let retry = post_create(served.addr, Some("retry"), &body).await;
+    // No `assert_created`: that helper's row is `starting`, and this retry answers the row as it now is — the
+    // point is that it answers the same id at all.
+    assert_eq!(retry.status, 202, "{}", retry.body);
+    let answered: serde_json::Value =
+        serde_json::from_str(&retry.body).expect("a create answers JSON");
+    assert_eq!(
+        answered["id"].as_str(),
+        Some(first.as_str()),
+        "a retry after the key went away lost its row"
+    );
+    assert_eq!(live_count(&state), 1, "the retry wrote a second row");
+
+    let fresh = post_create(served.addr, Some("fresh"), &body).await;
+    assert_refusal(&fresh, 422, PROVIDER_WITHOUT_KEY);
+    assert_eq!(live_count(&state), 1);
+    served.finish().await.expect("a clean shutdown");
+}
+
+#[tokio::test]
+async fn a_refused_model_does_not_evict_the_idle_session_it_would_have_displaced() {
+    // The refusal rides the machine's own refusals, so it is raised before the cap's count: a create that cannot
+    // run must not stop somebody else's session to make room for it. On a machine of one slot with an idle
+    // session, the row is still `idle` after the refusal.
+    let dir = TempDir::new("api-provider-no-evict");
+    let state = with_stub(
+        state_in(
+            &dir,
+            Config {
+                max_live_sessions: 1,
+                ..config_in(&dir)
+            },
+        ),
+        fast_stub(),
+    );
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let (id, _) = assert_created(&post_create(served.addr, Some("idle"), BODY).await);
+    wait_idle(&state, &id).await;
+
+    let refused = post_create(served.addr, Some("refused"), &body_with_model(KEYED_MODEL)).await;
+    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    assert_eq!(
+        locked_row(&state, &id).status,
+        Status::Idle,
+        "the refusal evicted the idle session on its way to saying no"
+    );
+    assert_eq!(live_count(&state), 1);
     served.finish().await.expect("a clean shutdown");
 }
 
