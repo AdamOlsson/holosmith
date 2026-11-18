@@ -51,8 +51,16 @@ found and what a name may be. A made-up name would not be the directory the read
 `worktree::refuse` is the one reading of "may this repository be mounted", asked of the clone before the command
 answers 0. A refusal prints **the API's own code and sentence** — `git_not_directory`, `submodules_present`,
 `worktree_config_enabled` — because the CLI fails with `http::sessions::refusal_error`, the mapping the route
-answers with; nothing here re-spells those sentences. The one arm that is not a code is `Refusal::Unreadable`, where
-git could not be asked about the clone at all, and its sentence is git's own.
+answers with; nothing here re-spells those sentences.
+
+**The fourth answer `refuse` gives is not a refusal, and neither command treats it as one.** `Refusal::Unreadable`
+means git could not be asked — the `git config` reading could not be spawned, or it answered with an exit status
+that is neither 0 nor 1 — so nothing about the repository has been checked. `add` refuses the clone and prints
+git's own words on stderr, which is the one thing that says what went wrong at the terminal the clone ran in, while
+the route logs those words and answers ADR-0008's sentence: a client on a phone can do nothing with them. `list`
+prints the name — it is there, and the form can be used with it — says on stderr that the project could not be
+checked, and **exits 1**, which is `status`'s rule for a fact it could not read. The three coded shapes stay a
+silent skip, because a repository the create will not mount is a name the form must not be offered.
 
 **The refused clone is removed before the command exits 1, and the line says so.** A clone left in place would
 refuse its own retry: `add` reads an existing destination as taken before it clones anything, so the operator's
@@ -73,14 +81,16 @@ non-empty line** in the sentence, which is where a program puts the reason it st
 `project list` follows the same split: names on stdout, one per line, nothing else; an absent projects root is an
 empty list and exit 0, because the first `add` is what makes the directory. What it prints is filtered by the same
 `worktree::refuse` a create applies, so a directory a session cannot be created in is not a name printed for the
-form to reject.
+form to reject — with the one exception D3 names, where the repository could not be checked at all and the exit
+code carries that fact instead of a missing name.
 
 ## What measures it
 
 - `crates/holosmith/tests/project_cli.rs` drives the binary the way the README does: a real `git clone` of a local
   repository, the derived name of a URL with `.git` and with a trailing `/`, the occupied destination, a URL that
   names nothing, a `list` before and after an add, the `submodules_present` clone **refused, removed and retried**
-  (the retry must reach the refusal again and not `already exists`), and a failed clone's one line.
+  (the retry must reach the refusal again and not `already exists`), a failed clone's one line, and a projects root
+  holding one repository git cannot be asked about — its name printed, the stderr line, and exit 1.
 - `commands::project`'s unit test is where `git_not_directory` and `worktree_config_enabled` are measured: a fresh
   clone always has a `.git` **directory**, and git writes a clone its own config rather than copying the source's
   local one, so neither shape is reachable through `git clone`. The test asserts each shape's code and sentence

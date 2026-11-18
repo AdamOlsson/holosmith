@@ -2,7 +2,9 @@
 //!
 //! `add` clones a URL into `<projects_root>/<name>` and prints `<name>` — the exact string the new-session
 //! form takes — because the name a project is addressed by is derived here rather than asked for (ADR-0096).
-//! `list` prints the names a create would accept, which is the same question read back.
+//! `list` prints the names a create would accept, which is the same question read back — and the one name `git`
+//! could not be asked about goes to stdout too, with a line on stderr and exit 1, because a fact that could not be
+//! read is not the same answer as a repository that was refused.
 //!
 //! The clone is `git clone` on the host, as one child process, and what it produced is put through
 //! [`crate::worktree::refuse`] before the command answers 0: a clone a create would refuse is not a project
@@ -47,7 +49,7 @@ fn add(projects_root: &Path, url: &str) -> ExitCode {
         Ok(name) => name,
         Err(sentence) => return failure("add", &sentence),
     };
-    let destination = projects_root.join(&name);
+    let destination = worktree::repository_of(projects_root, &name);
     // `symlink_metadata`, not `exists`: a broken symlink is still something at that path, and a clone over it
     // would fail inside git with a sentence about git rather than about the name being taken.
     if std::fs::symlink_metadata(&destination).is_ok() {
@@ -121,6 +123,11 @@ fn add(projects_root: &Path, url: &str) -> ExitCode {
 }
 
 /// Print the name of every directory the create's repository refusals accept, and nothing else.
+///
+/// The exit code is `status`'s rule for a fact it cannot read: 0 when every name was checked, and 1 when one of
+/// them could not be, because `git` was asked and did not answer. A name that could not be checked is still
+/// printed — it is there, and the form can be used with it — but the line on stderr says the machine could not
+/// answer for it, and a reader who takes the list for a verdict is told which project is in doubt.
 fn list(projects_root: &Path) -> ExitCode {
     let entries = match std::fs::read_dir(projects_root) {
         Ok(entries) => entries,
@@ -135,23 +142,43 @@ fn list(projects_root: &Path) -> ExitCode {
         }
     };
     let mut names = Vec::new();
+    let mut unreadable = false;
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        // The filter is the create's own: a directory it would refuse with a code is not a name the form can
-        // use, so printing it would be a name that fails one step later.
-        if !path.is_dir() || worktree::refuse(&path).is_err() {
+        if !path.is_dir() {
             continue;
         }
         // A directory name that is not UTF-8 cannot be typed into the form either, so it is skipped rather
-        // than printed lossily.
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            names.push(name.to_string());
+        // than printed lossily — and a project that cannot be named cannot be reported by name either.
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        match worktree::refuse(&path) {
+            Ok(()) => names.push(name.to_string()),
+            // Three of the four answers are the create's refusals: the repository is there and one of the
+            // shapes it will not mount, so it is not a name the form can use and printing it would be a name
+            // that fails one step later.
+            Err(
+                Refusal::NotADirectory
+                | Refusal::SubmodulesPresent
+                | Refusal::WorktreeConfigEnabled,
+            ) => {}
+            // The fourth is not a refusal: git could not be asked, so nothing about this repository is known
+            // either way. Dropping it silently is what the three above are entitled to and this one is not.
+            Err(Refusal::Unreadable(error)) => {
+                eprintln!("holosmith: project list: {name}: could not be checked: {error}");
+                names.push(name.to_string());
+                unreadable = true;
+            }
         }
     }
     names.sort();
     for name in names {
         println!("{name}");
+    }
+    if unreadable {
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
@@ -162,12 +189,17 @@ fn failure(action: &str, sentence: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The create's refusal as one line: the API's code and the API's sentence.
+/// The create's refusal as one line.
 ///
 /// [`refusal_error`] is the route's own mapping, so a project this command refuses and a project a create
-/// refuses are refused in the same words. `Unreadable` is the arm with no code — git could not be asked about
-/// the clone at all, which is not one of the three shapes a repository is refused for — and there the
-/// operator gets git's own words, which is where `Refusal`'s doc sends them.
+/// refuses are refused with the same code and the same sentence.
+///
+/// `Unreadable` is the arm with no code, and it is not a shape a repository is refused for. `worktree::refuse`
+/// answers it when the one reading it makes could not be made at all — either `git` could not be spawned, or it
+/// answered with an exit status that is neither 0 (a value) nor 1 (no value) — so nothing about the repository
+/// was checked. The route logs git's words and answers ADR-0008's fixed sentence, because a client on a phone
+/// can do nothing with them; here the operator is at the terminal and git's own words are the one thing that
+/// says what went wrong.
 fn refusal_line(refusal: Refusal) -> String {
     match refusal {
         Refusal::Unreadable(error) => error.to_string(),
