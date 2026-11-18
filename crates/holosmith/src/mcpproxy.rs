@@ -29,6 +29,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -334,6 +335,24 @@ pub fn upstream(request: &Request, real_key: &str, body: &[u8]) -> Vec<u8> {
 /// one the gate reads are the same call, so a `doctor` that passes and a session that works are one measurement.
 pub const PROBE_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
 
+/// The protocol version **this build's probe** announces to a tool's host.
+///
+/// A session's client negotiates its own `MCP-Protocol-Version` and the proxy passes it through unchanged (see
+/// [`upstream`]); this constant is only what a probe with no client of its own says, so the two must not be confused.
+/// A host that refuses this version answers `400`, which [`crate::doctor`] reads as "not a verdict about the key" —
+/// so a host that moves on can stop the check measuring a good key, and the line names the status that answered
+/// rather than claiming the key is bad (ADR-0101).
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// How long a probe's whole answer may take.
+///
+/// A forward's first byte waits [`relay::FIRST_BYTE_TIMEOUT`] (120 s) and its stream waits on nothing, because a
+/// session's answer may be an event stream held for that session's life. A probe is the other caller: one
+/// `tools/list` call, read to its end by whatever command an operator — or a deploy's health step — is blocked on. So
+/// this bound is short enough that a host which accepted the connection and then went quiet cannot hold an install,
+/// and generous enough for a TLS handshake plus a status line from a host having a slow minute.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// The sentence a session's tool call and `doctor --full` both carry when this machine holds no key for `tool`.
 ///
 /// One spelling, because "no key is stored" is one fact about the machine whichever end of it is asked: a session
@@ -350,7 +369,8 @@ pub fn no_key_sentence(tool: &str) -> String {
 /// thing a probe has to prove is that the key this machine stores is the key this proxy spends (ADR-0099).
 ///
 /// The endpoint is the caller's, and it is always one of [`Tool::endpoints`](crate::key::Tool::endpoints) — no
-/// argument here can name a host or a path the tool table does not carry (ADR-0045).
+/// argument here can name a host or a path the tool table does not carry (ADR-0045). The version it announces is
+/// [`MCP_PROTOCOL_VERSION`], which is this probe's rather than a session's.
 pub fn probe_request(tool: &Tool, endpoint: &'static str, key: &str) -> Vec<u8> {
     let body = PROBE_BODY.as_bytes();
     let head = Head {
@@ -362,7 +382,10 @@ pub fn probe_request(tool: &Tool, endpoint: &'static str, key: &str) -> Vec<u8> 
                 "application/json, text/event-stream".to_string(),
             ),
             ("Content-Type".to_string(), "application/json".to_string()),
-            ("MCP-Protocol-Version".to_string(), "2025-06-18".to_string()),
+            (
+                "MCP-Protocol-Version".to_string(),
+                MCP_PROTOCOL_VERSION.to_string(),
+            ),
         ],
         content_length: Some(body.len()),
         chunked: false,
@@ -382,7 +405,7 @@ pub enum Probe {
     /// The host's first line named this status, for this endpoint.
     Status { status: u16, endpoint: &'static str },
     /// Nothing measured the key, in the sentence saying why: a row with no endpoint, a TLS client that could not
-    /// start, a host that closed or did not answer within [`relay::FIRST_BYTE_TIMEOUT`], or an answer that is not
+    /// start, a host that closed or did not answer within [`PROBE_TIMEOUT`], or an answer that is not
     /// HTTP.
     Unmeasured(String),
 }
@@ -398,7 +421,8 @@ pub async fn probe(tool: &Tool, key: &str) -> Probe {
             tool.id
         ));
     };
-    let answer = match relay::request(tool.host, &probe_request(tool, endpoint, key)).await {
+    let request = probe_request(tool, endpoint, key);
+    let answer = match relay::request(tool.host, &request, PROBE_TIMEOUT).await {
         Ok(answer) => answer,
         Err(failure) => return Probe::Unmeasured(failure.sentence()),
     };
@@ -886,7 +910,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("MCP-Protocol-Version: 2025-06-18\r\n"),
+            text.contains(&format!("MCP-Protocol-Version: {MCP_PROTOCOL_VERSION}\r\n")),
             "{text}"
         );
         assert!(text.contains("Connection: close\r\n"), "{text}");

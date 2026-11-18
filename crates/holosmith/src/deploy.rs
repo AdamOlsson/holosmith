@@ -2324,12 +2324,15 @@ fn live_remark(live: &Path) -> String {
 
 /// Step 6: wait for `/api/health`, then ask `doctor --full` (spec item 10 step 7).
 ///
-/// The read is the same two questions the apply ends on — the endpoint answers **and** no finding fails — so a
-/// `satisfied` line here is "this machine is serving, measured", not "the unit was installed". Anything short of
-/// that goes to `needs`, because an apply is what can change it (it waits, and a start is what the wait is for).
+/// The read is the same two questions the apply ends on — the endpoint answers **and** nothing in the report blocks
+/// the step — so a `satisfied` line here is "this machine is serving, measured", not "the unit was installed".
+/// Anything short of that goes to `needs`, because an apply is what can change it (it waits, and a start is what the
+/// wait is for).
 ///
 /// The apply's failure is `doctor`'s own sentence, verbatim: step 1's rule, one level later — a deploy, `serve`'s
-/// refusal and `doctor`'s line cannot say different things about one machine.
+/// refusal and `doctor`'s line cannot say different things about one machine. `blocking` is the one list the read is
+/// made of, and the stored tool key is the failure it leaves out: a refused key is a fact this step reports, not one
+/// it stops for (ADR-0101's D2).
 fn health(
     config: &Config,
     doctor_tools: &doctor::Tools,
@@ -2339,16 +2342,11 @@ fn health(
 ) -> Line {
     let answering = doctor::health_answers(config.control_listen);
     let measured = doctor::run(config, Depth::Full, doctor_tools, machine);
-    if answering && !measured.failed() {
+    if answering && blocking(&measured).next().is_none() {
         return Line {
             step: DeployStep::Health,
             word: Word::Satisfied,
-            sentence: format!(
-                "the control origin ({}) answers `GET /api/health`, and `doctor --full` reports {} findings with \
-                 none failing",
-                config.control_listen,
-                measured.findings.len()
-            ),
+            sentence: health_satisfied(config.control_listen, &measured),
             fix: None,
         };
     }
@@ -2380,15 +2378,64 @@ fn health(
         );
     }
     let measured = doctor::run(config, Depth::Full, doctor_tools, machine);
-    if let Some(finding) = measured.failures().next() {
+    if let Some(finding) = blocking(&measured).next() {
         return failed(DeployStep::Health, finding.sentence.clone());
     }
     Line {
         step: DeployStep::Health,
         word: Word::Changed,
-        sentence: counted(&plan, ""),
+        sentence: counted(&plan, &stored_key_remark(&measured)),
         fix: None,
     }
+}
+
+/// The failures of `report` that refuse step 6: every one except the stored tool key's.
+///
+/// A stored tool key is not a machine requirement (ADR-0101's D2). A machine whose workspace revoked one runs
+/// sessions that never call a tool, and an operator who has to re-deploy, re-install or upgrade it must be able to —
+/// `holosmith key set <tool>` is the fix, and it is not this command. `doctor`'s own exit code is unchanged: the
+/// report measures the machine, this step is the gate, and only one of them is about what the machine needs.
+fn blocking(report: &doctor::Report) -> impl Iterator<Item = &preflight::Finding> + '_ {
+    report
+        .failures()
+        .filter(|finding| finding.check != Check::ToolKey)
+}
+
+/// The remark a green health line carries when the report holds a refused stored tool key: `doctor`'s sentence for it,
+/// verbatim, and the one fact that sentence cannot say — the key is a credential a workspace issues rather than this
+/// machine's fitness. Empty when there is no such finding, because a line with nothing to add prints nothing.
+///
+/// The `; ` is what makes it [`terse`](Line::terse)'s remark rather than a clause of the count, so the report keeps
+/// the sentence an operator acts on while the step stays green.
+fn stored_key_remark(report: &doctor::Report) -> String {
+    let Some(refused) = report
+        .failures()
+        .find(|finding| finding.check == Check::ToolKey)
+    else {
+        return String::new();
+    };
+    format!(
+        "; {} — a stored key is a workspace's credential, not this machine's fitness, so neither this step nor \
+         `serve` refuses over it",
+        refused.sentence
+    )
+}
+
+/// Step 6's `satisfied` sentence: the origin answers and nothing blocks this step.
+///
+/// A report whose only failure is a refused stored tool key is this line's case, and the failing clause says so
+/// rather than "none failing" — the count stays the report's own, the remark is [`stored_key_remark`]'s.
+fn health_satisfied(listen: SocketAddr, measured: &doctor::Report) -> String {
+    let remark = stored_key_remark(measured);
+    format!(
+        "the control origin ({listen}) answers `GET /api/health`, and `doctor --full` reports {} findings with \
+         {}{remark}",
+        measured.findings.len(),
+        match remark.is_empty() {
+            true => "none failing",
+            false => "only the stored tool key failing",
+        },
+    )
 }
 
 /// Whether `listen` answers `GET /api/health` before `bound` elapses.
@@ -2454,6 +2501,82 @@ mod tests {
             listed.iter().map(|item| item.mode).collect::<Vec<u32>>()
         );
         assert_eq!(listed[0].mode, 0o700, "the root is not the 0700 item");
+    }
+
+    /// A refused stored tool key is the one failure step 6 reports rather than stops for: no session on a machine
+    /// whose workspace revoked a key needs it to boot, so the same fact cannot refuse the deploy that installs one.
+    ///
+    /// The report is built by hand, because what is being measured is a rule over findings, not a machine: the deploy
+    /// tests reach step 6 through a real `doctor` run, which no fixture makes hold an unreadable store.
+    #[test]
+    fn a_refused_tool_key_is_named_on_the_health_line_and_blocks_no_step() {
+        let listen: SocketAddr = "127.0.0.1:8080".parse().expect("a listener address");
+        let report = |findings: Vec<preflight::Finding>| doctor::Report {
+            depth: Depth::Full,
+            findings,
+        };
+        let refused = preflight::Finding::fail(
+            Check::ToolKey,
+            "the stored linear key is refused: POST /mcp on mcp.linear.app answered 401, so the key is wrong or has \
+             been revoked — issue a new one and store it with `holosmith key set linear`",
+        );
+
+        // A machine that is serving, whose only failing finding is the key: nothing here refuses the step, and the
+        // line it prints is green with the finding's own sentence on it.
+        let serving = report(vec![
+            preflight::Finding::pass(
+                Check::Docker,
+                "the daemon at /var/run/docker.sock answers /_ping",
+            ),
+            preflight::Finding::unknown(Check::Tailscale, "this machine has no Tailscale"),
+            refused.clone(),
+        ]);
+        assert!(
+            blocking(&serving).next().is_none(),
+            "a refused stored tool key blocked step 6"
+        );
+        assert!(
+            serving.failed(),
+            "doctor's own exit code is the report's, and a refused key still fails it"
+        );
+        let sentence = health_satisfied(listen, &serving);
+        assert!(
+            sentence.contains(&refused.sentence),
+            "the health line does not carry doctor's sentence verbatim: {sentence}"
+        );
+        assert!(
+            sentence.contains("only the stored tool key failing")
+                && sentence.contains("127.0.0.1:8080"),
+            "the failing clause is the wrong one for a refused key: {sentence}"
+        );
+        assert!(
+            !sentence.contains('\n'),
+            "the step's line is one line: {sentence}"
+        );
+        // The same report with no such finding: the sentence is the old one, word for word, and no remark.
+        let clean = report(vec![
+            preflight::Finding::pass(
+                Check::Docker,
+                "the daemon at /var/run/docker.sock answers /_ping",
+            ),
+            preflight::Finding::unknown(Check::Tailscale, "this machine has no Tailscale"),
+        ]);
+        assert_eq!(stored_key_remark(&clean), String::new());
+        assert!(
+            health_satisfied(listen, &clean).ends_with("reports 2 findings with none failing"),
+            "a report with no failure did not say so: {}",
+            health_satisfied(listen, &clean)
+        );
+
+        // And a machine fact is still blocking: the filter is the tool key alone, not every `--full` check.
+        let unserving = report(vec![
+            refused,
+            preflight::Finding::fail(Check::Proxy, "hs_mcp is not running"),
+        ]);
+        let blockers: Vec<&preflight::Finding> = blocking(&unserving).collect();
+        assert_eq!(blockers.len(), 1, "the step's blockers are {blockers:?}");
+        assert_eq!(blockers[0].check, Check::Proxy);
+        assert_eq!(blockers[0].sentence, "hs_mcp is not running");
     }
 
     /// A satisfied line's remark is the one thing the terse rendering keeps, because it is the clause that says

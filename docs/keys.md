@@ -47,15 +47,25 @@ One `tool-key` line per tool the build knows:
 | --- | --- |
 | `tool-key: pass: the stored linear key answered 200 for POST /mcp on mcp.linear.app, …` | the host accepted the stored key; the next tool call spends a good one |
 | `tool-key: unknown: no linear key is stored on this machine; the operator runs …` | nothing is stored, so nothing was probed — the same sentence a session's tool call gets as a 503, naming `holosmith key set linear` as the fix |
-| `tool-key: unknown: … this is not a verdict about the key` | the key was not measured: no network, no `openssl`, a host that closed, or a status that says nothing about a key (a 404, a 5xx) |
+| `tool-key: unknown: … this is not a verdict about the key` | the key was not measured: no network, no `openssl`, a host that closed or stopped mid-answer, or a status that says nothing about a key (a 404, a 5xx) |
 | `tool-key: fail: the stored linear key is refused: POST /mcp on mcp.linear.app answered 401, …` | the key is wrong or has been revoked, and a new one is the fix |
 
 Only the last one changes `doctor`'s exit code. Everything that could not measure the key is an `unknown` on
 purpose: "could not measure" is not "measured a bad key", and a machine with no route to a tool's host is a machine
 that runs sessions.
 
+The probe reads its answer under its own 15-second deadline, not the 120 a session's forward waits for its first
+byte: a forward may stream for the life of a session, and a `--full` run is something a deploy's health step waits
+on. So a host that accepts the connection and then goes quiet is an `unknown` line, never a hang.
+
 `--quick` does not ask the question at all. It is the unit's `ExecStartPre`, so a check there decides whether the
 machine boots, and a stored tool key is not a requirement for serving.
+
+The same rule reaches `server deploy` and `holosmith install`: their health step runs `doctor --full`, and a refused
+key does not fail it. The step's line names the finding — and says it is the stored key rather than this machine's
+fitness — so an install stays green on a machine that is serving. `holosmith key set <tool>` is what fixes it, and
+re-deploying is not. `doctor --full` itself still exits 1, because the report is the measurement and the step is the
+one deciding what a machine needs.
 
 ## What `key revoke linear` does to a running session
 
@@ -98,6 +108,6 @@ stored key, and the agent's own tool call is what says whether that key may read
 ## When the report and the session disagree
 
 `doctor --full` reads the store on the machine it is run on. A hub runs no sessions and stores no tool key, so its
-line is `unknown` with the reason ("a hub runs no sessions"), never a pass: run the check on the **server** whose
-sessions call Linear. `holosmith status` names the proxies on this machine, and `docker logs hs_mcp` on that server
-is where a forwarded call is attributed to a session.
+line is `unknown` with the reason ("a hub runs no sessions, so nothing on it spends a tool key"), never a pass: run
+the check on the **server** whose sessions call Linear. `holosmith status` names the proxies on this machine, and
+`docker logs hs_mcp` on that server is where a forwarded call is attributed to a session.

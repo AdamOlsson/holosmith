@@ -432,7 +432,8 @@ pub enum Failure {
     Write,
     /// The host closed the connection without answering.
     ClosedBeforeAnswer,
-    /// The host did not answer within [`FIRST_BYTE_TIMEOUT`].
+    /// The host did not answer within the caller's bound: [`FIRST_BYTE_TIMEOUT`] for a forward's first byte,
+    /// [`crate::mcpproxy::PROBE_TIMEOUT`] for a probe's whole answer.
     Bound,
     /// The TLS client failed before answering.
     Read,
@@ -576,13 +577,14 @@ pub async fn forward(client: &mut TcpStream, host: &str, request: &[u8]) -> Rela
 /// stream — `doctor --full` asking whether a stored tool key still answers ([`crate::mcpproxy::probe`]) — which is
 /// why the answer is held under [`MAX_ANSWER`] instead of copied on as it arrives.
 ///
-/// The first read is bounded by [`FIRST_BYTE_TIMEOUT`] exactly as a forward's is; the reads after it are the same
-/// bytes a proxy would have streamed, and none of them waits on a second clock because the request asks for
-/// `Connection: close` and the host therefore ends the answer itself.
+/// **`bound` is the caller's**, and it covers the whole read rather than the first byte: a session's forward may
+/// stream for as long as its session lives, and a probe that a command somebody is waiting on cannot. `Connection:
+/// close` is a request header a host may ignore — an SSE-framed `200` held open, or a connection that stalls after
+/// its first byte, would otherwise block a synchronous `doctor --full` for ever, and step 6 of a deploy runs it.
 ///
 /// `Err` is the same [`Failure`] a proxy answers a session with, so the sentence an operator reads in `doctor` is the
 /// one a failing tool call carries.
-pub async fn request(host: &str, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
+pub async fn request(host: &str, bytes: &[u8], bound: Duration) -> Result<Vec<u8>, Failure> {
     let mut child = spawn(host)?;
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill().await;
@@ -592,43 +594,47 @@ pub async fn request(host: &str, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
         let _ = child.kill().await;
         return Err(Failure::Write);
     }
-    let answer = read_answer(&mut stdout).await;
+    let answer = read_answer(&mut stdout, bound).await;
     let _ = child.kill().await;
     answer
 }
 
-/// Read one answer to its end, under [`FIRST_BYTE_TIMEOUT`] and [`MAX_ANSWER`].
+/// Read one answer to its end, under `bound` and [`MAX_ANSWER`].
 ///
 /// Separated from the process so the two bounds are a test's to drive over bytes, which is this module's own split —
 /// the readers decide from bytes and the half that spawns a process is not what they measure. A reader that ends
 /// without a byte is [`Failure::ClosedBeforeAnswer`]; one that answers more than the bound is cut, because the fact
-/// the caller wanted is in the first line.
-async fn read_answer<R>(stdout: &mut R) -> Result<Vec<u8>, Failure>
+/// the caller wanted is in the first line; one that does not end within `bound` is [`Failure::Bound`].
+async fn read_answer<R>(stdout: &mut R, bound: Duration) -> Result<Vec<u8>, Failure>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut answer = Vec::new();
     let mut buffer = [0u8; 16 * 1024];
-    let first = tokio::time::timeout(FIRST_BYTE_TIMEOUT, stdout.read(&mut buffer)).await;
-    match first {
-        Ok(Ok(0)) => return Err(Failure::ClosedBeforeAnswer),
-        Err(_) => return Err(Failure::Bound),
-        Ok(Ok(read)) => answer.extend_from_slice(&buffer[..read]),
-        Ok(Err(_)) => return Err(Failure::Read),
-    }
-    while answer.len() < MAX_ANSWER {
-        match stdout.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                let room = MAX_ANSWER - answer.len();
-                answer.extend_from_slice(&buffer[..read.min(room)]);
-                if read > room {
-                    break;
+    // One deadline over every read, which is what makes the bound a fact about the answer rather than about its
+    // first byte.
+    let whole = async {
+        loop {
+            let read = stdout.read(&mut buffer).await.map_err(|_| Failure::Read)?;
+            if read == 0 {
+                if answer.is_empty() {
+                    return Err(Failure::ClosedBeforeAnswer);
                 }
+                return Ok(());
+            }
+            let room = MAX_ANSWER - answer.len();
+            answer.extend_from_slice(&buffer[..read.min(room)]);
+            if read > room || answer.len() == MAX_ANSWER {
+                return Ok(());
             }
         }
+    };
+    let read = tokio::time::timeout(bound, whole).await;
+    match read {
+        Ok(Ok(())) => Ok(answer),
+        Ok(Err(failure)) => Err(failure),
+        Err(_) => Err(Failure::Bound),
     }
-    Ok(answer)
 }
 
 /// The `openssl s_client` arguments both callers spawn.
@@ -820,13 +826,35 @@ mod tests {
         );
     }
 
+    /// A host that answers one byte and then holds the connection open: a `200` framed as an event stream, or a
+    /// connection that stalls after its status line. `Connection: close` is a request header it may ignore, which is
+    /// why the read carries a deadline rather than trusting the host to end the answer.
+    struct OneByteThenHeld(bool);
+
+    impl tokio::io::AsyncRead for OneByteThenHeld {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.0 {
+                return std::task::Poll::Pending;
+            }
+            self.0 = true;
+            buffer.put_slice(b"H");
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn a_one_answer_read_stops_at_its_bound_and_a_silent_host_is_not_an_answer() {
-        // The two bounds `request` carries, driven over bytes: an answer larger than `MAX_ANSWER` is cut at it (the
-        // status line is in the part that survives), a short one is whole, and a reader that ends without a byte is
-        // the closed host a proxy answers 502 for.
+        // The three bounds `request` carries, driven over bytes: an answer larger than `MAX_ANSWER` is cut at it (the
+        // status line is in the part that survives), a short one is whole, a reader that ends without a byte is the
+        // closed host a proxy answers 502 for, and one that stops talking mid-answer is the deadline's.
         let long = vec![b'a'; MAX_ANSWER + 4096];
-        let answer = read_answer(&mut &long[..]).await.expect("an answer");
+        let answer = read_answer(&mut &long[..], FIRST_BYTE_TIMEOUT)
+            .await
+            .expect("an answer");
         assert_eq!(
             answer.len(),
             MAX_ANSWER,
@@ -834,13 +862,23 @@ mod tests {
         );
 
         let status = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-        let answer = read_answer(&mut &status[..]).await.expect("an answer");
+        let answer = read_answer(&mut &status[..], FIRST_BYTE_TIMEOUT)
+            .await
+            .expect("an answer");
         assert_eq!(answer, status, "a whole answer is not cut");
 
         assert_eq!(
-            read_answer(&mut &[][..]).await,
+            read_answer(&mut &[][..], FIRST_BYTE_TIMEOUT).await,
             Err(Failure::ClosedBeforeAnswer),
             "a host that closes without a byte did not answer"
+        );
+
+        // The deadline covers the whole answer, not its first byte: the bound is milliseconds here so a hang would be
+        // the test's own failure rather than a suite that never ends.
+        assert_eq!(
+            read_answer(&mut OneByteThenHeld(false), Duration::from_millis(20)).await,
+            Err(Failure::Bound),
+            "a host that answered one byte and held the connection was not bounded"
         );
     }
 

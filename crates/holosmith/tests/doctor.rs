@@ -956,6 +956,92 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
     );
 }
 
+/// The report's shape for a stored tool key: `--quick` says nothing about one at all, `--full` asks once per
+/// `key::TOOLS` row, and a machine holding no key is one `unknown` line each in the MCP proxy's own sentence.
+///
+/// Nothing here touches a socket. The probe is spent only when a key is stored, so a machine with none is measured by
+/// the store — which is the point of the check and the reason this test needs no network. The unreadable store at the
+/// end is the arm a store the operator's own umask broke would meet: one failure per row, naming the path.
+#[test]
+fn a_stored_tool_key_is_one_unknown_line_per_row_and_quick_asks_nothing() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-key-lines");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    deployed_data_root(&config);
+    let tools = tools_with_real_git(&dir);
+
+    // `--quick` is the unit's `ExecStartPre`, so the check is not in its list at all — a line there is a boot a
+    // refused key could refuse (ADR-0101's D2).
+    let quick = doctor::run(&config, Depth::Quick, &tools, &FakeMachine::healthy());
+    assert!(
+        quick
+            .findings
+            .iter()
+            .all(|finding| finding.check != Check::ToolKey),
+        "--quick asked about a tool key:\n{}",
+        quick.render()
+    );
+    assert!(
+        quick
+            .render()
+            .lines()
+            .all(|line| !line.starts_with("tool-key")),
+        "--quick printed a tool-key line:\n{}",
+        quick.render()
+    );
+
+    let asked = |report: &Report| -> Vec<Finding> {
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == Check::ToolKey)
+            .cloned()
+            .collect()
+    };
+
+    // `--full` asks once per row, and no key stored is the proxy's own 503 sentence, the same words a session's tool
+    // call gets.
+    let full = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    let rows = asked(&full);
+    assert_eq!(
+        rows.len(),
+        key::TOOLS.len(),
+        "one line per tool row:\n{}",
+        full.render()
+    );
+    for (finding, tool) in rows.iter().zip(key::TOOLS) {
+        assert_eq!(finding.outcome, Outcome::Unknown, "{}", says(finding));
+        assert_eq!(
+            finding.sentence,
+            holosmith::mcpproxy::no_key_sentence(tool.id)
+        );
+        assert!(
+            says(finding).contains(&format!("`holosmith key set {}`", tool.id)),
+            "the line names no command that stores one: {}",
+            says(finding)
+        );
+    }
+
+    // A store this build cannot read is the failure arm, and it carries the path and the command that rewrites it.
+    let secrets = config.data_root.join("secrets");
+    std::fs::create_dir_all(&secrets).expect("the store's directory is creatable");
+    std::fs::write(secrets.join("keys.toml"), "[not-a-table]\n").expect("the store is writable");
+    let full = doctor::run(&config, Depth::Full, &tools, &FakeMachine::healthy());
+    let rows = asked(&full);
+    assert_eq!(rows.len(), key::TOOLS.len(), "\n{}", full.render());
+    for finding in &rows {
+        assert_eq!(finding.outcome, Outcome::Fail, "{}", says(finding));
+        assert!(
+            says(finding).contains("could not be read") && says(finding).contains("keys.toml"),
+            "the failure does not name the store: {}",
+            says(finding)
+        );
+    }
+}
+
 /// The `org.holosmith.*` labels an image built by this binary carries, as `docker image inspect` answers them.
 ///
 /// Built from a real `Expectation`, so the digest is the bytes of the test run's own artifact — the label a

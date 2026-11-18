@@ -11002,9 +11002,9 @@ SH
   printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' \
     >"$root/answer-200"
 
-  # `role = "server"` (a hub is asked nothing about a tool key, and that arm is `tests/doctor.rs`'s), `backend =
-  # "stub"` so nothing here can start a container, and a `docker_host` that answers nothing so the daemon question
-  # fails cheaply and in the sentence it fails with on a machine that has no daemon.
+  # `role = "server"` (a hub is asked nothing about a tool key, and that arm is `src/doctor.rs`'s unit test),
+  # `backend = "stub"` so nothing here can start a container, and a `docker_host` that answers nothing so the daemon
+  # question fails cheaply and in the sentence it fails with on a machine that has no daemon.
   printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\ndocker_host = "unix://%s/no-such.sock"\nmin_free_gb = 1\n' \
     "$owner" "$root/data" "$root" >"$config"
   chmod 0644 "$config" || fail "$name/chmod" "could not set the config to 0644"

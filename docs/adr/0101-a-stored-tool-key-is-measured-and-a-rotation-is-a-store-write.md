@@ -32,8 +32,16 @@ tool's host was down would refuse a machine that serves sessions perfectly, and 
 **no** stored key is an `unknown` rather than a failure — it is a supported machine, and the sentence it gets is the
 MCP proxy's own 503 (`mcpproxy::no_key_sentence`), so a report and a session's refusal say one thing.
 
-A **hub** is asked nothing, in the words the proxy, network and image checks already use for it: it runs no sessions,
-so nothing on it spends a tool key, and the check returns before it reads the store or touches the network.
+The version the probe announces is `mcpproxy::MCP_PROTOCOL_VERSION`, which is **this build's probe's** alone: a
+session's client negotiates its own `MCP-Protocol-Version` and the proxy passes it through, so the constant is not a
+fact about the proxy. The `unknown` row is what a host that has moved on costs — it answers `400`, the check stops
+measuring a good key, and the line names the status that answered rather than claiming the key is bad. That is the
+trade D1's "only a refusal is a failure" rule already makes; a probe that had to negotiate to stay current would be
+measuring the host's protocol state instead.
+
+A **hub** is asked nothing: it runs no sessions, so nothing on it spends a tool key, and the check returns before it
+reads the store or touches the network. The sentence says exactly that, in this check's words rather than the
+container checks' — theirs said a tool key needed a session to spend it, which a server's line measures without one.
 
 ## D2 — `--full`, because a stored key is nobody's boot
 
@@ -43,18 +51,30 @@ workspace that revokes a key must not turn the operator's next restart into a re
 list — the post-deploy moment, where "is everything an operator will expect actually there" belongs — next to
 `openssl` (ADR-0071 D9) and for its reason. `--quick` gains nothing at all.
 
+The rule reaches the other caller of `doctor --full` too: `server deploy`'s health step reads that report through one
+filter that leaves the tool key out, so the finding is printed verbatim as a remark on a green line and refuses
+nothing — `holosmith key set <tool>` is the fix, not a re-deploy. The report keeps its exit code; the step is the one
+deciding what a machine needs.
+
 ## D3 — the probe is the proxies' TLS client, not a second one
 
 All TLS in this build is `relay::forward`'s `openssl s_client`, because the artifact is static and has no TLS stack
 (ADR-0048), and ADR-0099's rule is that the two keyed proxies cannot become two readings of HTTP/1.1 or two TLS
 clients. A `doctor` probe with its own client would be the third reading.
 
-So `relay` gained `request(host, bytes)`: the same spawned client (`s_client_args` is one list, `spawn` one function,
-the stderr drain one function), one request written, and the answer read to its end under `FIRST_BYTE_TIMEOUT` and a
-new `MAX_ANSWER` bound. The bound exists because this caller wants a **verdict**, not a stream: `forward` copies
-bytes on as they arrive and holds nothing, and a probe that did the same would be a second buffering policy. A
-`Failure` from it is the same enum a proxy answers a session with, so the sentence an operator reads in `doctor` is
-the one a failing tool call carries.
+So `relay` gained `request(host, bytes, bound)`: the same spawned client (`s_client_args` is one list, `spawn` one
+function, the stderr drain one function), one request written, and the answer read to its end under a new
+`MAX_ANSWER` bound and **one deadline over the whole read**, which is the caller's to choose. The bound exists
+because this caller wants a **verdict**, not a stream: `forward` copies bytes on as they arrive and holds nothing,
+and a probe that did the same would be a second buffering policy. A `Failure` from it is the same enum a proxy
+answers a session with, so the sentence an operator reads in `doctor` is the one a failing tool call carries.
+
+The deadline is not a detail of the read but the reason the function is safe to call from a command somebody is
+waiting on: `Connection: close` is a request header a host may ignore, so an SSE-framed `200` held open or a
+connection that stalls after one byte would wedge a synchronous `doctor --full` — and a deploy's health step runs it.
+So the probe passes `mcpproxy::PROBE_TIMEOUT` (15 s), a forward keeps what it always had (a bounded first byte, an
+unbounded stream, because a session's answer may be an event stream held for that session's life), and the elapsed
+case is `Failure::Bound`, whose sentence already exists.
 
 The request bytes are `mcpproxy`'s, composed by `relay::Upstream::request` — the same builder a session's call goes
 through — over a `Head` the probe fills in. The endpoint is the row's first and the host is the row's, so no argument
@@ -85,11 +105,14 @@ rather than a panic.
 
 `doctor`'s unit tests pin the four sentences (no key, unreadable store, 2xx, 401/403, other statuses, no measurement)
 and the hub arm, including the assertion that a hub does not read the store it was given an unreadable copy of.
-`relay`'s pin the one argument list and the answer's two bounds over bytes. `mcpproxy`'s pin the probe's request
-bytes (the row's endpoint, `POST`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, the stored key once, the body)
-and the status-line reader. `scripts/verify.sh`'s `case_doctor_tool_key` runs the artifact three times with a
-stand-in TLS client — no key stored, then `401`, then `200` — and asserts each line, plus that `--quick` says nothing
-about it. `docs/keys.md` is the operator's page: the four commands, why no restart is needed, and the four findings.
+`tests/doctor.rs` pins the report's shape — nothing at all on `--quick`, exactly one `unknown` per `key::TOOLS` row
+with no key stored, one `fail` per row over an unreadable store — and needs no socket for any of it. `relay`'s pin
+the one argument list and the answer's bounds, over bytes and over time. `mcpproxy`'s pin the probe's request bytes
+(the row's endpoint, `POST`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, the stored key once, the body) and the
+status-line reader. `deploy`'s pin the rule that a refused stored key is named on the health step's line rather than
+failing it. `scripts/verify.sh`'s `case_doctor_tool_key` runs the artifact three times with a stand-in TLS client — no
+key stored, then `401`, then `200` — and asserts each line, plus that `--quick` says nothing about it. `docs/keys.md`
+is the operator's page: the four commands, why no restart is needed, and the four findings.
 
 ## Not measured here
 

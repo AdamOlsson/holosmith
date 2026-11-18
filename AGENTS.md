@@ -281,9 +281,11 @@ a session whose `[linear] mcp` is not `off`:
 
 What the gate measures instead, with **no key and no internet**: `scripts/verify.sh`'s `case_doctor_tool_key` runs the
 artifact three times against a stand-in `openssl` on `PATH` and asserts the three findings — `unknown` with no key
-stored, `fail` for a `401`, `pass` for a `200` — plus that `--quick` says nothing about it. `tests/doctor.rs` drives
-the same check over a store it wrote, and `mcpproxy`'s and `relay`'s unit tests pin the probe's bytes and the one
-`openssl s_client` argument list.
+stored, `fail` for a `401`, `pass` for a `200` — plus that `--quick` says nothing about it. The two layers under that
+are split by what each can see: `doctor`'s own unit tests pin the sentences and the hub arm, `tests/doctor.rs` drives
+the report's shape over a store it wrote (one `unknown` per row with no key, one `fail` per row over an unreadable
+store, and nothing at all on `--quick`) with no socket, and `mcpproxy`'s and `relay`'s unit tests pin the probe's
+bytes and the one `openssl s_client` argument list.
 
 ## Fixtures: re-recording one
 

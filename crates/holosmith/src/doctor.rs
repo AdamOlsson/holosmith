@@ -350,17 +350,16 @@ fn openssl(program: &Path) -> Finding {
 /// and it is nobody's boot to refuse.
 ///
 /// A **hub** is asked nothing: it runs no sessions, so nothing on it spends a tool key, and this function returns
-/// before it reads the store or touches the network.
+/// before it reads the store or touches the network. The sentence says that in this check's own words rather than in
+/// the container checks' — whether a stored key answers is measured on a server with no session, so a reason borrowed
+/// from them would contradict the fact this line reports.
 fn tool_key(config: &Config, tool: &Tool) -> Finding {
     if config.role == Role::Hub {
         return Finding::unknown(
             Check::ToolKey,
             not_measured(
-                &format!(
-                    "whether the stored {} key still answers needs a session to spend it",
-                    tool.id
-                ),
-                "a hub runs no sessions, so item 10 §6 asks it no Docker question",
+                &format!("whether the stored {} key still answers", tool.id),
+                "a hub runs no sessions, so nothing on it spends a tool key",
             ),
         );
     }
@@ -1716,10 +1715,20 @@ mod tests {
         let finding = tool_key(&config, tool);
         assert_eq!(finding.outcome, Outcome::Unknown, "{}", finding.sentence);
         assert!(
-            finding.sentence.contains("hub") && finding.sentence.contains("runs no sessions"),
-            "the sentence does not use the words the other container checks use for a hub: {}",
+            finding.sentence.contains("hub")
+                && finding.sentence.contains("nothing on it spends a tool key"),
+            "the sentence does not say why a hub is asked nothing: {}",
             finding.sentence
         );
+        // The reason is this check's own. A borrowed one said a tool key needs a session to spend it — measured false
+        // on a server with no session — and ended by naming a Docker question a `tool-key` line is not about.
+        for borrowed in ["needs a session to spend it", "Docker"] {
+            assert!(
+                !finding.sentence.contains(borrowed),
+                "the hub's line carries the container checks' reason ({borrowed}): {}",
+                finding.sentence
+            );
+        }
         // The same store on a server is the failure arm, which is what makes the line above evidence of not reading
         // it rather than of a store that happens to be readable.
         let server = Config {
