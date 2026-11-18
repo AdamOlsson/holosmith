@@ -109,12 +109,12 @@ from the file already there. `off` is therefore a section in the config rather t
 that deploys this release and rolls back carries the section the previous release refuses whether or not anyone set
 the key.
 
-ADR-0098's rollback sentence does not transfer, and the difference is what each file is. The key store is written by
-a parser that adds `[tools]` only while a tool key is stored, so a machine that stored none keeps a file byte for byte
-what the previous release writes. A config file has no such condition: it is a rendering of the whole resolved table,
-and `off` is a value in it like any other, so the section is unconditional. Leaving the key out of the rendering until
-it is set is the trade this does not take: turning Linear on would then be a hand-edit too, and `config show` could
-not print the key it reads.
+ADR-0098's rollback sentence does not transfer, and the difference is what each file is. The key store's rendering
+adds `[tools]` only while a tool key is stored, so a machine that stored none keeps a file byte for byte what the
+previous release writes. A config file has no such condition: it is a rendering of the whole resolved table, and `off`
+is a value in it like any other, so the section is unconditional. Leaving the key out of the rendering until it is set
+is the trade this does not take: the file would then document the key only where an operator had already turned it on,
+and `config show` could not print the key it reads.
 
 ## What it costs, measured rather than assumed
 
