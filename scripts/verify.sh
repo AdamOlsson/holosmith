@@ -3004,9 +3004,11 @@ PY
 #
 # Then the halves that no container can show: `docker inspect`'s environment (identical modulo the session id,
 # which is the acceptance's "the difference is topology, not configuration"), the `hs_mcp` facts (alias, read-only
-# directory mount, `--cap-drop ALL`), and a `kill` + `resume` pair after which the network's endpoint count is 3 for
-# the off session and 4 for the on one — the assertion a wrong flag cannot survive, and the only proof that a resume
-# keeps the choice.
+# directory mount, `--cap-drop ALL`), and a `kill` + `resume` pair after which the network's endpoint count is the
+# checkbox itself: **2** for the off session — the session and `hs_key`, which is joined unconditionally — and **4**
+# for the on one, the same two plus `hs_egress` and `hs_mcp`, which are `apply_proxy`'s two callers and exist only
+# when the row allows Internet access. That is the assertion a wrong flag cannot survive, and the only proof that a
+# resume keeps the choice.
 case_internet_toggle() {
   local name=case_internet_toggle image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local root="$repo_root/target/verify-toggle-$$"
@@ -3039,7 +3041,9 @@ case_internet_toggle() {
   printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n' \
     "$owner" "$projects" "$data" "$image" >"$WORK/config-toggle.toml"
   # A real key is present for this boot, so "the session never sees it" is measured rather than true by
-  # absence. The session's own `models.json` carries the dummy; `hs_key` is the only mount of `keys.toml`.
+  # absence. The session's own `models.json` carries the dummy; `hs_key` and `hs_mcp` are the only two mounts of the
+  # store's **directory**, and a session's container mounts neither (the two keyed proxies read it, and a file mount
+  # would pin the inode a rename replaces).
   printf 'sk-ant-toggle-real-do-not-leak\n' |
     "$artifact" --config "$WORK/config-toggle.toml" key set anthropic >/dev/null ||
     fail "$name/key-set" "could not seed the toggle boot's provider key"
@@ -3209,7 +3213,24 @@ PROBE
           assertions=$((assertions + 1))
           ;;
         *)
-          fail "${name}_on_mcp" "the MCP proxy's alias did not answer on the on session's network: $verdicts"
+          # The egress arm's two causes, verbatim: a machine where `holosmith-proxy:<version>` is absent runs no
+          # `hs_mcp` (`start_mcp` warns and the boot continues, which is a supported machine), and a proxy that runs
+          # but was never joined to this session's network is the checkbox not working. `EAI_AGAIN` cannot tell them
+          # apart; one `docker inspect` can, and the SKIP names evidence the boot actually printed.
+          running="$(docker inspect hs_mcp --format '{{.State.Running}}' 2>/dev/null | tr -d '\r')"
+          if [ "$running" != "true" ]; then
+            # `|| true` on purpose: `set -e` would take a `grep` that found nothing as the run's end, and "found
+            # nothing" is the state the `[ -n "$why" ]` below refuses by name.
+            why="$(grep -i 'MCP proxy' "$serve_err" | tr '\n' ' ' || true)"
+            [ -n "$why" ] ||
+              fail "${name}_on_mcp" "the MCP proxy is not running and the boot said nothing about it: $verdicts"
+            printf 'SKIP %s/on: the MCP proxy is not running, so the on half cannot be measured (the boot said: %s)\n' \
+              "$name" "$why"
+          else
+            fail "${name}_on_mcp" \
+              "the MCP proxy is running and was not on the on session's network, so the checkbox did not change \
+               reachability: $verdicts"
+          fi
           ;;
       esac
       case "$verdicts" in
@@ -3224,7 +3245,7 @@ PROBE
           # evidence the boot actually printed, or it would be a green run over the bug the case exists for.
           running="$(docker inspect hs_egress --format '{{.State.Running}}' 2>/dev/null | tr -d '\r')"
           if [ "$running" != "true" ]; then
-            why="$(grep -i 'egress proxy' "$serve_err" | tr '\n' ' ')"
+            why="$(grep -i 'egress proxy' "$serve_err" | tr '\n' ' ' || true)"
             [ -n "$why" ] ||
               fail "${name}_on_proxy" "the egress proxy is not running and the boot said nothing about it: $verdicts"
             printf 'SKIP %s/on: the egress proxy is not running, so the on half cannot be measured (the boot said: %s)\n' \
@@ -3330,17 +3351,20 @@ PROBE
 
   # A resume keeps the choice: the container is killed (its exit is `unexpected_exit`, which lands the row in
   # `error` — a resumable state), resumed, and the network's endpoint count is then the choice itself: the session
-  # alone when nothing may be reached, and the session plus the machine's proxy when something may.
+  # and the key proxy when nothing may be reached, and those two plus the machine's two conditional proxies when
+  # something may.
   #
-  # The proxy is **detached first**, and that is what makes the count evidence rather than an inheritance: `resume`
-  # re-creates the network idempotently, so a network that survived the stop keeps whatever the create attached to
-  # it — an `on` session would report 2 even with `apply_proxy` deleted from `resume`. Detached and then 2 is a
-  # rejoin; detached and then 1 is a missing one.
+  # The conditional proxies are **detached first**, and that is what makes the count evidence rather than an
+  # inheritance: `resume` re-creates the network idempotently, so a network that survived the stop keeps whatever the
+  # create attached to it — an `on` session would report 4 even with `apply_proxy` deleted from `resume`. Detached and
+  # then 4 is a rejoin of both; detached and then 2 is the `off` case's whole answer (nothing to rejoin) and the `on`
+  # case's failure to rejoin.
   for label in off on; do
-    # The key proxy is on every session network, so the stable count is session + key proxy + MCP proxy (3) for the
-    # off case and session + key proxy + MCP proxy + egress proxy (4) for the on one. The egress checkbox is still
-    # the only difference, which is what makes the assertion about it — and both conditional proxies are detached
-    # first, so a re-join is measured rather than inherited.
+    # `hs_key` is joined to every session network unconditionally, so it is in both counts; `hs_egress` and `hs_mcp`
+    # are the two `apply_proxy` callers and exist only when the row allows Internet access. So the stable count is the
+    # session + the key proxy (**2**) for the off case and those plus the egress and MCP proxies (**4**) for the on
+    # one. The egress checkbox is still the only difference, which is what makes the assertion about it — and both
+    # conditional proxies are detached first, so a re-join is measured rather than inherited.
     if [ "$label" = off ]; then id="$off_id"; want=2; else id="$on_id"; want=4; fi
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
     docker network disconnect --force "agents_$id" hs_mcp >/dev/null 2>&1 || true

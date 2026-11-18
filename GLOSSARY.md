@@ -87,8 +87,8 @@ machine names are `deploy::{Kind::Hub, run_as, union}` and `commands::hub::run_d
 _Avoid_: Hub install, hub setup, `server deploy --hub`
 
 **Deploy half**:
-Which part of a machine one `deploy` run installs: the **server** half (all six steps, both proxies) or the **hub**
-half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes
+Which part of a machine one `deploy` run installs: the **server** half (all six steps, the three proxies) or the
+**hub** half (steps 1, 2, 5 and 6, no proxy). A run **unions** its half with the role the config already carries and writes
 the union into the config file step 2 installs, so `server deploy` then `hub deploy` on one machine — in either order
 — leaves a machine whose config says `both`; nothing is refused over a role. Steps 1 and 6 ask their checks about
 **the half this run installs** rather than the union, which is why a hub deploy asks no Docker and no git question
@@ -983,9 +983,10 @@ _Avoid_: Filter, middleware, auth
 
 **Status command**:
 `holosmith status`: one `key value` line per fact about this machine — its role, its version, the running
-server's uptime, one count per session status, whether each of the two proxies is running, and the last health of
-every machine registered with it. Each value has three arms, `measured`, `unknown: sentence` and `fail: sentence`,
-and only `fail` changes the exit code. Its machine name is `status::Report`. Never the same thing as the health
+server's uptime, one count per session status, whether each of the three proxies (`hs_egress`, `hs_key` and
+`hs_mcp`) is running, and the last health of every machine registered with it. Each value has three arms, `measured`,
+`unknown: sentence` and `fail: sentence`, and only `fail` changes the exit code. Its machine name is `status::Report`.
+Never the same thing as the health
 endpoint: the endpoint answers about one running binary, and this command **reads** the host registry for the others
 — `machines <n>` and one `machine <name>` line per row, through a read-only open of the table, so no server has to be
 running and no probe is made. Those facts are the last probe's, which is as old as the boot (ADR-0074 D5), and
@@ -1001,10 +1002,10 @@ guessing from `/proc` or from systemd.
 
 **Uninstall**:
 `holosmith uninstall [--purge]`: the inverse of an **install** (and of the `deploy` it runs). It removes the unit, the
-two proxies and the machine's `egress` network, and **keeps** the data root, the projects and every session's own
-container and network; `--purge` also removes the data root (and the containers and networks the rows named), and
-refuses while a session is live unless `--force`. Its lines carry four words of its own — `removed`, `kept`,
-`nothing`, `failed` — not the deploy's five. Its machine name is `uninstall::Report`.
+three proxies (`hs_egress`, `hs_key` and `hs_mcp`) and the machine's `egress` network, and **keeps** the data root,
+the projects and every session's own container and network; `--purge` also removes the data root (and the containers
+and networks the rows named), and refuses while a session is live unless `--force`. Its lines carry four words of its
+own — `removed`, `kept`, `nothing`, `failed` — not the deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 
 **Builder image**:
@@ -1190,7 +1191,7 @@ _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:
 The two images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
-`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which both proxies run; and
+`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run; and
 `agent-image:<version>`, the artifact plus pi at the pinned version, git and the configured toolchains, which a
 session's container runs. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and
 the context is an archive holding the Dockerfile and the running binary. Its machine names are
@@ -1224,7 +1225,7 @@ _Avoid_: tag, label, session id
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,
-the two proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed. Its
+the three proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed. Its
 machine names are `doctor::run`, `Depth`, `Tools`, `Machine` and `Report`; the network self-test keeps its own
 `selftest::Outcome`, which is the report's entry for that check and not a second vocabulary.
 _Avoid_: Healthcheck, verify

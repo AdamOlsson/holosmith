@@ -105,7 +105,7 @@ pub trait Containers {
 
     /// Replace a container: force-remove one by this name, then run `args` detached under `bound`.
     ///
-    /// One method rather than two, because the order is the contract and both proxies' doc comments explain it:
+    /// One method rather than two, because the order is the contract and the three proxies' doc comments explain it:
     /// `--restart unless-stopped` keeps a stopped container's name, so a start without the removal first fails
     /// with Docker's "name already in use" rather than with anything about this machine.
     fn replace(&self, name: &str, args: &[String], bound: Duration) -> Result<(), String>;
@@ -284,9 +284,9 @@ pub fn running(config: &Config, containers: &dyn Containers) -> [bool; 3] {
     ]
 }
 
-/// The one check both starters make before asking the daemon to run anything: the image is on this machine.
+/// The one check all three starters make before asking the daemon to run anything: the image is on this machine.
 ///
-/// Both proxies run the same tag, so the sentence is one shape with two subjects — the container that was not
+/// All three proxies run the same tag, so the sentence is one shape with two subjects — the container that was not
 /// started, and what the machine is without it. The fix is named as the command rather than as a story, because
 /// an operator reading a `serve` boot's warning has a terminal and not a backlog.
 fn image_there(
@@ -312,7 +312,7 @@ mod tests {
 
     /// A daemon that owns one image and records every `docker run` it was asked for.
     ///
-    /// The two starters ask [`Containers::image_exists`] before they ask for a container, so this is the whole of
+    /// The three starters ask [`Containers::image_exists`] before they ask for a container, so this is the whole of
     /// what a start needs to be driven without a daemon: the image's presence, and the argv it would have run.
     struct Fake {
         image: bool,

@@ -68,13 +68,17 @@ optional `GET` stream). Rather than grow a second copy of the transport, the tra
 are dropped by that shared list (`relay::not_forwarded`, which carries `authorization` and `x-api-key`), so "the dummy
 never reaches upstream" has one implementation rather than two.
 
-## D4 — the fan-out says three, in one place each
+## D4 — the fan-out says three, in one derivation of the names
 
-Every list of the machine's proxies is derived from `proxies::names` (`[egress, key, mcp]`) and `proxies::running`
-(`[bool; 3]`): `status` prints one `proxy <name>` line per container, `doctor --full` one `proxy` finding, `uninstall`
-removes all three, `deploy`'s step 4 reads all three as its "already satisfied" state, and `selftest::Names` and
-`smoke`'s teardown compose the same names from the same config prefixes. `reconcile` needed nothing but its test's
-name list: `hs_mcp` does not carry a session id's shape, so the orphan sweep already leaves it alone.
+The three names have one derivation each — `container::proxy_name`, `key::key_proxy_name`,
+`mcpproxy::mcp_proxy_name`, over the config's container prefix — and `proxies::names` (`[egress, key, mcp]`) is that
+derivation's spelling for the callers that hold a `Config`: `status` prints one `proxy <name>` line per container,
+`doctor --full` one `proxy` finding **per container**, `uninstall` removes all three, and `deploy`'s step 4 reads all
+three as its "already satisfied" state through `proxies::running` (`[bool; 3]`). The lists that hold no `Config`
+compose the per-container functions directly and agree by construction: `selftest::Names` from the prefixes,
+`DockerBackend::remove_network` from its own `egress_name`/`key_name`/`mcp_name`, and `smoke`'s teardown from the
+three `*_name` functions with its own prefix. `reconcile` needed nothing but its test's name list: `hs_mcp` does not
+carry a session id's shape, so the orphan sweep already leaves it alone.
 
 ## What it costs, measured rather than assumed
 

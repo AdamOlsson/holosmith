@@ -315,7 +315,7 @@ pub async fn handle(mut stream: TcpStream, store: &Store) {
         Record::refused("-", tool.id, tool.host, "bad-key").log();
         return;
     };
-    let Some(real) = secrets.tools.get(tool.id) else {
+    let Some(real) = Store::tool_key(&secrets, tool.id) else {
         let _ = relay::respond(
             &mut stream,
             503,

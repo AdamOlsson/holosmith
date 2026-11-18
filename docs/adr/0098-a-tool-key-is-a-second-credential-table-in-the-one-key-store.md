@@ -22,8 +22,9 @@ key (see **Rollback**) — and `key.rs` gains `Tool { id, host, auth, endpoints 
 
 The table is small and explicit for `key::PROVIDERS`' reason: `key set` refuses an id no row names, because a stored
 key for a host nothing serves is a key nothing can spend. `Store::set_tool` / `Store::remove_tool` /
-`Store::tools` / `Store::tool_key` mirror the provider methods, through the same temp-file-and-rename write, so the
-file is never observable half-written and its mode is 0600 before the rename.
+`Store::tools` mirror the provider methods, through the same temp-file-and-rename write, so the
+file is never observable half-written and its mode is 0600 before the rename; `Store::tool_key` is the read a
+forwarded request takes off one `Store::load` (D3).
 
 One file rather than a second secrets file: it is one mode to enforce, one directory `hs_key` mounts, one
 `ensure_file` to call at boot, and one thing `server deploy` stages. A second file would need every one of those
@@ -50,11 +51,13 @@ the operator can still see which kind of credential they are looking at.
 
 ## D3 — the per-request read is the rotation mechanism
 
-`Store::tool_key(id)` reads `keys.toml` from disk on **every** call; nothing caches it. That is not an optimisation
-missed, it is the design: `key set linear` on a running machine is a rewrite of the file, and a caller that asks per
-request spends the new key on its next request with no restart, no unit reload and no other file touched. The
-alternative — the key read once at start — would make a rotation a service restart, which is the failure a key store
-exists to avoid.
+`Store::load()` reads `keys.toml` from disk on **every** call; nothing caches it. That is not an optimisation
+missed, it is the design: `key set linear` on a running machine is a rewrite of the file, and a proxy that loads the
+store per request spends the new key on its next request with no restart, no unit reload and no other file touched.
+`Store::tool_key` is the accessor a forwarded request takes off that one read — `Store::session_of`'s shape, a
+`Secrets` in hand rather than a second reading of the same file — so the dummy that validated the request and the
+key it carries come from one generation of the file. The alternative — the key read once at start — would make a
+rotation a service restart, which is the failure a key store exists to avoid.
 
 `key revoke` is idempotent for the same reason a rotation is a sequence: a second revoke is the state the operator
 asked for, so it prints one sentence and exits 0. `key remove` keeps its exit 1 on a provider with no key, because a
@@ -118,10 +121,10 @@ stages — `[providers]\n[sessions]\n` with no `[tools]`, and the table present 
 sets leave one value, `key revoke linear` takes the value with it and a second revoke exits 0, each command refuses
 the other table's id naming the command that works, and `linear` never becomes a provider id or a `models.json` row.
 `a_tool_key_rotation_is_seen_by_the_next_read_of_the_file` runs `key set linear` twice — two writes from **another
-process**, which is the shape a running machine's rotation has — and reads the file twice through `Store::tool_key`,
-which is the reader a forwarded request uses, with the secrets directory asserted to hold one file.
+process**, which is the shape a running machine's rotation has — and reads the store twice down the path a forwarded
+request takes (`Store::load`, then `Store::tool_key` on that read), with the secrets directory asserted to hold one
+file.
 
-**Not measured here:** a forwarded request carrying a rotated tool key. That proof needs the proxy that serves a
-`TOOLS` host, which does not exist in this tree — the key proxy routes model providers only — so the wire-level
-rotation belongs to that change, the way ADR-0050 left the provider half unmeasured until a real key was on the
-machine.
+**Not measured here:** a forwarded request carrying a rotated tool key. The proxy that serves a `TOOLS` host exists —
+`holosmith proxy mcp` and its `hs_mcp` container are ADR-0099 — but that proof needs a real key and the internet, so
+it is the wire-level half ADR-0099 leaves unmeasured rather than this decision's to make.

@@ -532,15 +532,6 @@ impl Store {
         Ok(self.load()?.tools.into_keys().collect())
     }
 
-    /// The stored key for `tool`, from a read of the file on **every call**.
-    ///
-    /// No cached copy, deliberately: the read is the rotation mechanism. `key set linear` on a running machine
-    /// rewrites this file, and a caller that asks per request spends the new key on its next request with no restart
-    /// and nothing else touched (ADR-0098). `None` is "no key stored", which is a state and not an error.
-    pub fn tool_key(&self, tool: &str) -> Result<Option<String>, KeyError> {
-        Ok(self.load()?.tools.get(tool).cloned())
-    }
-
     /// Move a legacy `[providers]` row whose id names a tool into `[tools]`, on disk. `true` means the file was
     /// rewritten.
     ///
@@ -604,6 +595,16 @@ impl Store {
             .iter()
             .find(|(_, candidate)| candidate.as_str() == dummy)
             .map(|(session, _)| session.as_str())
+    }
+
+    /// The stored key for `tool` in this read of the store, or `None` when the machine holds none for that row.
+    ///
+    /// [`session_of`](Self::session_of)'s shape rather than a read of its own: a proxy has already called
+    /// [`load`](Self::load) for the request's dummy, and the key half has to come from the **same** generation of the
+    /// file. Nothing caches a load, so `key set linear` on a running machine is spent by the next request with no
+    /// restart — the per-request read is the rotation mechanism (ADR-0098).
+    pub fn tool_key<'a>(secrets: &'a Secrets, tool: &str) -> Option<&'a str> {
+        secrets.tools.get(tool).map(String::as_str)
     }
 }
 
@@ -1149,8 +1150,8 @@ mod tests {
         let secrets = store.load().expect("the store reads");
         assert_eq!(secrets.tools.len(), 1, "setting a tool twice left two rows");
         assert_eq!(
-            store.tool_key("linear").expect("the store reads"),
-            Some("lin_api_second".to_string()),
+            Store::tool_key(&secrets, "linear"),
+            Some("lin_api_second"),
             "the second value did not win"
         );
         assert_eq!(store.tools().expect("the store reads"), vec!["linear"]);
@@ -1162,7 +1163,10 @@ mod tests {
             !store.remove_tool("linear").expect("the store writes"),
             "a second remove found something"
         );
-        assert_eq!(store.tool_key("linear").expect("the store reads"), None);
+        assert_eq!(
+            Store::tool_key(&store.load().expect("the store reads"), "linear"),
+            None
+        );
     }
 
     /// `set_tool` refuses what `set_provider` refuses: an id no row names, and a key with nothing in it.
@@ -1282,8 +1286,8 @@ mod tests {
         ] {
             fs::write(&path, text).expect("the file is writable");
             assert_eq!(
-                store.tool_key("linear").expect("the store reads"),
-                Some("lin_api_new".to_string()),
+                Store::tool_key(&store.load().expect("the store reads"), "linear"),
+                Some("lin_api_new"),
                 "{order}: the [providers] row won"
             );
             assert!(

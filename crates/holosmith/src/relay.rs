@@ -146,10 +146,11 @@ pub fn first_line(head: &str) -> &str {
 
 /// The headers a forward never copies, in one list for both proxies.
 ///
-/// Eight describe the connection to **this** proxy rather than the request's meaning (`Connection`, `Te`,
-/// `Transfer-Encoding`, `Content-Length` and friends), and two carry a credential the upstream host must not see:
-/// `authorization` and `x-api-key` hold the session's **dummy**, whatever shape the client used. `Host` is replaced
-/// by the row's, and the real key is written by [`Upstream::request`].
+/// Nine describe the connection to **this** proxy rather than the request's meaning (`Connection`, `Te`,
+/// `Transfer-Encoding`, `Content-Length` and friends), and one carries a credential the upstream host must not see:
+/// `authorization` holds the session's **dummy**, whatever shape the client used. `Host` is one of the nine because
+/// the row's own replaces it, and the real key is written by [`Upstream::request`]. `x-api-key` is not in the array —
+/// it is dropped beside these by [`not_forwarded`], since a credential may arrive under either name.
 ///
 /// Everything else is passed through, which is what an MCP request needs and a model call always needed: `Accept`,
 /// `Mcp-Session-Id`, `MCP-Protocol-Version`, `Content-Type` and a provider's `anthropic-beta` are part of the

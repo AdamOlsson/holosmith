@@ -504,8 +504,8 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
         [holosmith::docker::EGRESS_NETWORK],
         "the machine's network goes, and a session's does not: a session's names belong to the row that holds it"
     );
-    // The order the name claims: `docker network rm` refuses a network with an endpoint, so both containers have to
-    // go first — and the two vectors above cannot say that, which is what the ordered log is for.
+    // The order the name claims: `docker network rm` refuses a network with an endpoint, so all three containers have
+    // to go first — and the two vectors above cannot say that, which is what the ordered log is for.
     assert_eq!(
         machine.calls(),
         [

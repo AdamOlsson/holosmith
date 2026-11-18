@@ -1887,7 +1887,7 @@ fn a_build_that_failed_says_so_in_its_note() {
 // ---- step 4 and the refusal --------------------------------------------------------------
 
 #[test]
-fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
+fn step_four_starts_all_three_proxies_and_the_second_run_reads_running() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-proxies");
     let socket = dir.file("docker.sock");
@@ -1959,8 +1959,9 @@ fn step_four_starts_both_proxies_and_the_second_run_reads_running() {
     );
     assert!(
         step.sentence.contains(container::PROXY_NAME)
-            && step.sentence.contains(key::KEY_PROXY_NAME),
-        "the read does not name both containers: {}",
+            && step.sentence.contains(key::KEY_PROXY_NAME)
+            && step.sentence.contains(mcpproxy::MCP_PROXY_NAME),
+        "the read does not name every container: {}",
         step.sentence
     );
     assert_eq!(
