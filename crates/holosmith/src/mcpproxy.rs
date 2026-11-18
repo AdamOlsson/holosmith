@@ -327,6 +327,101 @@ pub fn upstream(request: &Request, real_key: &str, body: &[u8]) -> Vec<u8> {
     .request(&request.head, real_key, body)
 }
 
+/// The one request a probe sends: the uninitialised `tools/list` call, which a streamable-HTTP server answers
+/// without a session and without spending a tool.
+///
+/// It is the body `scripts/verify.sh`'s `case_mcp_proxy_request` sends, deliberately: the probe's request and the
+/// one the gate reads are the same call, so a `doctor` that passes and a session that works are one measurement.
+pub const PROBE_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+
+/// The sentence a session's tool call and `doctor --full` both carry when this machine holds no key for `tool`.
+///
+/// One spelling, because "no key is stored" is one fact about the machine whichever end of it is asked: a session
+/// gets it as a 503 and an operator gets it as a `tool-key: unknown` line (ADR-0101).
+pub fn no_key_sentence(tool: &str) -> String {
+    format!("no {tool} key is stored on this machine; the operator runs `holosmith key set {tool}`")
+}
+
+/// The request bytes a probe sends: `POST` to one of the row's endpoints, the row's host, the headers an MCP
+/// request is made of, and the stored key in the header the row names.
+///
+/// The head and the body are [`relay::Upstream::request`]'s, over a [`Head`] this function composes, rather than
+/// hand-spelled: a probe that wrote its own request would be a second reading of what this build sends, and the one
+/// thing a probe has to prove is that the key this machine stores is the key this proxy spends (ADR-0099).
+///
+/// The endpoint is the caller's, and it is always one of [`Tool::endpoints`](crate::key::Tool::endpoints) — no
+/// argument here can name a host or a path the tool table does not carry (ADR-0045).
+pub fn probe_request(tool: &Tool, endpoint: &'static str, key: &str) -> Vec<u8> {
+    let body = PROBE_BODY.as_bytes();
+    let head = Head {
+        method: "POST".to_string(),
+        target: endpoint.to_string(),
+        headers: vec![
+            (
+                "Accept".to_string(),
+                "application/json, text/event-stream".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("MCP-Protocol-Version".to_string(), "2025-06-18".to_string()),
+        ],
+        content_length: Some(body.len()),
+        chunked: false,
+    };
+    relay::Upstream {
+        method: "POST",
+        host: tool.host,
+        path: endpoint,
+        auth: tool.auth,
+    }
+    .request(&head, key, body)
+}
+
+/// What one probe learned about a stored key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// The host's first line named this status, for this endpoint.
+    Status { status: u16, endpoint: &'static str },
+    /// Nothing measured the key, in the sentence saying why: a row with no endpoint, a TLS client that could not
+    /// start, a host that closed or did not answer within [`relay::FIRST_BYTE_TIMEOUT`], or an answer that is not
+    /// HTTP.
+    Unmeasured(String),
+}
+
+/// Ask `tool`'s host whether `key` still answers: one `tools/list` call, and its status line.
+///
+/// The verdicts belong to the caller, because what a status means for a rotation is `doctor`'s rule: this function
+/// only says whether an HTTP status came back, and [`crate::doctor`] reads 2xx, 401/403 and the rest differently.
+pub async fn probe(tool: &Tool, key: &str) -> Probe {
+    let Some(endpoint) = tool.endpoints.first().copied() else {
+        return Probe::Unmeasured(format!(
+            "this build's {} tool row names no endpoint to probe",
+            tool.id
+        ));
+    };
+    let answer = match relay::request(tool.host, &probe_request(tool, endpoint, key)).await {
+        Ok(answer) => answer,
+        Err(failure) => return Probe::Unmeasured(failure.sentence()),
+    };
+    let text = String::from_utf8_lossy(&answer);
+    match status_of(&text) {
+        Some(status) => Probe::Status { status, endpoint },
+        None => Probe::Unmeasured(format!(
+            "{} answered {:?}, which is not an HTTP status line",
+            tool.host,
+            relay::first_line(&text)
+        )),
+    }
+}
+
+/// The status code out of an answer's first line (`HTTP/1.1 200 OK`), `None` when the first line is not one.
+fn status_of(answer: &str) -> Option<u16> {
+    let mut fields = relay::first_line(answer).split(' ');
+    if !fields.next()?.starts_with("HTTP/") {
+        return None;
+    }
+    fields.next()?.parse::<u16>().ok()
+}
+
 /// What one answered request logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
@@ -431,15 +526,7 @@ pub async fn handle(mut stream: TcpStream, store: &Store) {
         return;
     };
     let Some(real) = Store::tool_key(&secrets, tool.id) else {
-        let _ = relay::respond(
-            &mut stream,
-            503,
-            &format!(
-                "no {} key is stored on this machine; the operator runs `holosmith key set {}`",
-                tool.id, tool.id
-            ),
-        )
-        .await;
+        let _ = relay::respond(&mut stream, 503, &no_key_sentence(tool.id)).await;
         Record::refused(session, tool.id, tool.host, "no-tool-key").log();
         return;
     };
@@ -773,6 +860,85 @@ mod tests {
             empty.contains("write"),
             "an empty row is the same sentence: {empty}"
         );
+    }
+
+    /// The probe's bytes are the proxy's bytes: the row's endpoint and host, the headers an MCP request is made of,
+    /// the stored key in the row's header, and the `tools/list` body — composed by the same builder a session's call
+    /// goes through, so a `doctor` pass is evidence about the path a tool call takes (ADR-0101).
+    #[test]
+    fn the_probe_is_the_same_request_a_session_sends_with_the_stored_key() {
+        let row = key::tool("linear").expect("the table names linear");
+        let endpoint = row.endpoints.first().copied().expect("the row names one");
+        let request = probe_request(row, endpoint, "lin_api_rotated");
+        let text = String::from_utf8(request.clone()).expect("utf-8");
+        assert_eq!(
+            text.lines().next(),
+            Some(format!("POST {endpoint} HTTP/1.1").as_str()),
+            "{text}"
+        );
+        assert!(text.contains("Host: mcp.linear.app\r\n"), "{text}");
+        assert!(
+            text.contains("Accept: application/json, text/event-stream\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Content-Type: application/json\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("MCP-Protocol-Version: 2025-06-18\r\n"),
+            "{text}"
+        );
+        assert!(text.contains("Connection: close\r\n"), "{text}");
+        assert!(
+            text.contains("Authorization: Bearer lin_api_rotated\r\n"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("lin_api_rotated").count(),
+            1,
+            "the key appears once, in one header: {text}"
+        );
+        assert_eq!(
+            text.matches("Content-Length: ").count(),
+            1,
+            "one length, from the body's real size: {text}"
+        );
+        assert!(
+            text.contains(&format!("Content-Length: {}", PROBE_BODY.len())),
+            "{text}"
+        );
+        assert!(request.ends_with(PROBE_BODY.as_bytes()), "{text}");
+        assert!(
+            text.contains("\"method\":\"tools/list\""),
+            "the probe asks for the tool list, which is a call every streamable-HTTP server answers: {text}"
+        );
+    }
+
+    /// A row with no endpoint is a sentence rather than a probe, and every status line shape a host may answer is
+    /// read exactly once: the intro `HTTP/1.1 200 OK`, a status with no reason, and two answers that are not HTTP.
+    #[tokio::test]
+    async fn a_row_with_no_endpoint_is_not_measured_and_a_status_line_is_read_as_its_code() {
+        const NO_ENDPOINT: Tool = Tool {
+            id: "no-endpoint",
+            host: "example.invalid",
+            auth: key::Auth::Bearer,
+            endpoints: &[],
+        };
+        match probe(&NO_ENDPOINT, "a-key").await {
+            Probe::Unmeasured(sentence) => assert!(
+                sentence.contains("no endpoint"),
+                "the sentence names what the row lacked: {sentence}"
+            ),
+            other => panic!("a row with no endpoint probed something: {other:?}"),
+        }
+
+        assert_eq!(status_of("HTTP/1.1 200 OK\r\n\r\n"), Some(200));
+        assert_eq!(status_of("HTTP/1.1 401 Unauthorized\r\n\r\n"), Some(401));
+        assert_eq!(status_of("HTTP/1.1 503\r\n..."), Some(503));
+        assert_eq!(status_of("<html>not this\r\n"), None);
+        assert_eq!(status_of("HTTP/1.1 not-a-number\r\n"), None);
+        assert_eq!(status_of(""), None);
     }
 
     /// One server entry out of a client document, so a test reads the file pi reads.

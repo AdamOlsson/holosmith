@@ -617,6 +617,7 @@ serve_cases=(
   case_publish
   case_docker_preflight
   case_doctor_quick
+  case_doctor_tool_key
   case_disk_floor
   case_disk_quota
   case_server_images
@@ -10956,6 +10957,127 @@ PY
   kill "$socket_pid" 2>/dev/null || true
   wait "$socket_pid" 2>/dev/null || true
   socket_pid=""
+  rm -rf "$root"
+}
+
+# the stored tool key, measured by `doctor --full` and by nothing else: the three answers a rotation can leave
+# behind — no key stored, a key the tool's host refuses, and a key it accepts — with no real key, no internet, no
+# daemon and no python3.
+#
+# The TLS client is a process (`openssl s_client`), so a stand-in on `PATH` answers it: one bounded read of the
+# request the probe writes, then a canned HTTP answer this case rewrites between the three runs. That is
+# `case_mcp_proxy_request`'s pattern, and it is the only way this gate can measure the check at all — the real host
+# needs the internet and a key issued in Linear's own settings. What it proves is the three finding sentences and
+# that a stored key is what makes the probe happen; what it cannot prove is that Linear accepts a real key, which is
+# the by-hand step AGENTS.md records.
+#
+# The lines are asserted rather than the exit code: the daemon question fails here by design (`backend = "stub"` with
+# a socket nothing listens on), so a `--full` run has one real failure in it whatever this check says. Faking a daemon
+# to make the tally green would be inventing a machine rather than measuring one.
+case_doctor_tool_key() {
+  local name=case_doctor_tool_key root="$repo_root/target/verify-doctor-tool-key-$$"
+  local config="$WORK/config-doctor-tool-key.toml" shim="$root/bin" capture="$root/request.bin"
+  local key='lin_api_verify_rotated'
+  rm -rf "$root"
+  # `install -d -m 0755` and `-m 0700` for `case_doctor_quick`'s reason: `doctor`'s `perms` compares the tree against
+  # the modes `server deploy` writes, and this shell's umask leaves directories wider than that. The fixture has to be
+  # the machine the deploy leaves, or this case's subject is buried under a modes failure.
+  install -d -m 0755 "$root/data" || fail "$name/data" "could not create $root/data"
+  install -d -m 0700 "$root/data/secrets" || fail "$name/secrets" "could not create the secrets directory"
+  install -d -m 0755 "$shim" || fail "$name/shim" "could not create $shim"
+  cat >"$shim/openssl" <<'SH'
+#!/bin/sh
+# Stand in for `openssl`, twice: `version` is what doctor's notification finding reads (it has to stay a pass, or this
+# case would be measuring two checks), and `s_client` is the TLS client the probe spawns. One bounded read rather than
+# a read-until-EOF, because the probe deliberately keeps our stdin open exactly as a forward does; the request is far
+# below PIPE_BUF and written in one `write_all`, so one read returns all of it.
+case "$1" in
+  version) printf 'OpenSSL 3.0.13 30 Jan 2024\n'; exit 0 ;;
+esac
+dd bs=8192 count=1 of="$CAPTURE" 2>/dev/null
+cat "$ANSWER"
+SH
+  chmod 0755 "$shim/openssl"
+  printf 'HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' >"$root/answer-401"
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' \
+    >"$root/answer-200"
+
+  # `role = "server"` (a hub is asked nothing about a tool key, and that arm is `tests/doctor.rs`'s), `backend =
+  # "stub"` so nothing here can start a container, and a `docker_host` that answers nothing so the daemon question
+  # fails cheaply and in the sentence it fails with on a machine that has no daemon.
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\ndocker_host = "unix://%s/no-such.sock"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$root" >"$config"
+  chmod 0644 "$config" || fail "$name/chmod" "could not set the config to 0644"
+
+  # 1. A store with no `[tools]` row: the MCP proxy's own 503 sentence, so a session's refusal and this line are one
+  # spelling of one fact.
+  printf '[providers]\n\n[sessions]\n' >"$root/data/secrets/keys.toml"
+  chmod 0600 "$root/data/secrets/keys.toml"
+  PATH="$shim:$PATH" ANSWER="$root/answer-200" CAPTURE="$capture" \
+    "$artifact" doctor --full --config "$config" --root "$root" \
+    >"$WORK/$name.none.out" 2>&1 || true
+  grep -q '^tool-key: unknown: ' "$WORK/$name.none.out" ||
+    fail "$name/none" "a machine with no stored tool key is not an unknown line: $(cat "$WORK/$name.none.out")"
+  assertions=$((assertions + 1))
+  grep -q '^tool-key: unknown: .*no linear key is stored on this machine' "$WORK/$name.none.out" ||
+    fail "$name/none/sentence" "the line is not the proxy's own sentence: $(grep '^tool-key: ' "$WORK/$name.none.out")"
+  assertions=$((assertions + 1))
+  grep -q '^tool-key: unknown: .*key set linear' "$WORK/$name.none.out" ||
+    fail "$name/none/fix" "the line names no command that stores a key: $(grep '^tool-key: ' "$WORK/$name.none.out")"
+  assertions=$((assertions + 1))
+
+  # 2. A stored key the host refuses: a failure, the status in the sentence, and the command that replaces it.
+  printf '[providers]\n\n[tools]\nlinear = "%s"\n\n[sessions]\n' "$key" >"$root/data/secrets/keys.toml"
+  chmod 0600 "$root/data/secrets/keys.toml"
+  rm -f "$capture"
+  PATH="$shim:$PATH" ANSWER="$root/answer-401" CAPTURE="$capture" \
+    "$artifact" doctor --full --config "$config" --root "$root" \
+    >"$WORK/$name.refused.out" 2>&1 || true
+  grep -q '^tool-key: fail: ' "$WORK/$name.refused.out" ||
+    fail "$name/refused" "a revoked key is not a failure: $(cat "$WORK/$name.refused.out")"
+  assertions=$((assertions + 1))
+  grep -q '^tool-key: fail: .*401' "$WORK/$name.refused.out" ||
+    fail "$name/refused/status" "the failure does not name the status: $(grep '^tool-key: ' "$WORK/$name.refused.out")"
+  assertions=$((assertions + 1))
+  grep -q '^tool-key: fail: .*key set linear' "$WORK/$name.refused.out" ||
+    fail "$name/refused/fix" "the failure names no fix: $(grep '^tool-key: ' "$WORK/$name.refused.out")"
+  assertions=$((assertions + 1))
+  # What the host was asked: the row's endpoint and host, and the stored key in the row's header — the probe spends
+  # the key a session would, through the one request builder this build has.
+  if [ -f "$capture" ]; then
+    check "$name/request-line" "POST /mcp HTTP/1.1" "$(head -1 "$capture" | tr -d '\r')"
+    grep -q '^Host: mcp.linear.app' "$capture" ||
+      fail "$name/host" "the probe did not ask the row's host: $(head -c 400 "$capture")"
+    assertions=$((assertions + 1))
+    grep -q "^Authorization: Bearer $key" "$capture" ||
+      fail "$name/key" "the probe did not spend the stored key: $(head -c 400 "$capture")"
+    assertions=$((assertions + 1))
+  else
+    fail "$name/capture" "the stand-in TLS client was never started"
+  fi
+
+  # 3. A stored key the host accepts: the pass, naming the status, the endpoint and the host.
+  PATH="$shim:$PATH" ANSWER="$root/answer-200" CAPTURE="$capture" \
+    "$artifact" doctor --full --config "$config" --root "$root" \
+    >"$WORK/$name.accepted.out" 2>&1 || true
+  grep -q '^tool-key: pass: ' "$WORK/$name.accepted.out" ||
+    fail "$name/accepted" "an accepted key is not a pass: $(cat "$WORK/$name.accepted.out")"
+  assertions=$((assertions + 1))
+  for line in 200 'POST /mcp' mcp.linear.app; do
+    grep -q "^tool-key: pass: .*$line" "$WORK/$name.accepted.out" ||
+      fail "$name/accepted/name" "the pass does not name $line: $(grep '^tool-key: ' "$WORK/$name.accepted.out")"
+    assertions=$((assertions + 1))
+  done
+
+  # 4. `--quick` is the unit's `ExecStartPre` and asks none of it: a stored key must not decide whether a machine
+  # boots, so the check is `--full`'s and the word list in `case_doctor_quick` stays what it was.
+  PATH="$shim:$PATH" ANSWER="$root/answer-200" CAPTURE="$capture" \
+    "$artifact" doctor --quick --config "$config" --root "$root" \
+    >"$WORK/$name.quick.out" 2>&1 || true
+  if grep -q '^tool-key: ' "$WORK/$name.quick.out"; then
+    fail "$name/quick" "--quick asked about the stored tool key: $(cat "$WORK/$name.quick.out")"
+  fi
+  assertions=$((assertions + 1))
   rm -rf "$root"
 }
 

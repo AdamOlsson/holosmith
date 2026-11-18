@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::Command;
+use tokio::process::{Child, ChildStderr, Command};
 
 /// The longest request head a relay reads. A forwarded request is a request line, a handful of headers and possibly
 /// a body; the bound keeps a client that never sends a blank line from holding a task.
@@ -47,6 +47,14 @@ pub const CA_FILE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// The `openssl` program the relay asks for TLS. See the module docs for why this is a process.
 pub const OPENSSL: &str = "openssl";
+
+/// The longest answer [`request`] holds.
+///
+/// A caller of that function wants a **verdict**, not a stream — the status line of one `tools/list` call — so this
+/// is generous for a head and a few kilobytes of body, and it is a bound rather than a policy: an answer longer than
+/// this is cut, because the fact being measured is already in its first line. Nothing on the proxies' path goes
+/// through it: [`forward`] streams and holds no answer at all.
+pub const MAX_ANSWER: usize = 64 * 1024;
 
 /// One parsed request head: the method, the origin-form target it names, and the headers the forward needs.
 ///
@@ -499,58 +507,14 @@ where
 /// TLS handshake. A streamed answer (an MCP `GET`'s event stream) is the exception in what it costs, not in how it is
 /// read: the loop below reads until the host closes, so the connection is held for as long as the stream is.
 pub async fn forward(client: &mut TcpStream, host: &str, request: &[u8]) -> Relayed {
-    let mut command = Command::new(OPENSSL);
-    command
-        .args([
-            "s_client",
-            "-quiet",
-            "-connect",
-            &format!("{host}:443"),
-            "-servername",
-            host,
-            "-verify_return_error",
-            "-verify_hostname",
-            host,
-            "-CAfile",
-            CA_FILE,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = match command.spawn() {
+    let mut child = match spawn(host) {
         Ok(child) => child,
-        Err(error) => return Relayed::Failed(Failure::NoTlsClient(error.to_string())),
+        Err(failure) => return Relayed::Failed(failure),
     };
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill().await;
         return Relayed::Failed(Failure::NoPipe);
     };
-    if let Some(mut stderr) = child.stderr.take() {
-        // Drain it, or a host that logs to stderr would block the TLS client. A tail is enough for the log line a
-        // failed forward prints.
-        tokio::spawn(async move {
-            let mut tail = Vec::new();
-            let mut buffer = [0u8; 4096];
-            while let Ok(read) = stderr.read(&mut buffer).await {
-                if read == 0 {
-                    break;
-                }
-                tail.extend_from_slice(&buffer[..read]);
-                if tail.len() > 8192 {
-                    let keep = tail.split_off(tail.len() - 8192);
-                    tail = keep;
-                }
-            }
-            if !tail.is_empty() {
-                tracing::debug!(
-                    target: "holosmith::relay",
-                    tail = %String::from_utf8_lossy(&tail).trim(),
-                    "the TLS client's stderr"
-                );
-            }
-        });
-    }
     if stdin.write_all(request).await.is_err() || stdin.flush().await.is_err() {
         let _ = child.kill().await;
         return Relayed::Failed(Failure::Write);
@@ -603,6 +567,138 @@ pub async fn forward(client: &mut TcpStream, host: &str, request: &[u8]) -> Rela
     } else {
         Relayed::Answered(down)
     }
+}
+
+/// Ask `host` one question over TLS and read the whole answer, bounded.
+///
+/// This is [`forward`]'s client with the socket taken out: the same `openssl s_client`, the same verified host, one
+/// request written and the answer read to the end. It exists for a caller that wants a **verdict** rather than a
+/// stream — `doctor --full` asking whether a stored tool key still answers ([`crate::mcpproxy::probe`]) — which is
+/// why the answer is held under [`MAX_ANSWER`] instead of copied on as it arrives.
+///
+/// The first read is bounded by [`FIRST_BYTE_TIMEOUT`] exactly as a forward's is; the reads after it are the same
+/// bytes a proxy would have streamed, and none of them waits on a second clock because the request asks for
+/// `Connection: close` and the host therefore ends the answer itself.
+///
+/// `Err` is the same [`Failure`] a proxy answers a session with, so the sentence an operator reads in `doctor` is the
+/// one a failing tool call carries.
+pub async fn request(host: &str, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mut child = spawn(host)?;
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill().await;
+        return Err(Failure::NoPipe);
+    };
+    if stdin.write_all(bytes).await.is_err() || stdin.flush().await.is_err() {
+        let _ = child.kill().await;
+        return Err(Failure::Write);
+    }
+    let answer = read_answer(&mut stdout).await;
+    let _ = child.kill().await;
+    answer
+}
+
+/// Read one answer to its end, under [`FIRST_BYTE_TIMEOUT`] and [`MAX_ANSWER`].
+///
+/// Separated from the process so the two bounds are a test's to drive over bytes, which is this module's own split —
+/// the readers decide from bytes and the half that spawns a process is not what they measure. A reader that ends
+/// without a byte is [`Failure::ClosedBeforeAnswer`]; one that answers more than the bound is cut, because the fact
+/// the caller wanted is in the first line.
+async fn read_answer<R>(stdout: &mut R) -> Result<Vec<u8>, Failure>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut answer = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    let first = tokio::time::timeout(FIRST_BYTE_TIMEOUT, stdout.read(&mut buffer)).await;
+    match first {
+        Ok(Ok(0)) => return Err(Failure::ClosedBeforeAnswer),
+        Err(_) => return Err(Failure::Bound),
+        Ok(Ok(read)) => answer.extend_from_slice(&buffer[..read]),
+        Ok(Err(_)) => return Err(Failure::Read),
+    }
+    while answer.len() < MAX_ANSWER {
+        match stdout.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let room = MAX_ANSWER - answer.len();
+                answer.extend_from_slice(&buffer[..read.min(room)]);
+                if read > room {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(answer)
+}
+
+/// The `openssl s_client` arguments both callers spawn.
+///
+/// One list, because "one TLS client" is a decision (ADR-0048, ADR-0101) and the flags are where it is kept: a
+/// probe that verified its host differently from a proxy would be a second opinion about what `verified` means.
+fn s_client_args(host: &str) -> Vec<String> {
+    vec![
+        "s_client".to_string(),
+        "-quiet".to_string(),
+        "-connect".to_string(),
+        format!("{host}:443"),
+        "-servername".to_string(),
+        host.to_string(),
+        "-verify_return_error".to_string(),
+        "-verify_hostname".to_string(),
+        host.to_string(),
+        "-CAfile".to_string(),
+        CA_FILE.to_string(),
+    ]
+}
+
+/// The TLS client, spawned with the pipes this module moves bytes through and its stderr drained.
+///
+/// One function for both callers, so the pipe discipline a proxy depends on — three pipes, `kill_on_drop`, and a
+/// stderr that is read or would block the client — is the same wherever the client is started.
+fn spawn(host: &str) -> Result<Child, Failure> {
+    let mut command = Command::new(OPENSSL);
+    command
+        .args(s_client_args(host))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| Failure::NoTlsClient(error.to_string()))?;
+    if let Some(stderr) = child.stderr.take() {
+        drain(stderr);
+    }
+    Ok(child)
+}
+
+/// Read the TLS client's stderr to its end in a task of its own, keeping a tail for the log line a failed call
+/// prints.
+///
+/// It has to be read: a host that logs to stderr would otherwise block the client on a full pipe, and the request
+/// would end with a bound rather than with an answer.
+fn drain(mut stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut tail = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = stderr.read(&mut buffer).await {
+            if read == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buffer[..read]);
+            if tail.len() > 8192 {
+                let keep = tail.split_off(tail.len() - 8192);
+                tail = keep;
+            }
+        }
+        if !tail.is_empty() {
+            tracing::debug!(
+                target: "holosmith::relay",
+                tail = %String::from_utf8_lossy(&tail).trim(),
+                "the TLS client's stderr"
+            );
+        }
+    });
 }
 
 #[cfg(test)]
@@ -699,6 +795,53 @@ mod tests {
         assert!(!text.contains("x-api-key"), "{text}");
         assert_eq!(text.matches("Content-Length: ").count(), 1, "{text}");
         assert!(request.ends_with(b"{}"), "{text}");
+    }
+
+    #[test]
+    fn the_tls_client_is_one_client_with_one_set_of_flags() {
+        // ADR-0101's "no second TLS client", as a value: the probe and the forward spawn the same arguments, so
+        // `verified` cannot mean two things in one build.
+        let args = s_client_args("mcp.linear.app");
+        assert_eq!(args.first().map(String::as_str), Some("s_client"));
+        assert!(args.contains(&"-quiet".to_string()), "{args:?}");
+        assert!(args.contains(&"mcp.linear.app:443".to_string()), "{args:?}");
+        assert!(args.contains(&"-verify_hostname".to_string()), "{args:?}");
+        assert!(args.contains(&CA_FILE.to_string()), "{args:?}");
+        assert_eq!(
+            args.iter()
+                .filter(|argument| *argument == "mcp.linear.app")
+                .count(),
+            2,
+            "the host is the SNI and the name it is verified against: {args:?}"
+        );
+        assert_ne!(
+            s_client_args("mcp.linear.app"),
+            s_client_args("other.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_one_answer_read_stops_at_its_bound_and_a_silent_host_is_not_an_answer() {
+        // The two bounds `request` carries, driven over bytes: an answer larger than `MAX_ANSWER` is cut at it (the
+        // status line is in the part that survives), a short one is whole, and a reader that ends without a byte is
+        // the closed host a proxy answers 502 for.
+        let long = vec![b'a'; MAX_ANSWER + 4096];
+        let answer = read_answer(&mut &long[..]).await.expect("an answer");
+        assert_eq!(
+            answer.len(),
+            MAX_ANSWER,
+            "the bound is what stopped the read"
+        );
+
+        let status = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let answer = read_answer(&mut &status[..]).await.expect("an answer");
+        assert_eq!(answer, status, "a whole answer is not cut");
+
+        assert_eq!(
+            read_answer(&mut &[][..]).await,
+            Err(Failure::ClosedBeforeAnswer),
+            "a host that closes without a byte did not answer"
+        );
     }
 
     #[tokio::test]

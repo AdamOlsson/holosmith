@@ -122,3 +122,6 @@ mount and capabilities plus the checkbox on a real session network, and `case_st
 
 **Not measured here:** a real MCP call to Linear through the proxy. That needs a real key and the internet, which a
 gate cannot have; it is the demo that follows this change, the way ADR-0050's provider path waited for its own.
+**Amended by ADR-0101:** the stored key that proxy spends is now measured — `doctor --full`'s `tool-key` finding probes
+the row's host through `relay::request`, the same `openssl s_client` this proxy spawns, so a rotation is checked
+rather than trusted. The real call is still the by-hand half.
