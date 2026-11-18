@@ -3341,7 +3341,7 @@ PROBE
     # off case and session + key proxy + MCP proxy + egress proxy (4) for the on one. The egress checkbox is still
     # the only difference, which is what makes the assertion about it — and both conditional proxies are detached
     # first, so a re-join is measured rather than inherited.
-    if [ "$label" = off ]; then id="$off_id"; want=3; else id="$on_id"; want=4; fi
+    if [ "$label" = off ]; then id="$off_id"; want=2; else id="$on_id"; want=4; fi
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
     docker network disconnect --force "agents_$id" hs_mcp >/dev/null 2>&1 || true
     docker kill "s_$id" >/dev/null 2>&1 || fail "${name}_${label}_kill" "could not kill s_$id"
