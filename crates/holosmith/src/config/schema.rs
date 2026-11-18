@@ -12,7 +12,7 @@ use std::str::FromStr;
 use toml_edit::{Document, Item, Key, Value};
 
 use super::problem::{Position, Problem};
-use super::{Config, Duration, Origin, Role};
+use super::{Config, Duration, LinearMcp, Origin, Role};
 use crate::runtime::Backend;
 
 /// How a key's value is written in TOML.
@@ -285,6 +285,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         section: Some("egress"),
         kind: Kind::StringArray,
         set: set_egress_allow,
+    },
+    KeySpec {
+        path: "linear.mcp",
+        section: Some("linear"),
+        kind: Kind::String,
+        set: set_linear_mcp,
     },
 ];
 
@@ -788,6 +794,16 @@ fn set_egress_allow(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn set_linear_mcp(config: &mut Config, value: &Value) -> Result<(), String> {
+    let text = string(value)?;
+    let Some(mcp) = LinearMcp::parse(text) else {
+        let words: Vec<&str> = LinearMcp::WORDS.iter().map(|(_, word)| *word).collect();
+        return Err(format!("must be one of {}, not {text:?}", words.join(", ")));
+    };
+    config.linear.mcp = mcp;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -902,7 +918,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 37);
+        assert_eq!(KNOWN_KEYS.len(), 38);
     }
 
     #[test]

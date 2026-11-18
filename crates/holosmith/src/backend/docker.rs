@@ -27,6 +27,7 @@
 //! provokes is not recorded against a row that is going away (ADR-0039).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -35,11 +36,13 @@ use serde_json::json;
 
 use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::agent::{self, Agent, AgentError, Ended};
+use crate::config::LinearMcp;
 use crate::container::{ContainerSettings, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
 use crate::key::{self, Store as KeyStore};
+use crate::mcpproxy;
 use crate::rpc::{self, Mapping};
 use crate::sessions::Session;
 use crate::snapshot;
@@ -557,6 +560,18 @@ impl DockerBackend {
             BackendError::failed(format!(
                 "the container step: the agent's models file {} could not be written ({error})",
                 models.display()
+            ))
+        })?;
+        // The session's MCP servers, from the machine's `[linear] mcp` rather than from the row: every start writes
+        // this file or takes it away with the same call, so a resume after the key changed is the key's state and not
+        // the state of the directory the previous container left. It sits before `Mounts::check` for `models.json`'s
+        // reason — this directory is a mount source, so a missing file would be created as a directory. The path is
+        // joined once here, because this sentence names the file that failed.
+        let mcp = home.join(mcpproxy::CLIENT_FILE);
+        write_mcp_config(&mcp, self.settings.mcp, &dummy).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the agent's MCP file {} could not be written or removed ({error})",
+                mcp.display()
             ))
         })?;
         container
@@ -1142,6 +1157,48 @@ fn turn_failure(operation: &str, error: AgentError) -> BackendError {
     BackendError::failed(format!("{operation}: {error}"))
 }
 
+/// What one start did with the session's MCP configuration.
+///
+/// Data rather than a log line, so a test can ask what a start decided without a daemon: the write and the removal
+/// are one function and the caller's sentence is about whichever half failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum McpConfig {
+    /// A client configuration was written here.
+    Written(PathBuf),
+    /// The key says `off`, and the file an earlier start wrote was removed.
+    Removed(PathBuf),
+    /// The key says `off` and there was no file to remove.
+    Nothing,
+}
+
+/// Write the session's MCP configuration at `path`, beside its `models.json`, or take away the one a previous start
+/// wrote.
+///
+/// The file is a client's convenience, never the gate: the network join is what makes `mcp-proxy` resolvable, so a
+/// session whose row says no Internet access reaches nothing whatever this file says (ADR-0100). `off` therefore
+/// removes rather than writes a disabled entry — a server the system prompt lists and the session cannot call is a
+/// cost with no use — and ignoring `NotFound` is what makes the second `off` start uneventful.
+///
+/// A configured mode the tool row cannot answer is this step's failure rather than a removal: only `off` answers
+/// `Ok(None)`, so a `write` that could not be built cannot take the file away and report success.
+fn write_mcp_config(path: &Path, mode: LinearMcp, dummy: &str) -> std::io::Result<McpConfig> {
+    let text = match mcpproxy::client_config(mode, dummy) {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            return match std::fs::remove_file(path) {
+                Ok(()) => Ok(McpConfig::Removed(path.to_path_buf())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(McpConfig::Nothing)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        Err(sentence) => return Err(std::io::Error::other(sentence)),
+    };
+    std::fs::write(path, text)?;
+    Ok(McpConfig::Written(path.to_path_buf()))
+}
+
 /// Whether pi accepted a command that has nothing else to say, or the reason it did not.
 fn accept(operation: &str, reply: &crate::agent::Reply) -> Result<(), BackendError> {
     if reply.success {
@@ -1210,6 +1267,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("the scratch directory is creatable");
         path
+    }
+
+    /// The session's MCP file is `client_config`'s text, and `off` takes it away: the pair is what makes the key the
+    /// single source of truth on a resume, rather than a file some earlier start left behind.
+    #[test]
+    fn the_mcp_file_is_written_from_the_key_and_off_removes_it() {
+        let dir = scratch("mcp-file");
+        let path = dir.join(mcpproxy::CLIENT_FILE);
+        assert_eq!(
+            write_mcp_config(&path, LinearMcp::Write, "hs-dummy-test")
+                .expect("the file is writable"),
+            McpConfig::Written(path.clone())
+        );
+        let text = std::fs::read_to_string(&path).expect("the file was written");
+        let expected = mcpproxy::client_config(LinearMcp::Write, "hs-dummy-test")
+            .expect("the table's row can answer write")
+            .expect("write configures a document");
+        assert_eq!(
+            text, expected,
+            "the file a start writes is the client configuration and nothing else"
+        );
+        assert_eq!(
+            write_mcp_config(&path, LinearMcp::Off, "hs-dummy-test").expect("off removes it"),
+            McpConfig::Removed(path.clone())
+        );
+        assert!(!path.exists(), "off left the file a previous start wrote");
+        assert_eq!(
+            write_mcp_config(&path, LinearMcp::Off, "hs-dummy-test")
+                .expect("nothing to remove is fine"),
+            McpConfig::Nothing
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A launched fake agent: `sh` that waits for `trigger` to appear and then exits 7.

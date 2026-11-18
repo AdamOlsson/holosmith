@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
+use holosmith::config::LinearMcp;
 use holosmith::container::{
     ContainerSettings, Limits, Mounts, PROXY_ALIAS, PROXY_NAME, SessionContainer, Source,
     network_name,
@@ -208,6 +209,7 @@ fn settings(projects_root: &Path) -> ContainerSettings {
         container_prefix: String::new(),
         network_prefix: String::new(),
         preview_port: 3000,
+        mcp: LinearMcp::Off,
     }
 }
 
@@ -461,6 +463,7 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
         container_prefix: String::new(),
         network_prefix: String::new(),
         preview_port: 3000,
+        mcp: LinearMcp::Off,
     };
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();

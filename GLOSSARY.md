@@ -896,16 +896,28 @@ _Avoid_: MCP key, integration key, tool credential, provider
 A **mode of this binary** (`holosmith proxy mcp`), run as the `hs_mcp` container on the `egress` network, and joined to
 a session network **by the egress proxy's condition** — only when the session's row allows Internet access, which is
 what keeps ADR-0046's "the checkbox is topology" true for a **tool key**. A tool's MCP client is configured with
-`http://mcp-proxy:8090/<tool>/<endpoint>` and the session's **dummy key**; the proxy selects the tool row and endpoint
-from `key::TOOLS`, swaps in the stored key in the header that row names, and forwards over TLS through the shared
-plaintext-to-TLS relay (`relay`). The method and every header that is not hop-by-hop or a credential pass through,
-so `POST`, `GET` (an event stream), `DELETE`, `Mcp-Session-Id` and `MCP-Protocol-Version` all reach the host, and the
-answer is streamed
+`http://mcp-proxy:8090/<tool>/<endpoint>` and the session's **dummy key**, which is the entry the backend writes into
+the session's **MCP server** file on every start while `[linear] mcp` is not `off`; the proxy selects the tool row and
+endpoint from `key::TOOLS`, swaps in the stored key in the header that row names, and forwards over TLS through the
+shared plaintext-to-TLS relay (`relay`). The method and every header that is not hop-by-hop or a credential pass
+through, so `POST`, `GET` (an event stream), `DELETE`, `Mcp-Session-Id` and `MCP-Protocol-Version` all reach the host,
+and the answer is streamed
 rather than held. It mounts the key store's directory read-only, as the key proxy does, and its whole reason for a
 third container is that being on the key proxy would make a tool's host reachable with Internet access off
-(ADR-0099). Its machine names are `mcpproxy::{Route, MCP_PROXY_NAME, MCP_PROXY_ALIAS, MCP_PROXY_PORT}`,
+(ADR-0099). Its machine names are `mcpproxy::{Route, MCP_PROXY_NAME, MCP_PROXY_ALIAS, MCP_PROXY_PORT, CLIENT_FILE}`,
 `container::McpProxy` and `relay::forward`.
 _Avoid_: Tool proxy, integration proxy, MCP gateway
+
+**MCP server (the session's)**:
+The `linear` entry in the file a session's agent reads, `<data>/sessions/<id>/pi-home/mcp.json`, written by the
+backend on every start from `[linear] mcp` and removed when that key is `off`. It is one streamable-HTTP server: its
+`url` is the **MCP proxy**'s alias and port with the tool table's endpoint (`http://mcp-proxy:8090/linear/mcp`, or
+`/linear/mcp/readonly`), its `Authorization` header carries the session's **dummy key**, and its `exposure` is
+`deferred`, so a server with dozens of tools is reached by one `tool_search` call rather than declared in every
+prompt. It is a convenience and not the gate: a session with Internet access off resolves no `mcp-proxy` at all,
+which is why `off` writes no file rather than a disabled entry (ADR-0100). Its machine names are
+`mcpproxy::{client_config, CLIENT_FILE}` and `config::LinearMcp`.
+_Avoid_: MCP config, MCP endpoint, tool gateway, linear.json
 
 **Egress proxy**:
 A **mode of this binary** (`holosmith proxy egress`), run as the `hs_egress` container on the `egress` network
@@ -919,8 +931,9 @@ _Avoid_: Firewall, forward proxy, gateway
 The set of **exact** hostnames the egress proxy will tunnel to (`[egress] allow`). A subdomain is a second
 entry, because a suffix match is the wildcard `config validate` refuses. It **should** never contain a provider
 host — a model call goes through the key proxy — and nothing checks that for an operator: what holds the two
-apart is that the shipped list is empty, that provider calls are kept off this route by `NO_PROXY=key-proxy`, and
-that a review of an `[egress] allow` change is a review of where a session may send data.
+apart is that the shipped list is empty, that provider calls and MCP calls are kept off this route by
+`NO_PROXY=key-proxy,mcp-proxy`, and that a review of an `[egress] allow` change is a review of where a session may
+send data.
 _Avoid_: Whitelist, permitted hosts, domain filter
 
 **Proxy username**:

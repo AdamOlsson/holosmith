@@ -3004,8 +3004,11 @@ PY
 #
 # Then the halves that no container can show: `docker inspect`'s environment (identical modulo the session id,
 # which is the acceptance's "the difference is topology, not configuration"), the `hs_mcp` facts (alias, read-only
-# directory mount, `--cap-drop ALL`), and a `kill` + `resume` pair after which the network's endpoint count is the
-# checkbox itself: **2** for the off session — the session and `hs_key`, which is joined unconditionally — and **4**
+# directory mount, `--cap-drop ALL`), each session's own `pi-home/mcp.json` (the proxy's alias, the table's full
+# endpoint and a deferred exposure, on **both** sessions because which of them may reach the proxy is the row's),
+# the two real keys' absence from every session directory and container, and a `kill` + `resume` pair after which
+# the network's endpoint count is the checkbox itself: **2** for the off session — the session and `hs_key`, which is
+# joined unconditionally — and **4**
 # for the on one, the same two plus `hs_egress` and `hs_mcp`, which are `apply_proxy`'s two callers and exist only
 # when the row allows Internet access. That is the assertion a wrong flag cannot survive, and the only proof that a
 # resume keeps the choice.
@@ -3018,7 +3021,7 @@ case_internet_toggle() {
   local projects="$root/projects"
   local data="$root/data"
   local off_id="" on_id="" body label id verdicts env_off env_on got count want running why pair key_mounts
-  local mcp_networks mcp_source mcp_rw mcp_mounts mcp_caps mcp_privileges
+  local mcp_networks mcp_source mcp_rw mcp_mounts mcp_caps mcp_privileges mcp_text
   # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
   # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
   local not_listed="HTTP/1.1 403 Forbidden"
@@ -3038,15 +3041,20 @@ case_internet_toggle() {
   git -C "$projects/holosmith" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
   # `allow = ["crates.io"]` on purpose: a 403 is only evidence of an allow-list if the list is not empty.
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n' \
+  # `[linear] mcp = "write"` on purpose too: it is what makes every start write the session's `mcp.json`, so the
+  # file the assertions below read is the backend's rather than an operator's.
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n\n[linear]\nmcp = "write"\n' \
     "$owner" "$projects" "$data" "$image" >"$WORK/config-toggle.toml"
-  # A real key is present for this boot, so "the session never sees it" is measured rather than true by
-  # absence. The session's own `models.json` carries the dummy; `hs_key` and `hs_mcp` are the only two mounts of the
-  # store's **directory**, and a session's container mounts neither (the two keyed proxies read it, and a file mount
-  # would pin the inode a rename replaces).
+  # Two real keys are present for this boot, so "the session never sees them" is measured rather than true by
+  # absence: one provider key and one tool key. The session's own `models.json` and `mcp.json` carry the dummy; `hs_key`
+  # and `hs_mcp` are the only two mounts of the store's **directory**, and a session's container mounts neither (the
+  # two keyed proxies read it, and a file mount would pin the inode a rename replaces).
   printf 'sk-ant-toggle-real-do-not-leak\n' |
     "$artifact" --config "$WORK/config-toggle.toml" key set anthropic >/dev/null ||
     fail "$name/key-set" "could not seed the toggle boot's provider key"
+  printf 'lin_api_toggle_real_do_not_leak\n' |
+    "$artifact" --config "$WORK/config-toggle.toml" key set linear >/dev/null ||
+    fail "$name/key-set-tool" "could not seed the toggle boot's tool key"
   start_serve "$WORK/config-toggle.toml" "$data"
 
   # `wait_for_idle_docker`, not `wait_for_idle_id`: a Docker create ends with pi's ready handshake.
@@ -3081,6 +3089,33 @@ case_internet_toggle() {
     docker network inspect "agents_$id" >/dev/null 2>&1 ||
       fail "${name}_${label}_network" "the create left no agents_$id network"
     assertions=$((assertions + 1))
+  done
+
+  # The session's own MCP configuration: written on every start beside `models.json`, naming the proxy by its
+  # container alias and the full endpoint the tool table holds, with the exposure a large server is reached through.
+  # This file is what makes `hs_mcp`'s join useful rather than merely present, and it is present on **both** sessions
+  # because which of them may reach the proxy is the row's and not the file's.
+  for pair in "off:$off_id" "on:$on_id"; do
+    label="${pair%%:*}"
+    id="${pair##*:}"
+    mcp_text="$(cat "$data/sessions/$id/pi-home/mcp.json" 2>/dev/null)" ||
+      fail "${name}_${label}_mcp_file" "the session has no pi-home/mcp.json: $data/sessions/$id/pi-home"
+    case "$mcp_text" in
+      *'"http://mcp-proxy:8090/linear/mcp"'*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_${label}_mcp_url" "mcp.json does not name the MCP proxy's full linear endpoint: $mcp_text"
+        ;;
+    esac
+    case "$mcp_text" in
+      *'"exposure": "deferred"'*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_${label}_mcp_exposure" "mcp.json does not defer the server's tools: $mcp_text"
+        ;;
+    esac
   done
 
   # The probe, one line per question. `node -e` because this image has node and no curl.
@@ -3260,20 +3295,24 @@ PROBE
     fi
   done
 
-  # The real key is in `keys.toml` and nowhere a session can reach: not in the session's directory (which is a
-  # mount), not in the container's environment, and not in its mounts. `models.json` is the only file the agent
-  # reads that could carry a key, and it carries the dummy.
+  # The real keys are in `keys.toml` and nowhere a session can reach: not in the session's directory (which is a
+  # mount), not in the container's environment, and not in its mounts. `models.json` and `mcp.json` are the only two
+  # files the agent reads that could carry a credential, and both carry the dummy — a tool's key is a real key like
+  # a provider's, so the same grep covers both tables.
   real_key='sk-ant-toggle-real-do-not-leak'
+  real_tool_key='lin_api_toggle_real_do_not_leak'
   for id in "$off_id" "$on_id"; do
-    if grep -R -F "$real_key" "$data/sessions/$id" >/dev/null 2>&1; then
-      fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_key_leak" \
-        "the real provider key reached $data/sessions/$id"
-    fi
-    if docker inspect "s_$id" --format '{{json .Config.Env}} {{json .Mounts}}' 2>/dev/null | grep -F "$real_key" >/dev/null; then
-      fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_container_key" \
-        "the real provider key reached the session container's environment or mounts"
-    fi
-    assertions=$((assertions + 1))
+    for real in "$real_key" "$real_tool_key"; do
+      if grep -R -F "$real" "$data/sessions/$id" >/dev/null 2>&1; then
+        fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_key_leak" \
+          "a real key reached $data/sessions/$id"
+      fi
+      if docker inspect "s_$id" --format '{{json .Config.Env}} {{json .Mounts}}' 2>/dev/null | grep -F "$real" >/dev/null; then
+        fail "${name}_$( [ "$id" = "$off_id" ] && echo off || echo on )_container_key" \
+          "a real key reached the session container's environment or mounts"
+      fi
+      assertions=$((assertions + 1))
+    done
   done
   # The key proxy mounts the **directory** the key file lives in, not the file: `Store` writes `keys.toml` by
   # temp-file-and-rename, and a file bind mount pins the inode, so a proxy started before the first create would

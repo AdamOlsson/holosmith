@@ -41,3 +41,6 @@ remotes = []
 
 [egress]
 allow = []
+
+[linear]
+mcp = "off"

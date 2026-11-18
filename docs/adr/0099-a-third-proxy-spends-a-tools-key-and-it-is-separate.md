@@ -35,6 +35,9 @@ hardening and the mount cannot drift apart.
 the container is given, so an `http://mcp-proxy:8090/…` call never consults it. A client configured with `https://`
 there would reach the egress proxy and be refused (port 8090 is not 443), which is a loud failure rather than a
 leak — and adding a second name to `NO_PROXY` would change a session's environment for a case nothing has measured.
+**Amended by ADR-0100:** that case is now measured by the file this build writes, so `NO_PROXY` carries
+`key-proxy,mcp-proxy`; the url is still plaintext and `HTTPS_PROXY` is still the only proxy variable, but the two
+names a session talks to a proxy in plaintext on are no longer a fact a url's correctness depends on.
 
 ## D2 — the boot measures the second half of the checkbox
 
@@ -99,6 +102,9 @@ this change adds; the row that points a session's client at `http://mcp-proxy:80
 dummy is the operator's (or a later change's), the way ADR-0098 left the spending of a tool key to this one. That is
 recorded here rather than hidden: a machine that runs this release and stores no tool key is unaffected, and one that
 stores one has a proxy listening for a client it must configure.
+**Amended by ADR-0100:** this build writes exactly that file — `pi-home/mcp.json`, one server on that url, from the
+machine's `[linear] mcp` and on every start — so the row is no longer the operator's to write; the operator's half is
+the key's own permission in the workspace, which is what bounds a session the file has pointed at the full endpoint.
 
 ## What pins it
 

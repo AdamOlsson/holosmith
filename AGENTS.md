@@ -228,7 +228,7 @@ the two. Facts that cost an hour when you learn them the hard way:
   live under the **data root**, so a Docker session's data root has to be a path the daemon can see too.
 - **The container is the agent**, and its shape is one value (ADR-0039, `container.rs`): attached (`-i`, never
   `--detach`), `--rm --init --cap-drop ALL --security-opt no-new-privileges`, one `--internal` network per session
-  (`agents_<id>`), the five mounts, and the four switches that keep pi off the network (`NO_PROXY=key-proxy`,
+  (`agents_<id>`), the five mounts, and the four switches that keep pi off the network (`NO_PROXY=key-proxy,mcp-proxy`,
   `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`). "Ready" is a protocol fact — a `get_state` command
   and the `response` that repeats its id, under a 30 s bound — and the pi version is asserted against `pins/pi.txt`
   once per process. Every start is `docker rm -f` then `docker run`, serialised per session (ADR-0037).

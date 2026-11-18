@@ -70,11 +70,13 @@ pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
 /// The launch environment's four fixed variables, and why each is one.
 ///
 /// `PI_OFFLINE=1` keeps pi from refreshing anything (item 2's D1 text), `PI_SKIP_VERSION_CHECK=1` stops its
-/// `pi.dev` request, `PI_TELEMETRY=0` stops install/update telemetry, and `NO_PROXY=key-proxy` makes the
-/// provider calls through the key proxy skip the egress proxy that is not there yet (item 2 §3).
+/// `pi.dev` request, `PI_TELEMETRY=0` stops install/update telemetry, and `NO_PROXY=key-proxy,mcp-proxy` keeps both
+/// proxy aliases off the egress route: a model call through the key proxy must not be handed to it (item 2 §3), and
+/// a session's MCP url is plaintext on its own network, which only `HTTPS_PROXY` being the sole proxy variable set
+/// keeps out of it today — a fact a url should not have to depend on (ADR-0100).
 /// The fifth variable is the agent directory, which is a path and so is not in this table.
 pub const ENVIRONMENT: [(&str, &str); 4] = [
-    ("NO_PROXY", "key-proxy"),
+    ("NO_PROXY", "key-proxy,mcp-proxy"),
     ("PI_OFFLINE", "1"),
     ("PI_SKIP_VERSION_CHECK", "1"),
     ("PI_TELEMETRY", "0"),
@@ -1121,8 +1123,8 @@ mod tests {
         assert!(
             ENVIRONMENT
                 .iter()
-                .any(|(name, value)| *name == "NO_PROXY" && *value == "key-proxy"),
-            "item 2 §3: provider calls must skip the egress proxy"
+                .any(|(name, value)| *name == "NO_PROXY" && *value == "key-proxy,mcp-proxy"),
+            "item 2 §3: provider calls and a session's MCP url must skip the egress proxy"
         );
     }
 }

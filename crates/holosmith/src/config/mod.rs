@@ -320,6 +320,55 @@ pub struct Egress {
     pub allow: Vec<String>,
 }
 
+/// `[linear]`: how much of Linear a session's agent is configured with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Linear {
+    pub mcp: LinearMcp,
+}
+
+/// Which of Linear's MCP endpoints a session's agent is pointed at, if any.
+///
+/// `off` is the default because it is what every release before this one did — a machine that stored a tool key still
+/// configured nothing — and an operator who wants Linear to answer a prompt says so. `readonly` is the endpoint with
+/// Linear's read tools and no create or update, where the key's own permission in the workspace is the other half of
+/// what a session can do there; `write` is the full one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinearMcp {
+    #[default]
+    Off,
+    ReadOnly,
+    Write,
+}
+
+impl LinearMcp {
+    /// Every mode and the word the file (and the endpoint) spells it with, in one table: the word that parses and the
+    /// word a refusal sentence prints cannot drift, and a fourth mode is one line here.
+    const WORDS: [(Self, &'static str); 3] = [
+        (Self::Off, "off"),
+        (Self::ReadOnly, "readonly"),
+        (Self::Write, "write"),
+    ];
+
+    /// The mode a config file names, if it names one.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::WORDS
+            .iter()
+            .find(|(_, word)| *word == text)
+            .map(|(mcp, _)| *mcp)
+    }
+
+    /// The word the config file spells this mode with.
+    pub fn as_str(self) -> &'static str {
+        Self::WORDS
+            .iter()
+            .find(|(mcp, _)| *mcp == self)
+            .map(|(_, word)| *word)
+            .expect("every mode has a word in WORDS")
+    }
+}
+
 /// The machine's settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -420,6 +469,7 @@ pub struct Config {
     pub merge: Merge,
     pub publish: Publish,
     pub egress: Egress,
+    pub linear: Linear,
 }
 
 impl Default for Config {
@@ -465,6 +515,7 @@ impl Default for Config {
             merge: Merge::default(),
             publish: Publish::default(),
             egress: Egress::default(),
+            linear: Linear::default(),
         }
     }
 }
@@ -1214,6 +1265,9 @@ remotes = ["origin"]
 
 [egress]
 allow = ["crates.io"]
+
+[linear]
+mcp = "readonly"
 "#;
 
     fn parse(text: &str) -> Result<Config, Problems> {
@@ -1375,6 +1429,30 @@ allow = ["crates.io"]
         assert_eq!(config.merge.targets, ["develop"]);
         assert_eq!(config.publish.remotes, ["origin"]);
         assert_eq!(config.egress.allow, ["crates.io"]);
+        assert_eq!(config.linear.mcp, LinearMcp::ReadOnly);
+    }
+
+    /// `[linear] mcp` is one of three words, `off` unless the file says otherwise, and an unknown word is refused
+    /// naming the three — an enum with a string's spelling, so the one key table can check its shape too.
+    #[test]
+    fn the_linear_mcp_word_is_off_by_default_and_one_of_three() {
+        assert_eq!(Config::default().linear.mcp, LinearMcp::Off);
+        // `EVERY_KEY` names the non-default value, so the setter is exercised by `settings()` too.
+        assert_eq!(settings().linear.mcp, LinearMcp::ReadOnly);
+        for (word, wanted) in [
+            ("off", LinearMcp::Off),
+            ("readonly", LinearMcp::ReadOnly),
+            ("write", LinearMcp::Write),
+        ] {
+            let config = parse(&format!("[linear]\nmcp = \"{word}\"\n"))
+                .expect("every word in the table is a valid file");
+            assert_eq!(config.linear.mcp, wanted);
+            assert_eq!(config.linear.mcp.as_str(), word);
+        }
+        let problem = problems_of("[linear]\nmcp = \"read\"\n");
+        for expected in ["linear.mcp", "off", "readonly", "write"] {
+            assert!(problem.contains(expected), "{problem}");
+        }
     }
 
     #[test]
