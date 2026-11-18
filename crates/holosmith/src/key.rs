@@ -167,6 +167,18 @@ pub fn provider_ids() -> Vec<&'static str> {
     PROVIDERS.iter().map(|provider| provider.id).collect()
 }
 
+/// The refusal an id outside [`PROVIDERS`] gets, in one spelling.
+///
+/// `key set` asks it **before** it reads stdin: an unknown id is refused at once rather than after a key the
+/// operator then watches disappear into a command that throws it away. [`Store::set_provider`] asks it again for
+/// a caller that skipped the step, so the sentence is written here once.
+pub fn unknown_provider(provider: &str) -> KeyError {
+    KeyError::new(format!(
+        "{provider} is not a provider this build knows: {}",
+        provider_ids().join(", ")
+    ))
+}
+
 /// The machine's key store: one path, and no cached copy. A write is a read-modify-write under a process lock,
 /// because the create path and the delete path can touch it from different tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,10 +284,7 @@ impl Store {
             return Err(KeyError::new("the key is empty"));
         }
         if crate::key::provider(provider).is_none() {
-            return Err(KeyError::new(format!(
-                "{provider} is not a provider this build knows: {}",
-                provider_ids().join(", ")
-            )));
+            return Err(unknown_provider(provider));
         }
         let _guard = lock();
         let mut secrets = self.load()?;

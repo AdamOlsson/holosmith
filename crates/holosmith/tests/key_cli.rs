@@ -158,6 +158,50 @@ fn set_refuses_an_unknown_provider_and_an_empty_key() {
 }
 
 #[test]
+fn an_unknown_provider_is_refused_before_stdin_is_read() {
+    // The bug this pins: the refusal used to happen after `read_to_string`, so a typo'd id sat on a blank screen
+    // until a Ctrl-D that the operator had no reason to press. Stdin here is a pipe that is **never written to and
+    // never closed**, so a command that reads first can only hang — the wait below is what turns that into a
+    // failure instead of a test that hangs the suite.
+    let directory = TempDir::new("refuse-first");
+    let config = directory.config();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_holosmith"))
+        .args([
+            "--config",
+            config.to_str().expect("UTF-8"),
+            "key",
+            "set",
+            "not-a-provider",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the test binary runs");
+    let open_stdin = child.stdin.take().expect("stdin is piped");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the child is waitable") {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refusal is waiting on stdin: an unknown provider must be refused at once"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    drop(open_stdin);
+    let output = child.wait_with_output().expect("the output is collectable");
+    assert_eq!(status.code(), Some(1), "{}", stderr_of(&output));
+    assert!(
+        stderr_of(&output).contains("not a provider this build knows"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(stdout_of(&output), "", "a refusal writes nothing to stdout");
+}
+
+#[test]
 fn the_session_models_file_holds_the_dummy_key_and_never_the_real_one() {
     let directory = TempDir::new("models");
     let store = holosmith::key::Store::new(directory.path().join("secrets/keys.toml"));

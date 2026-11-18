@@ -369,6 +369,9 @@ pub enum ContainerAction {
 #[derive(Debug, Subcommand)]
 pub enum KeyAction {
     /// Read one provider's key from stdin and store it, mode 0600.
+    ///
+    /// A terminal is asked for the key and its echo is off, so Enter finishes it; a pipe is read to the end, which
+    /// is the form a script and `printf '…' | holosmith key set <provider>` use.
     Set {
         /// The provider id (`opencode-go`, `anthropic`, …).
         provider: String,

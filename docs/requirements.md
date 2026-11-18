@@ -56,7 +56,9 @@ list` prints which providers have a key, never the values.
 ## The provider key
 
 `holosmith key set <provider>` reads the key from stdin only, never argv, and writes it to
-`<data>/secrets/keys.toml` with mode 0600. Run it as yourself: the file's owner must be the data root's owner, or
+`<data>/secrets/keys.toml` with mode 0600. On a terminal it asks for the key and hides it as you type, so Enter
+is what finishes it; `printf '…' | holosmith key set <provider>` reads the same value to EOF, for a script. Run it
+as yourself: the file's owner must be the data root's owner, or
 `doctor`'s `perms` finding fails and the next boot's `ExecStartPre` refuses to start the unit. No restart is needed —
 the key proxy reads the store per request, and the container only ever holds a per-session dummy.
 
