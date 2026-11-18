@@ -216,6 +216,17 @@ pub enum Cmd {
         #[command(subcommand)]
         action: HubAction,
     },
+    /// Add a repository to the projects the sessions are created against, or print the ones this machine has.
+    ///
+    /// A project is a repository directly inside the projects root, and the name a session asks for is its
+    /// directory name: `add` derives that name from the URL it clones and prints it, so the printed word is
+    /// exactly what the new-session form takes. What it cloned is put through the same refusals a create
+    /// makes, and a clone one of them refuses is removed again, so the corrected URL can be added under the
+    /// same name.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
 }
 
 /// What `server` does.
@@ -316,6 +327,26 @@ pub enum HostAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// What `project` does: put a repository where the sessions can be created against it, or say which ones are
+/// there.
+#[derive(Debug, Subcommand)]
+pub enum ProjectAction {
+    /// Clone a repository into the projects root and print the name a session is created against.
+    ///
+    /// The name is the URL's last path segment, less a trailing `/` and a trailing `.git`, so it is the
+    /// directory's name and not something to remember. It goes to stdout alone, which is what makes
+    /// `name=$(holosmith project add <url>)` work; what the clone is doing goes to stderr.
+    Add {
+        /// The repository to clone: any address `git clone` accepts, a path or a URL.
+        url: String,
+    },
+    /// Print every project's name, one per line.
+    ///
+    /// Only the directories a create would mount: one whose repository it would refuse (no `.git`, submodules,
+    /// `extensions.worktreeConfig`) is not a project a session can run in, so it is not printed.
+    List,
 }
 
 /// The proxies a container runs.

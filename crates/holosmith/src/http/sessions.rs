@@ -105,9 +105,6 @@ struct SteerBody {
     guidance: String,
 }
 
-/// `NAME_MAX`'s 255: builds `<projects_root>/<project>` from this value.
-const MAX_PROJECT_CHARS: usize = 255;
-
 const MAX_MODEL_CHARS: usize = 128;
 
 const MAX_THINKING_CHARS: usize = 32;
@@ -158,22 +155,13 @@ fn idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
     Ok(key)
 }
 
-/// `project` is one path segment: non-empty, at most 255 characters, letters, digits, `.`, `_`
-/// and `-`, and not `.` or `.`. Whether a repository exists there is the check.
+/// `project` is one path segment: the rule is [`crate::projects::name_is_valid`], and the sentence is this
+/// route's. Whether a repository exists there is the check.
 fn validate_project(project: &str) -> Result<(), ApiError> {
-    if project.is_empty()
-        || project.chars().count() > MAX_PROJECT_CHARS
-        || project == "."
-        || project == ".."
-        || !project.bytes().all(is_project_byte)
-    {
+    if !crate::projects::name_is_valid(project) {
         return Err(ApiError::bad_project());
     }
     Ok(())
-}
-
-fn is_project_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 /// `model` is 1–128 characters of letters, digits, `.`, `:`, `/` and `-`. No list of models is
@@ -388,7 +376,10 @@ async fn refuse_project(state: &AppState, project: &str) -> Option<ApiError> {
 ///
 /// A repository git could not read is not something the operator can fix from the phone: git's own words
 /// go to the log, and the client gets the one sentence every unplanned failure gets (ADR-0008).
-fn refusal_error(refusal: Refusal) -> ApiError {
+///
+/// Shared with `commands::project`, which prints the same code and sentence for a clone it refused: one
+/// mapping, so what the API answers for a project and what `project add` refuses it with cannot drift.
+pub(crate) fn refusal_error(refusal: Refusal) -> ApiError {
     match refusal {
         Refusal::NotADirectory => ApiError::git_not_directory(),
         Refusal::SubmodulesPresent => ApiError::submodules_present(),
@@ -1295,11 +1286,11 @@ mod tests {
 
     #[test]
     fn a_project_is_one_path_segment() {
-        let longest = "a".repeat(MAX_PROJECT_CHARS);
+        let longest = "a".repeat(crate::projects::MAX_NAME_CHARS);
         for project in ["my.repo_2-x", "a", longest.as_str()] {
             assert!(validate_project(project).is_ok(), "{project:?}");
         }
-        let too_long = "a".repeat(MAX_PROJECT_CHARS + 1);
+        let too_long = "a".repeat(crate::projects::MAX_NAME_CHARS + 1);
         for project in [
             "",
             ".",

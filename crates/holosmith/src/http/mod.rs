@@ -35,3 +35,9 @@ pub use streams::KEEP_ALIVE_INTERVAL;
 /// thing the story exists to prevent: the keep-rules, the log's removal and the streams' closing would be
 /// written twice.
 pub(crate) use sessions::complete_deletion;
+
+/// A project's refusal, as the create answers it, named for its one caller outside this module.
+///
+/// `holosmith project add` prints the same code and sentence for a clone it refused, so a project added by the
+/// command and a project named by a create fail in one set of words rather than two that drift.
+pub(crate) use sessions::refusal_error;

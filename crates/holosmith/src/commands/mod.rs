@@ -10,6 +10,7 @@ pub mod hub;
 pub mod install;
 pub mod key;
 pub mod logs;
+pub mod project;
 pub mod proxy;
 pub mod rollback;
 pub mod serve;
