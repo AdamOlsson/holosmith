@@ -4,7 +4,7 @@
 //! plaintext HTTP/1.1 on a session network to a container that holds a real credential, and the answer is read from
 //! a fixed host over TLS and copied back as it arrives. **The rule** — which host, which path, which key and in
 //! which header — belongs to each proxy ([`crate::keyproxy::Route`], [`crate::mcpproxy::Route`]). Everything here is
-//! the transport, and it lives in one module so the two proxies cannot become two readings of HTTP/1.1 or two TLS
+//! the transport, and it lives in one module so the two keyed proxies cannot become two readings of HTTP/1.1 or two TLS
 //! clients (ADR-0048, ADR-0099).
 //!
 //! The split is the one `egress.rs` has: [`parse`] and the request readers decide from bytes and can be tested
@@ -144,7 +144,7 @@ pub fn first_line(head: &str) -> &str {
         .trim_end_matches('\r')
 }
 
-/// The headers a forward never copies, in one list for both proxies.
+/// The headers a forward never copies, in one list for both keyed proxies.
 ///
 /// Nine describe the connection to **this** proxy rather than the request's meaning (`Connection`, `Te`,
 /// `Transfer-Encoding`, `Content-Length` and friends), and one carries a credential the upstream host must not see:
@@ -177,7 +177,7 @@ pub fn not_forwarded(name: &str) -> bool {
 /// What one proxy decided to forward: the row's host, the path that row's API expects, and the header its key goes
 /// in.
 ///
-/// The two proxies' routes differ (a provider row and its **API shape**, a tool row and its endpoint), and this is
+/// The two keyed proxies' routes differ (a provider row and its **API shape**, a tool row and its endpoint), and this is
 /// the one shape both of them hand the shared request builder — so the rule "the key goes in the row's header and
 /// nowhere else" has one implementation rather than two.
 pub struct Upstream<'a> {

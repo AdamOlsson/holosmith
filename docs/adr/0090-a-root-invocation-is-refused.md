@@ -90,6 +90,6 @@ this runs as you, drop the sudo: holosmith status
 
 - A `sudo` on any verb is one sentence and exit 1, and a machine that already has root-owned files keeps them: this
   refuses the run that makes the mess, and repairing one is `chown`'s.
-- The two proxies start as non-root for two different reasons — the image's `USER` for the egress one, the key store's
-  owner for the key proxy — and each is pinned where it can fail: the image by a gate assertion, the flag by a unit
-  test that compares it with the file's owner.
+- The proxies start as non-root for two different reasons — the image's `USER` for the egress one, the key store's
+  owner for the two that read it (`hs_key` and `hs_mcp`) — and each is pinned where it can fail: the image by a gate
+  assertion, the flag by a unit test that compares it with the file's owner.

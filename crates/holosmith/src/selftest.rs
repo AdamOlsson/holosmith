@@ -52,8 +52,8 @@ pub const NETWORK: &str = "holosmith-selftest";
 ///
 /// The probe's network and the machine's proxy containers are the self-test's only names, and since a smoke run owns a
 /// machine's names as well as its own, all of them carry its prefix: a smoke boot probes
-/// `smoke_holosmith-selftest`, joins `smoke_hs_egress`/`smoke_hs_key`, and never touches the running machine's
-/// proxies. Composed in one place so a caller cannot pass a network and a proxy that disagree about which run they
+/// `smoke_holosmith-selftest`, joins `smoke_hs_egress`/`smoke_hs_key`, requires `smoke_hs_mcp`'s alias to be silent,
+/// and never touches the running machine's proxies. Composed in one place so a caller cannot pass a network and a proxy that disagree about which run they
 /// belong to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Names {

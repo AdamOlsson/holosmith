@@ -89,7 +89,7 @@ pub enum Check {
     Database,
     /// The installed paths' owners and modes — the one check the deploy's own output must satisfy.
     Perms,
-    /// Whether the machine's `hs_egress`/`hs_key` proxies are up.
+    /// Whether the machine's `hs_egress`/`hs_key`/`hs_mcp` proxies are up.
     Proxy,
     /// Whether the configured agent image runs the pinned pi.
     Image,

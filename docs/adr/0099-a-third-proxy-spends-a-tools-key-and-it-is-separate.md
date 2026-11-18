@@ -63,7 +63,7 @@ The streamable-HTTP shape is why the shared relay matters. `keyproxy`'s `upstrea
 header that is neither hop-by-hop nor a credential, and `forward` already streamed the answer byte for byte — MCP needs
 exactly that (`Accept: application/json, text/event-stream`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `DELETE`, an
 optional `GET` stream). Rather than grow a second copy of the transport, the transport moved to `relay.rs`
-(`Head`, `parse`, `read_head`, `read_body`, `respond`, `Upstream`, `forward`, `serve`), and the two proxies are now two
+(`Head`, `parse`, `read_head`, `read_body`, `respond`, `Upstream`, `forward`, `serve`), and the two keyed proxies are now two
 *rules* over it: `keyproxy::Route` and `mcpproxy::Route`, each with its own refusal sentences. The credential headers
 are dropped by that shared list (`relay::not_forwarded`, which carries `authorization` and `x-api-key`), so "the dummy
 never reaches upstream" has one implementation rather than two.

@@ -79,10 +79,12 @@ The delete flow's `revoke_key` is no longer a no-op: it removes the session's ro
 the backend tears anything down, which is the same order the no-op documented. A dummy whose session is gone is
 refused with 401 by the proxy even if a container from that session is still alive for a moment.
 
-## The two proxies are joined by the network step, and one of them is unconditional
+## The proxies are joined by the network step, and one of them is unconditional
 
-`hs_egress` is joined only when the row says `network = true` (ADR-0046). `hs_key` is joined to **every** session
-network, because the model provider is reachable with the checkbox either way. It is joined by the same network
+`hs_egress` is joined only when the row says `network = true` (ADR-0046), and `hs_mcp` — the third proxy, which spends
+a tool's key (ADR-0099) — takes the egress proxy's condition rather than the key proxy's, so a tool's host is
+reachable exactly when the checkbox says so. `hs_key` is joined to **every** session network, because the model
+provider is reachable with the checkbox either way. It is joined by the same network
 step, under the alias `key-proxy`, and it leaves before `network rm` for ADR-0045's reason (`docker network rm`
 refuses a live endpoint). A failure is a `warn`, not a refusal: a missing key proxy fails a model call, not a
 session.

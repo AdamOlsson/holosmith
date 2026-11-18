@@ -142,9 +142,10 @@ The root's ending is three rules, and the middle one is why a refusal's sentence
 | self-test network | `smoke_holosmith-selftest` | the boot's self-test joins the proxies to it; unprefixed, two boots would fight over one network and attach each other's proxies |
 
 Deliberately **not** prefixed: the machine's `egress` network (created idempotently, used read-only) and the
-per-network aliases `egress-proxy`/`key-proxy` (aliases are per network, so they cannot collide). The empty default
-reproduces `s_<id>`, `agents_<id>`, `hs_egress`, `hs_key` and `holosmith-selftest` byte for byte, and both directions
-are asserted — a prefix that reached only some of the five is the defect the tests would otherwise be blind to.
+per-network aliases `egress-proxy`/`key-proxy`/`mcp-proxy` (aliases are per network, so they cannot collide). The
+empty default reproduces `s_<id>`, `agents_<id>`, `hs_egress`, `hs_key`, `hs_mcp` and `holosmith-selftest` byte for
+byte, and both directions are asserted — a prefix that reached only some of the six is the defect the tests would
+otherwise be blind to.
 
 ## D6 — the turn's assertions are a pure function of the log
 
@@ -168,11 +169,11 @@ container and network by a bounded `docker ps`/`network ls`.
    words in the sentence, and the smoke config on disk with `container_prefix`, `network_prefix`, the ephemeral port
    and the run's own data root.
 3. **real** — the full run against the daemon, asserting its report, the row's absence, no `smoke_` container or
-   network left, and the machine's two proxies by **id** (`docker inspect --format '{{.Id}}'`), because a replaced
+   network left, and the machine's three proxies by **id** (`docker inspect --format '{{.Id}}'`), because a replaced
    container keeps its name — which is exactly the damage D5's prefixing exists to prevent. The case **makes** those
-   two containers (`docker create --name hs_egress hs_key`) rather than hoping an earlier case left them, because two
-   empty strings compare equal to themselves and a vacuous gate assertion cited by an ADR is this repository's
-   recurring finding. No daemon prints one `note`, never a `SKIP`, and the same holds for the one machine with no
+   three containers (one `docker create` each for `hs_egress`, `hs_key` and `hs_mcp`) rather than hoping an earlier
+   case left them, because three empty strings compare equal to themselves and a vacuous gate assertion cited by an
+   ADR is this repository's recurring finding. No daemon prints one `note`, never a `SKIP`, and the same holds for the one machine with no
    local image to make the sentinels from.
 
 Arm 3 asserts the proxies are **running**, which is the only measurement the prefixing works; it cannot assert a

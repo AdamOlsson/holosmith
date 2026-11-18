@@ -47,7 +47,7 @@
 # (`case_server_service`: the unit's bytes, the VAPID pair, the printed commands
 # that are root's and `doctor`'s `perms` arms), the three service commands (`case_status`: one line per fact, with
 # the uptime read from the endpoint the boot answers; `case_logs`: the journald child's argv through a stand-in and a
-# session's log printed byte for byte; `case_uninstall`: the unit and the two proxies gone, the data kept, a second
+# session's log printed byte for byte; `case_uninstall`: the unit and the three proxies gone, the data kept, a second
 # run saying `nothing`, and a purge refused over a live row until `--force`), the drain in two cases
 # (`case_drain`: the admin socket exists and is not an HTTP route, a wait shorter than a turn exits 1 and leaves
 # the drain on, the create and the prompt answer 503 `draining` while the reads answer 200, and the drain that
@@ -58,7 +58,7 @@
 # container build when this machine already has the builder image), the smoke run in three arms and with
 # no skip (`case_smoke`: the artifact's own `container fake-pi` over two pipes, a `docker` stand-in that refuses the
 # smoke image and must be exit 1 with the smoke config on disk, and the real run — a session whose turn is asserted,
-# then deleted, with the machine's two proxies compared by id before and after), the promotion in four arms
+# then deleted, with the machine's three proxies compared by id before and after), the promotion in four arms
 # (`case_upgrade`: the review gate and an older-schema candidate refused before anything is asked, then a real
 # promotion over a `systemctl` stand-in that starts what `current` names and a `docker` stand-in that fakes only the two
 # product images — the step order, the images built from the candidate's digest once and never again, the backup, a
@@ -218,7 +218,7 @@ cleanup() {
     kill "$holder_pid" 2>/dev/null || true
     wait "$holder_pid" 2>/dev/null || true
   fi
-  # A **smoke run's** own names. The harness removes its container, its network and its two proxies
+  # A **smoke run's** own names. The harness removes its container, its network and its three proxies
   # itself; this is what a `fail` in the middle needs, and the filter is `smoke_` and nothing else — the
   # machine's own `hs_egress`/`hs_key`/`hs_mcp` are not this case's to remove (the block above is).
   local leftover
@@ -10536,7 +10536,7 @@ case_docker_preflight() {
 # produce (a logged-out Tailscale, a git 2.37, an image running another pi).
 # the `server deploy`, from the shipped artifact. Two halves that skip independently, because the bugs it
 # exists to catch are of two kinds — the framework and the words, which need no daemon, and the install and the
-# two proxies on a real one (ADR-0056).
+# three proxies on a real one (ADR-0056).
 #
 # The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
 # daemon, and asserts four things: the dry run lists the six steps in the spec's order, step 3 planning a build
@@ -10551,7 +10551,7 @@ case_docker_preflight() {
 # The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
 # which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
 # `agent_image` names something else): a real install into a root under `target/` — step 2's paths with their
-# modes, step 3's two images, step 4's two containers, step 5's unit and step 6's health — and then the same command
+# modes, step 3's two images, step 4's three containers, step 5's unit and step 6's health — and then the same command
 # again, where all six steps say `satisfied`, the tree's listing and the installed config's bytes are identical and
 # `keys.toml` was not rewritten. That is the acceptance's "the second run changes nothing", as a comparison rather
 # than an absence of output. Step 6's answer is `health_responder`'s: this machine has neither a `tailscaled`
@@ -11437,7 +11437,7 @@ case_server_images() {
     fail "$name/proxy/root" "the proxy image runs as root, so the egress proxy is refused at its first line"
   assertions=$((assertions + 1))
 
-  # The proxy image serves both proxies, from the one entrypoint and with nothing of the host's mounted.
+  # The proxy image serves all three proxies, from the one entrypoint and with nothing of the host's mounted.
   docker network inspect egress >/dev/null 2>&1 ||
     fail "$name/network" "the deploy's step 4 did not leave the egress network the proxies attach to"
   assertions=$((assertions + 1))
@@ -14266,7 +14266,7 @@ AGAIN
 }
 
 # the `--full` from the shipped artifact, at **item 10 §7's moment**: the machine is already serving, which
-# is what makes the four additions meaningful — the self-test has a daemon to run in, both proxies exist because
+# is what makes the four additions meaningful — the self-test has a daemon to run in, all three proxies exist because
 # `serve`'s boot started them, the ports are held by this machine's own server (the pass `--quick` fails on), and
 # the image's pi version is a fact about the image the config names.
 #
@@ -14667,7 +14667,7 @@ SHIM
   rm -rf "$root"
 }
 
-# The teardown: the unit, the two proxies and the network go, the data stays, and a second run says `nothing`
+# The teardown: the unit, the three proxies and the network go, the data stays, and a second run says `nothing`
 # (spec's Commands table, ADR-0059).
 #
 # **A daemon is this case's premise**, because the command removes the machine's `egress` network and asks the daemon

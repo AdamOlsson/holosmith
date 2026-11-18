@@ -19,7 +19,7 @@ Lines, in this order, each from the reader that already owned it:
 | `version` | `version::VersionInfo::current()` |
 | `uptime` | `GET /api/health` — `Health::of`'s `uptime_s`, `Runtime::uptime_s`'s one owner |
 | `sessions <status>` ×6 | the `sessions` table, through a read-only open |
-| `proxy hs_egress`, `proxy hs_key` | `proxies::running(config, machine)` |
+| `proxy hs_egress`, `proxy hs_key`, `proxy hs_mcp` | `proxies::running(config, machine)` |
 | `machines` | nothing yet: the registry is |
 
 `role` and `version` are **this machine's config and this binary**, never the health payload's copies. Both are
@@ -37,7 +37,7 @@ until there is something to ask.
 `not running` are not failures: a stopped machine is a machine `status` is *for*, and ADR-0054's rule (only `fail`
 changes the code) is what makes that expressible.
 
-**The proxy pair is the one family whose first question is whether it could be asked at all.** `proxies::running`
+**The proxy lines are the one family whose first question is whether it could be asked at all.** `proxies::running`
 answers a `bool` and `Docker::running` folds *every* daemon error into `false` — a socket this user may not open, a
 daemon that is down, an account outside the `docker` group — so a `status` that asked it alone would print
 `not running` for a machine nobody looked at, which is the one thing these reports refuse to do. `preflight::daemon`
@@ -133,9 +133,9 @@ teardown's commonest answer and the one the acceptance's idempotency asks for.
    tree, so a child there would retire the account's unit instead. Either way the file's removal is the deliverable
    and the unit goes first because it is what would restart anything. No line carries `sudo`: an install whose unit
    is the account's own has no privileged half left (ADR-0088).
-2. **The two proxies** — `docker rm --force hs_egress hs_key`. The read is **existence**, not `running`:
+2. **The proxies** — `docker rm --force hs_egress hs_key hs_mcp`. The read is **existence**, not `running`:
    `--restart unless-stopped` keeps a stopped container's name and its definition, so a teardown that removed only
-   running ones would leave two containers behind.
+   running ones would leave containers behind.
 3. **The machine's `egress` network** — read from `docker network ls` matched **exactly** (Docker's own filter is a
    substring match), removed after the containers, because a network with an endpoint refuses to be removed.
 4. **The data** — kept, or purged (D7).
@@ -187,14 +187,14 @@ command that just ran, with its own flags made absolute) because re-running is t
 - `case_status` boots its own `serve` **on the port its config names** — `start_serve` always passes `--port 0`, and
   `status` asks the address in the config, so a shared boot would leave the uptime line honestly `unknown` and the
   case would skip on the thing it exists to catch. It asserts role and version against the boot's own answer, uptime
-  against `/api/health`'s `uptime_s`, the six counts against the sessions list's own length, both proxy lines against
+  against `/api/health`'s `uptime_s`, the six counts against the sessions list's own length, every proxy line against
   the daemon, and that the machines line names.
 - `case_logs` needs no server: a `journalctl` stand-in on `PATH` records the argv and prints two lines, and a data
   root this case wrote holds a session log. The `-f` *follow* is `logs.rs`'s unit test — a line appended after the
   first read is printed — because a shell case can only prove that the flag is passed on.
 - `case_uninstall` drives `--root`: the offline half builds the install tree by hand, removes it, and asserts the
-  second run's `nothing`; the online half (daemon and image) creates `hs_egress`, `hs_key` and the `egress` network,
-  asserts they go while the data stays, and restores the network the rest of the gate needs; the purge refusal's
+  second run's `nothing`; the online half (daemon and image) creates `hs_egress`, `hs_key`, `hs_mcp` and the `egress`
+  network, asserts they go while the data stays, and restores the network the rest of the gate needs; the purge refusal's
   live row comes from a boot of its own over a database this case seeds, and `--force` then takes the tree.
 
   Its tree's unit is a **foreign** one: the file `--config` composes under the gate's work directory, not the file the

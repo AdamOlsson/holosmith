@@ -14,7 +14,7 @@ step that came first would have nothing to join. therefore creates the network w
 
 `--internal` is the whole isolation: a network without it has a gateway to the host and a route out, so it
 is not a flag a caller can pass. What does **not** do is the rest of item 2: the `egress` network, the
-two proxy containers, the startup self-test that refuses to start sessions when a probe can reach the
+three proxy containers, the startup self-test that refuses to start sessions when a probe can reach the
 internet or the host, the network-off probe, and the startup removal of orphaned `agents_*` networks. All of
 that is that story's, which extends this step rather than replacing it.
 

@@ -442,7 +442,7 @@ impl ContainerSettings {
 
 /// One path's owner, as `(uid, gid)`, or `None` when it cannot be read.
 ///
-/// One function for the containers that name an identity — a session's, and both proxies, which read it from the
+/// One function for the containers that name an identity — a session's, and both keyed proxies, which read it from the
 /// key store's file — because "who owns the thing the container must write" is one question (ADR-0087).
 pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
     let metadata = std::fs::metadata(path).ok()?;

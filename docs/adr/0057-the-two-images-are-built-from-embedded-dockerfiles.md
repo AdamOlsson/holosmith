@@ -2,7 +2,7 @@
 
 This is spec §"What `server deploy` does" step 3 and the **Build and release** section's third bullet, and
 its acceptance says five things: both Dockerfiles are embedded and `holosmith-proxy:<version>` is the static
-binary on a minimal base that serves both proxies; `agent-image:<version>` pins the pi version and its base
+binary on a minimal base that serves all three proxies; `agent-image:<version>` pins the pi version and its base
 image digest and carries git, the configured toolchains and the binary for the helper subcommands; builds are
 skipped when the binary and the pinned versions are unchanged; the image labels carry version, git tag and
 pinned pi so `doctor` can compare them; and a build failure names the layer and leaves no half-tagged image.
@@ -198,13 +198,13 @@ The labels are read through the same Docker implementation `images::Images` uses
 
 `case_server_images` is new and runs **first among the cases whose boot starts the proxies** (it is not the
 first daemon case — `case_create_session`, `case_worktree` and the delete case precede it and need the daemon
-for other reasons), because after this story a `serve` cannot start `hs_egress`/`hs_key` without the proxy
-image. It owns its state and **asserts it owns it**: the deploy's own two containers are removed first (a
+for other reasons), because after this story a `serve` cannot start `hs_egress`/`hs_key`/`hs_mcp` without the
+proxy image. It owns its state and **asserts it owns it**: the deploy's own three containers are removed first (a
 running container pins the image it was started from, so an untag with them up fails), then both tags, and
 `docker image inspect` must answer "no such image" for both before the deploy — because "the image was already
 there" is exactly the state that would make its `changed` meaningless. It then asserts the five labels, the
 agent image's contents (`pi --version` = `pins/pi.txt`, `git --version`, each configured toolchain, `id -u`
-equal to the **invoking** user's and not zero, `holosmith container snapshot --help`), both proxies answering
+equal to the **invoking** user's and not zero, `holosmith container snapshot --help`), all three proxies answering
 from the image with **no** binary bind in `docker inspect`, a second deploy saying `satisfied` with unchanged
 image ids, and `doctor --full`'s `image: pass:` line naming the labels. It keeps the two images at the end,
 because the cases after it boot servers that start proxies from them, and removes only its own containers and

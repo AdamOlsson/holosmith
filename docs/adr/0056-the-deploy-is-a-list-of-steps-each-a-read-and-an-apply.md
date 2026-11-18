@@ -145,15 +145,15 @@ machine that is serving, `doctor --quick` alone would refuse, and only `deploy` 
 
 ## Step 4 reads readiness, and does not reconcile the allow-list
 
-Step 4's read is the `egress` network (`Docker::network_names`, bounded) and both containers' `running` state,
+Step 4's read is the `egress` network (`Docker::network_names`, bounded) and all three containers' `running` state,
 which is a real measurement of the daemon, so the second run says `satisfied` without re-applying. The
 `[egress] allow` list is **not** reconciled: a changed allow-list takes effect on the next `serve` boot, which
-replaces both proxies unconditionally because the list is an argument rather than a mount (ADR-0037). Comparing
+replaces every proxy unconditionally because the list is an argument rather than a mount (ADR-0037). Comparing
 a running container's `Args` with the vector deploy would pass was rejected — it is a second reading of
 `EgressProxy::run_args` and would drift from the first.
 
 The recipe itself moved out of `commands/serve.rs` into `proxies.rs`, because the boot and the deploy must
-start the same two containers the same way (`rm -f`, bounded `run_detached`, the `is_file` checks, the key
+start the same containers the same way (`rm -f`, bounded `run_detached`, the `is_file` checks, the key
 file prepared before its directory is mounted). `serve` keeps its warn-and-continue; `deploy` fails the step.
 The seam is a `proxies::Containers` trait, so a test drives step 4's real `docker run` vector through a fake
 that records the calls, with no daemon — the `doctor::Machine` pattern.
