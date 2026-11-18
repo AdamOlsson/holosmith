@@ -14465,6 +14465,21 @@ SHIM
   rm -rf "$root"
 }
 
+# ensure_preview_listen <config>: give a fixture config that names no preview port an ephemeral one.
+#
+# The config default is `127.0.0.1:8081`, and this gate must run on a machine that is itself running Holosmith:
+# the product binds exactly that port for its own preview listener, so every fixture that took the default would
+# fail its boot with `Address in use` on the one host most likely to run this script. A case that pins a preview
+# port keeps it; only `start_serve`/`start_peer` fixtures that said nothing are rewritten, and `sed -i` keeps the
+# file's mode because `doctor`'s `perms` check reads it.
+ensure_preview_listen() {
+  local config="$1"
+  if ! grep -qE '^[[:space:]]*preview_listen[[:space:]]*=' "$config"; then
+    sed -i '1i preview_listen = "127.0.0.1:0"' "$config" ||
+      fail "serve/config" "could not give $config an ephemeral preview port"
+  fi
+}
+
 # start_serve [config] [data dir]: boot the artifact and read the values the cases need from its
 # banner. `case_token_budget` boots a second time with a config of its own, so both files are
 # parameters, and so is the banner it reads: a case that ran against the first boot must not read the
@@ -14472,6 +14487,7 @@ SHIM
 start_serve() {
   local config="${1:-$WORK/config.toml}" data="${2:-$WORK/data}" listen="${3:-0}" tag=serve
   [ "$data" = "$WORK/data" ] || tag="serve-$(basename "$data")"
+  ensure_preview_listen "$config"
   serve_err="$WORK/$tag.err"
   # --port 0 asks the kernel for the port, and it is also what makes serve re-derive
   # control_origin from the bound address (ADR-0007): the passing case can then send exactly
@@ -14532,6 +14548,7 @@ stop_serve() {
 # reading the bound ports from the banner rather than assuming them.
 start_peer() {
   local config="$1" data="$2" listen="$3"
+  ensure_preview_listen "$config"
   peer_err="$WORK/serve-peer.err"
   "$artifact" serve --config "$config" --port "$listen" --data-dir "$data" \
     --admin-dir "$WORK/run/peer/holosmith" \
