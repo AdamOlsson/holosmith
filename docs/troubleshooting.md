@@ -33,6 +33,7 @@ to stderr, so `holosmith install > out` keeps the report alone.
 | `422 git_not_directory` | the project has no `.git` directory, has submodules, or sets `extensions.worktreeConfig` |
 | unit restart-loops on `perms` | something under the data root is not owned by its owner — a `sudo` wrote it. Fix it with the command below |
 | session `error` at the container step | `docker ps`, `holosmith logs --session <id>` and `docker image ls` name it |
+| a tool call fails at `mcp-proxy:8090` | the MCP proxy is not running (`holosmith status` says so, `doctor --full` names it) or the session has Internet access off: the proxy is joined by the egress proxy's condition, and `key set <tool>` is what stores the key it spends |
 
 ## The `perms` restart loop
 

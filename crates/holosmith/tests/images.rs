@@ -114,7 +114,7 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
 
 #[test]
 fn the_image_names_carry_this_binarys_version() {
-    // One spelling of each name: this function is what `agent_image`'s default and both proxies' `image` field
+    // One spelling of each name: this function is what `agent_image`'s default and every proxy's `image` field
     // read, and a test that restated the format string would pass over a name nobody installs.
     assert_eq!(
         images::proxy_image(),
@@ -775,7 +775,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
         "the proxy image carries the agent image's toolchain label: {labels:?}"
     );
 
-    // And it runs: both proxies are this one binary behind one entrypoint.
+    // And it runs: every proxy is this one binary behind one entrypoint.
     for subcommand in [["proxy", "egress", "--help"], ["proxy", "key", "--help"]] {
         let (success, said) = docker(&[
             "run",

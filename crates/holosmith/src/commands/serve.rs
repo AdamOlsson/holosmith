@@ -157,6 +157,11 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // still serves its control UI, and its sessions fail a model call with a sentence rather than
             // refusing to exist.
             start_key_proxy(&loaded.config);
+            // The **MCP proxy** on the same network: the second store reader, and the one that spends a tool's real
+            // key for a host `key::TOOLS` names (ADR-0099). Started here for the key proxy's reasons, with one of its
+            // own: a failure is a `warn` because a machine without it still serves every session, and only those
+            // sessions' tool calls fail.
+            start_mcp_proxy(&loaded.config);
             // The **self-test**: the isolation is enforced by the kernel, so it is measured rather than
             // asserted. Only a *proven* leak refuses the boot; a probe that could not run is a `warn`, because
             // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
@@ -652,6 +657,27 @@ fn start_key_proxy(config: &Config) {
             target: "holosmith::serve",
             %sentence,
             "the key proxy is not running: a session's model calls will find nothing at its proxy address"
+        ),
+    }
+}
+
+/// Start the machine's MCP proxy container, replacing one an earlier run left behind.
+///
+/// [`crate::proxies::start_mcp`] is the recipe, and it is the same one `server deploy`'s step 4 runs (ADR-0056).
+/// The policy here is the boot's, for [`start_key_proxy`]'s reason: a proxy that did not start costs its own `warn`
+/// and this run still serves its control UI.
+fn start_mcp_proxy(config: &Config) {
+    let docker = Docker::new(config.docker_host.clone());
+    match crate::proxies::start_mcp(config, &docker) {
+        Ok(started) => tracing::debug!(
+            target: "holosmith::serve",
+            container = started.container,
+            "the MCP proxy is running"
+        ),
+        Err(sentence) => tracing::warn!(
+            target: "holosmith::serve",
+            %sentence,
+            "the MCP proxy is not running: a session's tool calls will find nothing at its proxy address"
         ),
     }
 }

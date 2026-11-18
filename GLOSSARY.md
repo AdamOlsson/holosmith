@@ -844,12 +844,15 @@ once bare, once with the proxy joined — because a silence is only evidence if 
 something is attached; the second run is a `debug`/`warn` line and never a verdict, since a proxy that will not
 join fails a download rather than a session. Its machine names are `selftest::run`, `selftest::Outcome`,
 `selftest::PROXY_TARGET`, `selftest::KEY_PROXY_TARGET`, `selftest::pair`, `selftest::key_pair` and
-`templates/selftest-probe.js`.
+`templates/selftest-probe.js`. **Amended by ADR-0099:** the MCP proxy's alias is one of the addresses nothing may
+reach (`selftest::PROXY_TARGETS`), because it is joined by the same condition the egress proxy is.
 _Avoid_: Health check, smoke test, probe
 
 **Key proxy**:
 A **mode of this binary** (`holosmith proxy key`), run as the `hs_key` container on the `egress` network and
-joined to every session network under the alias `key-proxy`. Pi is configured with
+joined to every session network under the alias `key-proxy` — unconditionally, because a model call must work with
+Internet access off, which is why a **tool key** is spent by the **MCP proxy** instead of by a route here. Pi is
+configured with
 `http://key-proxy:8080/<provider>` and a per-session **dummy key**; the proxy validates that dummy against
 `<data>/secrets/keys.toml`, swaps in the provider's real key in the header that provider's **API shape** uses, and
 forwards the request over TLS. The provider is selected by the first path segment from a fixed table
@@ -881,14 +884,28 @@ _Avoid_: Session key, placeholder, fake token
 
 **Tool key**:
 A real credential for one tool's host rather than for a model provider — one row of `key::TOOLS` per host, `linear`
-at `mcp.linear.app` today — stored in the **secrets file** under `[tools]`, set by `key set <id>` and forgotten by
-`key revoke <id>`. A tool is not a provider: it has no catalog row, it is never the machine's default, and nothing in
-`models.json` names it. Its key lives in the store and not in a session's own `pi-home` because a file inside a
-session mount is a file the agent can read; **but nothing spends it yet**: a tool with no proxy in this build is a
-stored key, and the proxy that swaps the real value in — with the dummy the session would carry, as it does for a
-model — is a later change (ADR-0098). The store is read from disk per request, so `key set` will rotate the key with
-no restart.
+at `mcp.linear.app` today — stored in the **secrets file** under `[tools]`, set by `key set <id>`, spent by the **MCP
+proxy** and forgotten by `key revoke <id>`. A tool is not a provider: it has no catalog row, it is never the machine's
+default, and nothing in `models.json` names it. Its key lives in the store and not in a session's own `pi-home`
+because a file inside a session mount is a file the agent can read, and the proxy that swaps the real value in — with
+the dummy the session carries, as it does for a model — is a container of its own (ADR-0098, ADR-0099). The store is
+read from disk per request, so `key set` rotates the key with no restart.
 _Avoid_: MCP key, integration key, tool credential, provider
+
+**MCP proxy**:
+A **mode of this binary** (`holosmith proxy mcp`), run as the `hs_mcp` container on the `egress` network, and joined to
+a session network **by the egress proxy's condition** — only when the session's row allows Internet access, which is
+what keeps ADR-0046's "the checkbox is topology" true for a **tool key**. A tool's MCP client is configured with
+`http://mcp-proxy:8090/<tool>/<endpoint>` and the session's **dummy key**; the proxy selects the tool row and endpoint
+from `key::TOOLS`, swaps in the stored key in the header that row names, and forwards over TLS through the shared
+plaintext-to-TLS relay (`relay`). The method and every header that is not hop-by-hop or a credential pass through,
+so `POST`, `GET` (an event stream), `DELETE`, `Mcp-Session-Id` and `MCP-Protocol-Version` all reach the host, and the
+answer is streamed
+rather than held. It mounts the key store's directory read-only, as the key proxy does, and its whole reason for a
+third container is that being on the key proxy would make a tool's host reachable with Internet access off
+(ADR-0099). Its machine names are `mcpproxy::{Route, MCP_PROXY_NAME, MCP_PROXY_ALIAS, MCP_PROXY_PORT}`,
+`container::McpProxy` and `relay::forward`.
+_Avoid_: Tool proxy, integration proxy, MCP gateway
 
 **Egress proxy**:
 A **mode of this binary** (`holosmith proxy egress`), run as the `hs_egress` container on the `egress` network

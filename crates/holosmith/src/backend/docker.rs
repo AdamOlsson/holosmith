@@ -113,6 +113,28 @@ pub struct DockerBackend {
     commands: Arc<AtomicU64>,
 }
 
+/// One machine-wide proxy that joins a session's network only while its row says the session may reach the internet.
+///
+/// The name and the alias are the join (`docker network connect --alias`), and `what` is the words the log line
+/// uses: `hs_egress` and `hs_mcp` are one rule about two promises — a package download and a tool call — which is why
+/// they share [`DockerBackend::apply_proxy`] rather than each having their own (ADR-0099).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Proxy {
+    name: String,
+    alias: &'static str,
+    what: &'static str,
+}
+
+impl Proxy {
+    fn new(name: impl Into<String>, alias: &'static str, what: &'static str) -> Self {
+        Self {
+            name: name.into(),
+            alias,
+            what,
+        }
+    }
+}
+
 /// One launched agent process: the generation that names it, the agent, and the exit nobody has taken yet.
 #[derive(Debug)]
 struct Launched {
@@ -250,6 +272,11 @@ impl DockerBackend {
         crate::key::key_proxy_name(&self.settings.container_prefix)
     }
 
+    /// This run's MCP proxy container, composed the same way.
+    fn mcp_name(&self) -> String {
+        crate::mcpproxy::mcp_proxy_name(&self.settings.container_prefix)
+    }
+
     /// Whether `project`'s repository may be mounted, and why not when it may not.
     ///
     /// The create asks this **before** the session row exists, so it cannot go through [`Self::worktree`]:
@@ -322,7 +349,7 @@ impl DockerBackend {
     ///
     /// `--internal` is the isolation and the reason this step exists at all: the container joins *only*
     /// this network, so it has no route to the host and none to the internet. adds the `egress`
-    /// network, the two proxies and the startup self-test; what is here is the minimum a container needs
+    /// network, the proxies and the startup self-test; what is here is the minimum a container needs
     /// to be started on a network of its own rather than on the default bridge.
     ///
     /// A network of the same name that is already there is reused (the teardown failed, or the process
@@ -345,55 +372,87 @@ impl DockerBackend {
             network = %self.network(session),
             "the session's network is up"
         );
-        self.apply_proxy(session).await;
+        self.apply_proxy(
+            session,
+            Proxy::new(
+                self.egress_name(),
+                crate::container::PROXY_ALIAS,
+                "egress proxy",
+            ),
+        )
+        .await;
+        // The MCP proxy joins by the egress proxy's condition, not the key proxy's: a tool's host must not be
+        // reachable with Internet access off (ADR-0099).
+        self.apply_proxy(
+            session,
+            Proxy::new(
+                self.mcp_name(),
+                crate::mcpproxy::MCP_PROXY_ALIAS,
+                "MCP proxy",
+            ),
+        )
+        .await;
         self.apply_key_proxy(session).await;
         Ok(Provisioned::Nothing)
     }
 
-    /// Join the machine's egress proxy to this session's network, or leave it off (spec item 2).
+    /// Join one of the machine's conditional proxies to this session's network, or leave it off (spec item 2).
     ///
     /// Item 2 makes the checkbox **topology, not configuration**: the same `HTTPS_PROXY` is in a container
     /// either way, and what changes is whether anything answers on that address. So a create whose row says
     /// `network = false` is a network the proxy is *not* joined to, and a resume applies the same rule over a
     /// network that survived its stop — which is why this is one function used by both.
     ///
-    /// **A failure is a `warn`, never a refusal.** A proxy that is not there fails a package download, not a
-    /// session: item 2's off case is a supported case, a machine whose proxy image is not built yet must still
+    /// **Two containers take this rule**, which is why `proxy` is a parameter: `hs_egress` is the route out, and
+    /// `hs_mcp` is where a tool's real key is spent (ADR-0099). They share the condition because both are about the
+    /// same promise — with the checkbox off, nothing outside the session's own network is reachable — and `hs_key` is
+    /// the exception that proves it: a model call must work either way, so it is joined unconditionally
+    /// ([`Self::apply_key_proxy`]).
+    ///
+    /// **A failure is a `warn`, never a refusal.** A proxy that is not there fails a package download or a tool call,
+    /// not a session: item 2's off case is a supported case, a machine whose proxy image is not built yet must still
     /// run sessions, and the alternative — failing a create over a machine-wide container — would take the
     /// control UI down with the thing the operator needs it for. The refusal that *is* a refusal is
     /// `--internal`, and measures that with a probe rather than trusting this process.
-    async fn apply_proxy(&self, session: &Session) {
+    async fn apply_proxy(&self, session: &Session, proxy: Proxy) {
         let network = self.network(session);
-        let egress = self.egress_name();
         let wanted = session.network;
-        let proxy = egress.clone();
-        let joined = Self::docker(Step::Network, self.settings.docker(), move |docker| {
-            if wanted {
-                docker.join_network(&network, &proxy, crate::container::PROXY_ALIAS)?;
-            } else {
-                docker.leave_network(&network, &proxy);
-            }
-            Ok(())
-        })
-        .await;
+        let Proxy { name, alias, what } = proxy;
+        let joined = {
+            let name = name.clone();
+            Self::docker(Step::Network, self.settings.docker(), move |docker| {
+                if wanted {
+                    docker.join_network(&network, &name, alias)?;
+                } else {
+                    docker.leave_network(&network, &name);
+                }
+                Ok(())
+            })
+            .await
+        };
         match (joined, wanted) {
             (Ok(()), true) => tracing::debug!(
                 target: "holosmith::backend",
                 session = %session.id,
-                proxy = %egress,
-                "the egress proxy is on the session's network"
+                proxy = %name,
+                "the {} is on the session's network",
+                what
             ),
             (Ok(()), false) => tracing::debug!(
                 target: "holosmith::backend",
                 session = %session.id,
-                "the session asked for no internet access, so the egress proxy is not on its network"
+                proxy = %name,
+                "the session asked for no internet access, so the {} is not on its network",
+                what
             ),
             (Err(error), _) => tracing::warn!(
                 target: "holosmith::backend",
                 session = %session.id,
+                proxy = %name,
                 %error,
-                "the egress proxy could not be joined to (or left off) this session's network: the session \
-                 will reach nothing outside its own network, which is what item 2's off case is"
+                "the {} could not be joined to (or left off) this session's network: the session will reach \
+                 nothing outside its own network, which is what item 2's off case is",
+                what
             ),
         }
     }
@@ -698,56 +757,36 @@ impl DockerBackend {
     /// daemon could not say" (a `warn`), because a wedged daemon and a clean absence are different facts.
     async fn remove_network(&self, session: &Session) {
         let name = self.network(session);
-        // Leave first: `docker network rm` refuses a network that still has an endpoint on it, and the egress
-        // proxy is one for as long as the session allowed internet access. A detach that fails — the
-        // proxy is already gone, the network never had it — is the ordinary answer, not a reason to skip the
-        // removal, so its result is not read.
-        // The key proxy is on every session network, so it must leave before the network can be
-        // removed too. Not being attached is the ordinary answer for a network that never finished its step.
-        let key_leaving = Self::docker(Step::Network, self.settings.docker(), {
-            let name = name.clone();
-            let key = self.key_name();
-            move |docker| Ok(docker.leave_network(&name, &key))
-        })
-        .await;
-        match key_leaving {
-            Ok(true) => {}
-            Ok(false) => tracing::debug!(
-                target: "holosmith::backend",
-                session = %session.id,
-                "the key proxy was not on the session's network, so there was nothing to detach"
-            ),
-            Err(error) => tracing::warn!(
-                target: "holosmith::backend",
-                session = %session.id,
-                %error,
-                "the key proxy could not be detached from the session's network"
-            ),
-        }
-        let leaving = Self::docker(Step::Network, self.settings.docker(), {
-            let name = name.clone();
-            let egress = self.egress_name();
-            move |docker| Ok(docker.leave_network(&name, &egress))
-        })
-        .await;
-        match leaving {
-            Ok(true) => {}
-            // The ordinary answer for a session that allowed no internet access, or one whose network never had
-            // the proxy on it: there was nothing to detach.
-            Ok(false) => tracing::debug!(
-                target: "holosmith::backend",
-                session = %session.id,
-                "the egress proxy was not on the session's network, so there was nothing to detach"
-            ),
-            // Only a task that did not finish reaches here (`docker::succeeds` reads no answer at all), so the
-            // sentence says that rather than pretending Docker refused.
-            Err(error) => tracing::warn!(
-                target: "holosmith::backend",
-                session = %session.id,
-                %error,
-                "the egress proxy could not be detached from the session's network: the removal below decides \
-                 what happened to the network itself"
-            ),
+        // Leave first: `docker network rm` refuses a network that still has an endpoint on it, and **every** proxy
+        // the machine runs is one of them — the key proxy always, and the egress and MCP proxies for as long as the
+        // session allowed internet access. A detach that fails (a proxy that is already gone, a network that never
+        // had it) is the ordinary answer rather than a reason to skip the removal, so its result is only logged.
+        for proxy in [self.egress_name(), self.key_name(), self.mcp_name()] {
+            let leaving = Self::docker(Step::Network, self.settings.docker(), {
+                let network = name.clone();
+                let proxy = proxy.clone();
+                move |docker| Ok(docker.leave_network(&network, &proxy))
+            })
+            .await;
+            match leaving {
+                Ok(true) => {}
+                Ok(false) => tracing::debug!(
+                    target: "holosmith::backend",
+                    session = %session.id,
+                    proxy = %proxy,
+                    "the proxy was not on the session's network, so there was nothing to detach"
+                ),
+                // Only a task that did not finish reaches here (`docker::succeeds` reads no answer at all), so the
+                // sentence says that rather than pretending Docker refused.
+                Err(error) => tracing::warn!(
+                    target: "holosmith::backend",
+                    session = %session.id,
+                    proxy = %proxy,
+                    %error,
+                    "the proxy could not be detached from the session's network: the removal below decides what \
+                     happened to the network itself"
+                ),
+            }
         }
         let removed = Self::docker(Step::Network, self.settings.docker(), move |docker| {
             Ok(docker.remove_network(&name))
@@ -949,9 +988,22 @@ impl SessionBackend for DockerBackend {
             docker.create_internal_network(&network)
         })
         .await?;
-        // The proxy joins the re-created network too: a resume of a session that may use the internet
-        // must not come back without it, and a resume of one that may not must not come back with it.
-        self.apply_proxy(session).await;
+        // The conditional proxies join the re-created network too: a resume of a session that may use the internet
+        // must not come back without them, and a resume of one that may not must not come back with them.
+        for proxy in [
+            Proxy::new(
+                self.egress_name(),
+                crate::container::PROXY_ALIAS,
+                "egress proxy",
+            ),
+            Proxy::new(
+                self.mcp_name(),
+                crate::mcpproxy::MCP_PROXY_ALIAS,
+                "MCP proxy",
+            ),
+        ] {
+            self.apply_proxy(session, proxy).await;
+        }
         self.start_container(session).await
     }
 

@@ -56,7 +56,14 @@ fn main() -> ExitCode {
                 })
             }
             ProxyAction::Key { listen, keys } => {
-                commands::proxy::run_key(commands::proxy::KeyProxyArgs {
+                commands::proxy::run_key(commands::proxy::KeyedProxyArgs {
+                    listen,
+                    keys,
+                    config: cli.config,
+                })
+            }
+            ProxyAction::Mcp { listen, keys } => {
+                commands::proxy::run_mcp(commands::proxy::KeyedProxyArgs {
                     listen,
                     keys,
                     config: cli.config,

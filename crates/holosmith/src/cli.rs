@@ -160,7 +160,7 @@ pub enum Cmd {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
-    /// Remove the unit, the two proxies and the machine's networks, keeping the data.
+    /// Remove the unit, the proxies and the machine's networks, keeping the data.
     Uninstall {
         /// Also remove the data root: the database, every session's log and `secrets/`.
         #[arg(long)]
@@ -363,6 +363,15 @@ pub enum ProxyAction {
     },
     /// The key proxy: validates a session's dummy key and swaps in the real provider key.
     Key {
+        /// Address to listen on.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
+        /// The key file. Absent means the config's `<data>/secrets/keys.toml`.
+        #[arg(long, value_name = "PATH")]
+        keys: Option<PathBuf>,
+    },
+    /// The MCP proxy: validates a session's dummy key and swaps in a tool's real key for the host it names.
+    Mcp {
         /// Address to listen on.
         #[arg(long, value_name = "ADDR")]
         listen: Option<String>,

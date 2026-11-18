@@ -37,7 +37,7 @@ use crate::worktree::Retained;
 pub enum Step {
     /// `<projects>/.worktrees/<id>` and the branch `agent/<id>`.
     Worktree,
-    /// The session's private network and its two proxies.
+    /// The session's private network and the proxies joined to it.
     Network,
     /// `docker run … s_<id>`.
     Container,

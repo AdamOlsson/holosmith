@@ -469,7 +469,11 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
     let dir = TempDir::new("uninstall-proxies");
     let (root, deployed) = root_target(&dir);
     let machine = Fake::with(
-        &[container::PROXY_NAME, holosmith::key::KEY_PROXY_NAME],
+        &[
+            container::PROXY_NAME,
+            holosmith::key::KEY_PROXY_NAME,
+            holosmith::mcpproxy::MCP_PROXY_NAME,
+        ],
         &[holosmith::docker::EGRESS_NETWORK, "agents_0123456789abcdef"],
     );
     let tools = tools_for(&dir, &root, PathBuf::from("rm"));
@@ -488,8 +492,12 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
     );
     assert_eq!(
         machine.removed_containers(),
-        [container::PROXY_NAME, holosmith::key::KEY_PROXY_NAME],
-        "both proxies are removed, by their own names"
+        [
+            container::PROXY_NAME,
+            holosmith::key::KEY_PROXY_NAME,
+            holosmith::mcpproxy::MCP_PROXY_NAME,
+        ],
+        "every proxy is removed, by its own name"
     );
     assert_eq!(
         machine.removed_networks(),
@@ -503,6 +511,7 @@ fn the_proxies_and_the_egress_network_go_containers_first() {
         [
             format!("container {}", container::PROXY_NAME),
             format!("container {}", holosmith::key::KEY_PROXY_NAME),
+            format!("container {}", holosmith::mcpproxy::MCP_PROXY_NAME),
             format!("network {}", holosmith::docker::EGRESS_NETWORK),
         ]
     );

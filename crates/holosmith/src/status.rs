@@ -20,10 +20,11 @@
 //! | `proxy <name>` | `preflight::daemon` first (did it answer?), then [`crate::proxies::running`] |
 //! | `machines <n>`, `machine <name>` | the `hosts` table, through the same read-only [`crate::db::Reader`] |
 //!
-//! The proxy pair is the one line family whose first question is *whether it could be asked at all*: `Docker::running`
+//! The proxy lines are the one line family whose first question is *whether it could be asked at all*: `Docker::running`
 //! folds every daemon error into `false`, so a `status` that asked it alone would print `not running` for a machine
 //! nobody looked at. `preflight::daemon` is the reader that separates the two, and a daemon that does not answer makes
-//! both lines `unknown:` — not a failure, because describing a machine whose daemon is down is what this command is for.
+//! every proxy line `unknown:` — not a failure, because describing a machine whose daemon is down is what this command is
+//! for.
 //!
 //! [`Runtime::uptime_s`]: crate::runtime::Runtime::uptime_s
 //!
@@ -158,7 +159,7 @@ pub fn run(config: &Config, machine: &dyn proxies::Containers) -> Report {
     Report { lines }
 }
 
-/// The two `proxy <name>` lines, which are three-armed like every other fact.
+/// The `proxy <name>` lines, one per container, which are three-armed like every other fact.
 ///
 /// **The daemon is asked first, and that question is what makes these lines honest.** [`crate::proxies::running`]
 /// answers a `bool`, and [`crate::docker::Docker::running`] folds *every* failure into `false` — a socket this user
@@ -391,6 +392,7 @@ mod tests {
                 "sessions deleting",
                 "proxy hs_egress",
                 "proxy hs_key",
+                "proxy hs_mcp",
                 "machines",
             ]
         );
@@ -558,6 +560,10 @@ mod tests {
         assert!(rendered.contains("proxy hs_egress running\n"), "{rendered}");
         assert!(
             rendered.contains("proxy hs_key not running\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("proxy hs_mcp not running\n"),
             "{rendered}"
         );
         let _ = std::fs::remove_dir_all(root);

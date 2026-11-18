@@ -145,7 +145,7 @@ fn containers_to_remove(rows: &[Session], names: &[String], prefix: &str) -> Vec
             Some(id) if crate::sessions::is_id(id) => {
                 status_of(rows, id).is_none_or(|status| status != Status::Deleting)
             }
-            // Not the build's name: `hs_egress`, `hs_key`, and anything an operator named.
+            // Not the build's name: `hs_egress`, `hs_key`, `hs_mcp`, and anything an operator named.
             _ => false,
         })
         .cloned()
@@ -586,6 +586,7 @@ mod tests {
             // Not the build's names: no prefix, or an id that is not a session id.
             "hs_egress".to_string(),
             "hs_key".to_string(),
+            "hs_mcp".to_string(),
             "agents_0123456789abcdef".to_string(),
             format!("{NAME_PREFIX}not-a-session-id"),
             format!("{NAME_PREFIX}0123456789ABCDEF"),

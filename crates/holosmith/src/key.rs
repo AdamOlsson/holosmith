@@ -12,8 +12,8 @@
 //! `keys.toml` carries every table because the proxy has no database: the provider keys are what it swaps in, the
 //! session table is what lets it answer "is this dummy key still valid?", and the tool table ([`TOOLS`]) is where
 //! a credential for a host that is not a model provider lives — out of the session's own `pi-home`, where the agent
-//! could read it (ADR-0098). Deleting a session removes its row here ([`Store::revoke`]), which is the hook's
-//! whole body.
+//! could read it, and spent by [`crate::mcpproxy`] rather than by [`crate::keyproxy`] (ADR-0098, ADR-0099). Deleting
+//! a session removes its row here ([`Store::revoke`]), which is the hook's whole body.
 //!
 //! **Writes are temp-file + rename.** The file must never be observable half-written: a proxy reading it at
 //! the wrong moment would answer 503 for a key the operator just saved. The temporary file is created with
@@ -264,7 +264,8 @@ pub fn provider_ids() -> Vec<&'static str> {
 /// proxy at a fixed route per row of [`PROVIDERS`]; a tool key belongs to a host the agent's own client talks to,
 /// whose paths the tool's protocol names. So a tool is **not** a provider: it has no entry in pi's catalog, it is
 /// never [`default_provider`], [`models`] writes nothing for it, and the key proxy's routes never name it. It is a
-/// row `key set` accepts and `key list` shows (ADR-0098).
+/// row `key set` accepts, `key list` shows, and [`crate::mcpproxy::Route`] selects — from this table and never from a
+/// request's bytes (ADR-0098, ADR-0099).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tool {
     /// The id `key set` and `key revoke` take, and the row's name in `keys.toml`'s `[tools]` table.

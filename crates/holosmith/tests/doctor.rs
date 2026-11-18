@@ -191,7 +191,7 @@ struct FakeMachine {
 }
 
 impl FakeMachine {
-    /// The machine `--full` passes on: both proxies up, the pinned pi, a measured isolation, and an image with no
+    /// The machine `--full` passes on: every proxy up, the pinned pi, a measured isolation, and an image with no
     /// Holosmith labels — the supported by-hand image, whose label half the arms below compare.
     ///
     /// An image with no labels answers `null` from `{{json .Config.Labels}}`, which [`images::Images`]'s Docker impl
@@ -199,7 +199,7 @@ impl FakeMachine {
     /// reader answers, or the tests would prove an arm production can never reach.
     fn healthy() -> Self {
         Self {
-            running: vec!["hs_egress", "hs_key"],
+            running: vec!["hs_egress", "hs_key", "hs_mcp"],
             image_pi: Ok(holosmith::pins::pi_version().to_string()),
             image_labels: Ok(Some(BTreeMap::new())),
             selftest: selftest::Outcome::Passed,
@@ -234,7 +234,7 @@ fn finding(report: &Report, check: Check) -> &Finding {
         .unwrap_or_else(|| panic!("no {check} finding in:\n{}", report.render()))
 }
 
-/// The `nth` finding whose check is `check` — the two ports, the two proxies.
+/// The `nth` finding whose check is `check` — the two ports, the three proxies.
 fn nth(report: &Report, check: Check, index: usize) -> &Finding {
     let matches: Vec<&Finding> = report
         .findings
@@ -909,10 +909,16 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
         "the image pass does not name the pinned version: {}",
         says(finding(&report, Check::Image))
     );
-    // Both proxies, by name — one line each, because `hs_egress` and `hs_key` are two different machines' facts.
+    // Every proxy, by name — one line each, because `hs_egress`, `hs_key` and `hs_mcp` are three different facts
+    // about the machine.
     assert!(says(nth(&report, Check::Proxy, 0)).contains("hs_egress"));
     assert!(says(nth(&report, Check::Proxy, 1)).contains("hs_key"));
-    assert_eq!(report.render().matches("proxy: pass:").count(), 2);
+    assert!(says(nth(&report, Check::Proxy, 2)).contains("hs_mcp"));
+    assert!(
+        says(nth(&report, Check::Proxy, 2)).contains(holosmith::mcpproxy::MCP_PROXY_ALIAS),
+        "the MCP proxy's line does not name the alias a session resolves it by"
+    );
+    assert_eq!(report.render().matches("proxy: pass:").count(), 3);
 
     // And the failing arms: a proxy that is not running, an image that runs another pi, and a self-test that
     // measured a leak. Each is one line, and the run fails.

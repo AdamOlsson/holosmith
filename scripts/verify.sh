@@ -220,7 +220,7 @@ cleanup() {
   fi
   # A **smoke run's** own names. The harness removes its container, its network and its two proxies
   # itself; this is what a `fail` in the middle needs, and the filter is `smoke_` and nothing else — the
-  # machine's own `hs_egress`/`hs_key` are not this case's to remove (the block above is).
+  # machine's own `hs_egress`/`hs_key`/`hs_mcp` are not this case's to remove (the block above is).
   local leftover
   for leftover in $(docker ps -aq --filter 'name=smoke_' 2>/dev/null || true); do
     docker rm --force "$leftover" >/dev/null 2>&1 || true
@@ -244,20 +244,22 @@ cleanup() {
   local id
   for id in ${docker_session_id:-} ${docker_second_session_id:-}; do
     docker rm --force "s_$id" >/dev/null 2>&1 || true
-    # The egress proxy is an endpoint on a session network that allowed internet access, and `docker network rm`
-    # refuses a network with one — so a teardown that forgot the detach would leave the network behind with a
-    # `warn`, which is the orphan a later change owns. `docker.rs`'s `remove_network` leaves first for the same reason.
+    # The egress and MCP proxies are endpoints on a session network that allowed internet access, and `docker
+    # network rm` refuses a network with one — so a teardown that forgot the detach would leave the network behind
+    # with a `warn`, which is the orphan a later change owns. `DockerBackend::remove_network` leaves first for the
+    # same reason, over every proxy the machine runs.
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
+    docker network disconnect --force "agents_$id" hs_mcp >/dev/null 2>&1 || true
     docker network rm "agents_$id" >/dev/null 2>&1 || true
   done
   docker_session_id=""
   docker_second_session_id=""
-  # the image case starts the two proxies from the image it built — its own `hs_images_*` pair and the deploy's
-  # `hs_egress`/`hs_key` — so a `fail` in the middle does not leave a container the next run's `--name` would trip
-  # over (and a leftover `hs_egress` would make the *next* run's untag fail, which is how the absent state stops
+  # the image case starts the proxies from the image it built — its own `hs_images_*` pair and the deploy's
+  # `hs_egress`/`hs_key`/`hs_mcp` — so a `fail` in the middle does not leave a container the next run's `--name` would
+  # trip over (and a leftover `hs_egress` would make the *next* run's untag fail, which is how the absent state stops
   # being absent). Its images stay: every later `serve` boot starts the proxies from them.
   local image_container
-  for image_container in $(docker ps -aq --filter 'name=hs_images_' --filter 'name=hs_egress' --filter 'name=hs_key' 2>/dev/null || true); do
+  for image_container in $(docker ps -aq --filter 'name=hs_images_' --filter 'name=hs_egress' --filter 'name=hs_key' --filter 'name=hs_mcp' 2>/dev/null || true); do
     docker rm --force "$image_container" >/dev/null 2>&1 || true
   done
   # `case_root_refusal`'s imported image, for the same reason one level up: a `fail` between its import and its own
@@ -644,6 +646,8 @@ serve_cases=(
   case_network_selftest
   case_key_proxy
   case_key_proxy_request
+  case_mcp_proxy
+  case_mcp_proxy_request
   case_snapshot
   case_egress_proxy
   case_internet_toggle
@@ -2116,7 +2120,7 @@ case_tool_image() {
 # the other half, on a real daemon: the names a crash leaves behind that no row owns. The live session's
 # container is replaced under the same name (which is what "no name conflict" means), a container and a network
 # with no row go, and a worktree directory no row owns goes **while its branch and its snapshot ref stay**
-# (ADR-0052). The machine's own `hs_egress`/`hs_key` are not the build's session names and are left.
+# (ADR-0052). The machine's own `hs_egress`/`hs_key`/`hs_mcp` are not the build's session names and are left.
 #
 # What the SKIP line costs, said out loud: on a machine with no daemon (a hub, which is supported) the container
 # and network halves of acceptance bullets 1 and 3 cannot be measured at all — there is nothing to measure — so
@@ -2621,6 +2625,277 @@ PYASK_OPENAI
   rm -rf "$root"
 }
 
+# the MCP proxy's refusals, with no daemon, no internet and no real key. `case_key_proxy`'s pattern on the third
+# proxy: a request with no dummy never reaches a tool's host, a route the tool table does not name is refused 403
+# before any key is read, and a route it does name with no stored key answers 503 naming `key set`. What a gate can
+# prove here is the part that must never be wrong; the forward itself is `case_mcp_proxy_request`'s, with a stand-in
+# TLS client, because the real one needs the internet and a real Linear key.
+case_mcp_proxy() {
+  local name=case_mcp_proxy root="$WORK/mcp-proxy-$$" config="$WORK/config-mcp-proxy.toml"
+  local port proxy_pid="" statuses answered
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the MCP proxy (tests/key_proxy.rs covers the wire)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/data" "$root/projects" || fail "$name/mkdir" "could not create $root"
+  printf 'data_root = "%s/data"\nprojects_root = "%s/projects"\nbackend = "stub"\n' "$root" "$root" >"$config"
+
+  # A tool key stored through the CLI, so the file the proxy reads is the file `key set` writes.
+  printf '%s\n' 'lin_api_verify' |
+    "$artifact" --config "$config" key set linear >"$WORK/responses/$name-set.out" 2>"$WORK/responses/$name-set.err" ||
+    fail "$name/set" "key set linear failed: $(cat "$WORK/responses/$name-set.err")"
+  grep -qx 'stored linear' "$WORK/responses/$name-set.out" ||
+    fail "$name/set-output" "key set printed $(cat "$WORK/responses/$name-set.out")"
+  grep -q '^\[tools\]$' "$root/data/secrets/keys.toml" ||
+    fail "$name/tools-table" "the tool key landed outside [tools]: $(cat "$root/data/secrets/keys.toml")"
+  # A session's dummy, appended where the store puts `[sessions]`. A create writes one, and this case has no
+  # server: the row is the same shape `Store::dummy_for` renders, which is what the proxy's check reads.
+  printf '0123456789abcdef = "hs-dummy-verify"\n' >>"$root/data/secrets/keys.toml"
+  chmod 600 "$root/data/secrets/keys.toml"
+
+  port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  "$artifact" proxy mcp --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-proxy.log" 2>&1 &
+  proxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the MCP proxy is listening' "$WORK/responses/$name-proxy.log" 2>/dev/null && break
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  grep -q "listen=127.0.0.1:$port" "$WORK/responses/$name-proxy.log" ||
+    fail "$name/listen" "the MCP proxy did not report its bound address: $(cat "$WORK/responses/$name-proxy.log")"
+
+  statuses="$(python3 - "$port" <<'PY'
+import socket, sys
+
+port = int(sys.argv[1])
+
+def ask(head):
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(head.encode())
+        answer = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            answer += chunk
+    return answer.decode("utf-8", "replace")
+
+questions = [
+    ("no-key", "POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\nContent-Length: 2\r\n\r\n{}"),
+    ("unknown-tool", "POST /not-a-tool/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\n\r\n"),
+    ("unknown-endpoint", "POST /linear/sse HTTP/1.1\r\nHost: mcp-proxy:8090\r\n\r\n"),
+]
+for label, head in questions:
+    answer = ask(head)
+    print(label, answer.split("\r\n", 1)[0])
+PY
+)" || fail "$name/driver" "the python3 driver failed"
+  check "$name/no-key" "no-key HTTP/1.1 401 Unauthorized" "$(grep '^no-key ' <<<"$statuses")"
+  check "$name/unknown-tool" "unknown-tool HTTP/1.1 403 Forbidden" "$(grep '^unknown-tool ' <<<"$statuses")"
+  check "$name/unknown-endpoint" "unknown-endpoint HTTP/1.1 403 Forbidden" \
+    "$(grep '^unknown-endpoint ' <<<"$statuses")"
+  grep -q 'status=no-key' "$WORK/responses/$name-proxy.log" ||
+    fail "$name/log" "the MCP proxy did not log the refusal: $(cat "$WORK/responses/$name-proxy.log")"
+  assertions=$((assertions + 1))
+
+  kill -TERM "$proxy_pid" 2>/dev/null || true
+  wait "$proxy_pid" 2>/dev/null || true
+
+  # The session's own dummy with the tool key **gone** — the state a machine with no `key set linear` is in — is a
+  # 503 naming the command that stores one, and revoking the last key takes the store's `[tools]` table with it.
+  "$artifact" --config "$config" key revoke linear >/dev/null 2>&1 ||
+    fail "$name/revoke" "key revoke linear failed"
+  "$artifact" proxy mcp --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-revoked.log" 2>&1 &
+  proxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the MCP proxy is listening' "$WORK/responses/$name-revoked.log" 2>/dev/null && break
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  answered="$(python3 - "$port" <<'PY'
+import socket, sys
+
+port = int(sys.argv[1])
+head = ("POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\n"
+        "Authorization: Bearer hs-dummy-verify\r\nContent-Length: 2\r\n\r\n{}")
+with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+    sock.sendall(head.encode())
+    answer = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:400])
+PY
+)" || fail "$name/revoked-driver" "the python3 driver failed"
+  case "$answered" in
+    "HTTP/1.1 503 "*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/revoked" "a session with no stored tool key was not a 503: $answered" ;;
+  esac
+  case "$answered" in
+    *"key set linear"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/revoked-sentence" "the 503 does not name the command that stores a key: $answered" ;;
+  esac
+  kill -TERM "$proxy_pid" 2>/dev/null || true
+  wait "$proxy_pid" 2>/dev/null || true
+  if grep -q '^\[tools\]$' "$root/data/secrets/keys.toml"; then
+    fail "$name/revoked-store" "key revoke left the [tools] table behind: $(cat "$root/data/secrets/keys.toml")"
+  fi
+  assertions=$((assertions + 1))
+  rm -rf "$root"
+}
+
+# the MCP proxy's request bytes: what it hands its TLS client. `case_key_proxy_request`'s pattern, for the third
+# proxy — a stand-in `openssl` on `PATH` captures the bytes and answers a canned 200 — and the things a
+# streamable-HTTP request needs that a model call does not: the **method** and the four headers MCP is made of go
+# through, the dummy never does, and a `GET` invents no `Content-Length`.
+case_mcp_proxy_request() {
+  local name=case_mcp_proxy_request root="$WORK/mcp-proxy-request-$$"
+  local fake="$root/openssl" capture="$root/request.bin" readonly_capture="$root/request-readonly.bin"
+  local port proxy_pid answered
+  local body='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to speak HTTP to the MCP proxy (src/mcpproxy.rs covers the bytes)\n' "$name"
+    return 0
+  fi
+  rm -rf "$root"
+  mkdir -p "$root/data/secrets" "$fake" || fail "$name/mkdir" "could not create $root"
+  printf '[providers]\n\n[tools]\nlinear = "lin_api_verify"\n[sessions]\n0123456789abcdef = "hs-dummy-verify"\n' \
+    >"$root/data/secrets/keys.toml"
+  chmod 600 "$root/data/secrets/keys.toml"
+  cat >"$fake/openssl" <<'SH'
+#!/bin/sh
+# Stand in for "openssl s_client": capture what the proxy writes, then answer one complete HTTP response. One
+# bounded read rather than a read-until-EOF, because the proxy deliberately keeps our stdin open; the request is
+# far below PIPE_BUF and the proxy writes it in one `write_all`, so one read returns all of it.
+dd bs=8192 count=1 of="$CAPTURE" 2>/dev/null
+printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
+SH
+  chmod +x "$fake/openssl"
+  port="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  rm -f "$capture"
+  PATH="$fake:$PATH" CAPTURE="$capture" \
+    "$artifact" proxy mcp --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-proxy.log" 2>&1 &
+  proxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the MCP proxy is listening' "$WORK/responses/$name-proxy.log" 2>/dev/null && break
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  answered="$(python3 - "$port" "$body" <<'PYASK'
+import socket, sys
+
+port, body = int(sys.argv[1]), sys.argv[2].encode()
+head = (b"POST /linear/mcp HTTP/1.1\r\nHost: mcp-proxy:8090\r\n"
+        b"Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n"
+        b"Mcp-Session-Id: 3f1c\r\nMCP-Protocol-Version: 2025-06-18\r\n"
+        b"Authorization: Bearer hs-dummy-verify\r\n"
+        + b"Content-Length: %d\r\n\r\n" % len(body))
+with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
+    sock.sendall(head + body)
+    answer = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:120])
+PYASK
+)" || fail "$name/driver" "the python3 driver failed"
+  case "$answered" in
+    "HTTP/1.1 200 OK"*" ok") assertions=$((assertions + 1)) ;;
+    *) fail "$name/answer" "the proxy did not forward the canned answer: $answered" ;;
+  esac
+  kill -TERM "$proxy_pid" 2>/dev/null || true
+  wait "$proxy_pid" 2>/dev/null || true
+  # The request the tool's host receives: the endpoint the table names, the stored key in the row's header, the
+  # method, and every header an MCP request is made of — then the body.
+  check "$name/request-line" "POST /mcp HTTP/1.1" "$(head -1 "$capture" 2>/dev/null | tr -d '\r' || true)"
+  check "$name/host" "Host: mcp.linear.app" \
+    "$(grep -i '^Host:' "$capture" 2>/dev/null | tr -d '\r' || true)"
+  grep -qi '^Accept: application/json, text/event-stream' "$capture" 2>/dev/null ||
+    fail "$name/accept" "the forwarded request lost Accept: $(head -c 500 "$capture")"
+  grep -qi '^Mcp-Session-Id: 3f1c' "$capture" 2>/dev/null ||
+    fail "$name/session-header" "the forwarded request lost Mcp-Session-Id: $(head -c 500 "$capture")"
+  grep -qi '^MCP-Protocol-Version: 2025-06-18' "$capture" 2>/dev/null ||
+    fail "$name/protocol-header" "the forwarded request lost MCP-Protocol-Version: $(head -c 500 "$capture")"
+  assertions=$((assertions + 3))
+  grep -qi '^Authorization: Bearer lin_api_verify' "$capture" 2>/dev/null ||
+    fail "$name/key" "the forwarded request does not carry the stored tool key: $(head -c 400 "$capture")"
+  assertions=$((assertions + 1))
+  if grep -q 'hs-dummy-verify' "$capture" 2>/dev/null; then
+    fail "$name/dummy" "the forwarded request still carries the session's dummy key"
+  fi
+  assertions=$((assertions + 1))
+  if grep -qi '^x-api-key:' "$capture" 2>/dev/null; then
+    fail "$name/api-key" "a Bearer row added an x-api-key: $(head -c 400 "$capture")"
+  fi
+  assertions=$((assertions + 1))
+  check "$name/content-length" "1" "$(grep -c '^Content-Length:' "$capture" 2>/dev/null || true)"
+  check "$name/content-length-value" "Content-Length: ${#body}" \
+    "$(grep '^Content-Length:' "$capture" 2>/dev/null | tr -d '\r' || true)"
+  if [ "$(tail -c ${#body} "$capture" 2>/dev/null)" != "$body" ]; then
+    fail "$name/body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
+  fi
+  assertions=$((assertions + 1))
+
+  # The readonly endpoint, and a method with no body: `GET` is how a streamable-HTTP server holds its event
+  # stream, so the method passes through and no `Content-Length` is invented for a request that had none. Its own
+  # capture, because the shim truncates the one file it is told to write.
+  rm -f "$readonly_capture"
+  PATH="$fake:$PATH" CAPTURE="$readonly_capture" \
+    "$artifact" proxy mcp --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-readonly-proxy.log" 2>&1 &
+  proxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the MCP proxy is listening' "$WORK/responses/$name-readonly-proxy.log" 2>/dev/null && break
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  answered="$(python3 - "$port" <<'PYASK_READONLY'
+import socket, sys
+
+port = int(sys.argv[1])
+head = (b"GET /linear/mcp/readonly HTTP/1.1\r\nHost: mcp-proxy:8090\r\n"
+        b"Accept: text/event-stream\r\nx-api-key: hs-dummy-verify\r\n\r\n")
+with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
+    sock.sendall(head)
+    answer = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:120])
+PYASK_READONLY
+)" || fail "$name/readonly-driver" "the python3 driver failed"
+  case "$answered" in
+    "HTTP/1.1 200 OK"*" ok") assertions=$((assertions + 1)) ;;
+    *) fail "$name/readonly-answer" "the proxy did not forward the canned answer: $answered" ;;
+  esac
+  kill -TERM "$proxy_pid" 2>/dev/null || true
+  wait "$proxy_pid" 2>/dev/null || true
+  check "$name/readonly-request" "GET /mcp/readonly HTTP/1.1" \
+    "$(head -1 "$readonly_capture" 2>/dev/null | tr -d '\r' || true)"
+  grep -qi '^Authorization: Bearer lin_api_verify' "$readonly_capture" 2>/dev/null ||
+    fail "$name/readonly-key" "the forwarded GET does not carry the tool key: $(head -c 400 "$readonly_capture")"
+  assertions=$((assertions + 1))
+  if grep -qi '^Content-Length:' "$readonly_capture" 2>/dev/null; then
+    fail "$name/readonly-length" "a GET with no body names a length: $(head -c 400 "$readonly_capture")"
+  fi
+  assertions=$((assertions + 1))
+  if grep -q 'hs-dummy-verify' "$readonly_capture" 2>/dev/null; then
+    fail "$name/readonly-dummy" "the forwarded GET carries the session's dummy key"
+  fi
+  assertions=$((assertions + 1))
+  rm -rf "$root"
+}
+
 # the egress proxy, on the wire and with no daemon and no internet. What it proves is the four
 # refusals spec item 2 names — anything that is not CONNECT, a port that is not 443, a host that is not on
 # the allow-list, and a name that resolves inside the machine *even when it is on the list* — plus that the
@@ -2723,11 +2998,15 @@ PY
 #           stopped being internal at all.
 #   proxy   the egress proxy's alias. It must not resolve in the `off` case (`EAI_AGAIN` when nothing is
 #           attached — measured) and must answer `403` for a host that is not on the allow-list in the `on` one.
+#   mcp     the MCP proxy's alias, which is joined by the **same** condition as the egress proxy: `EAI_AGAIN` with
+#           the checkbox off, `connected` with it on. That pair is the whole reason `hs_mcp` is a container of its
+#           own rather than a route on `hs_key` (ADR-0099), which must answer either way.
 #
-# Then the two halves that no container can show: `docker inspect`'s environment (identical modulo the session
-# id, which is the acceptance's "the difference is topology, not configuration") and a `kill` + `resume` pair,
-# after which the network's endpoint count is 1 for the off session and 2 for the on one — the assertion a
-# wrong flag cannot survive, and the only proof that a resume keeps the choice.
+# Then the halves that no container can show: `docker inspect`'s environment (identical modulo the session id,
+# which is the acceptance's "the difference is topology, not configuration"), the `hs_mcp` facts (alias, read-only
+# directory mount, `--cap-drop ALL`), and a `kill` + `resume` pair after which the network's endpoint count is 3 for
+# the off session and 4 for the on one — the assertion a wrong flag cannot survive, and the only proof that a resume
+# keeps the choice.
 case_internet_toggle() {
   local name=case_internet_toggle image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local root="$repo_root/target/verify-toggle-$$"
@@ -2737,6 +3016,7 @@ case_internet_toggle() {
   local projects="$root/projects"
   local data="$root/data"
   local off_id="" on_id="" body label id verdicts env_off env_on got count want running why pair key_mounts
+  local mcp_networks mcp_source mcp_rw mcp_mounts mcp_caps mcp_privileges
   # The probe's verdict words, spelled the way the `case` patterns below need them: a shell `$CONNECTING` would be
   # an unbound variable, because the node constants live inside the heredoc where the shell cannot see them.
   local not_listed="HTTP/1.1 403 Forbidden"
@@ -2833,6 +3113,20 @@ const key = () =>
     });
     socket.on("error", (error) => resolve(String(error.code || error.message)));
   });
+const mcp = () =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host: "mcp-proxy", port: 8090 });
+    socket.setTimeout(3000);
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve("connected");
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve("timed out");
+    });
+    socket.on("error", (error) => resolve(String(error.code || error.message)));
+  });
 const ask = (head) =>
   new Promise((resolve) => {
     const socket = net.connect({ host: "egress-proxy", port: 3128 });
@@ -2854,6 +3148,7 @@ const ask = (head) =>
 (async () => {
   console.log(`direct ${await direct()}`);
   console.log(`key ${await key()}`);
+  console.log(`mcp ${await mcp()}`);
   console.log(`proxy ${await ask("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n")}`);
 })();
 PROBE
@@ -2898,7 +3193,25 @@ PROBE
           fail "${name}_off_proxy" "a session that asked for no internet resolved or reached the egress proxy: $verdicts"
           ;;
       esac
+      # The second half of the same promise, and the reason the MCP proxy exists: a tool's host must not be
+      # reachable with the checkbox off, so its alias must not resolve either.
+      case "$verdicts" in
+        *"mcp EAI_AGAIN"* | *"mcp ENOTFOUND"*)
+          assertions=$((assertions + 1))
+          ;;
+        *)
+          fail "${name}_off_mcp" "a session that asked for no internet resolved or reached the MCP proxy: $verdicts"
+          ;;
+      esac
     else
+      case "$verdicts" in
+        *"mcp connected"*)
+          assertions=$((assertions + 1))
+          ;;
+        *)
+          fail "${name}_on_mcp" "the MCP proxy's alias did not answer on the on session's network: $verdicts"
+          ;;
+      esac
       case "$verdicts" in
         *"proxy $not_listed"*)
           assertions=$((assertions + 1))
@@ -2959,6 +3272,38 @@ PROBE
   esac
   assertions=$((assertions + 1))
 
+  # `hs_mcp` is the third proxy, and its load-bearing facts are read off the container the boot started
+  # (ADR-0099): the `egress` network and the alias a session's MCP configuration names, the store's **directory**
+  # mounted read-only at its own path (the key proxy's rename reason), and `--cap-drop ALL`. A proxy that could open
+  # a raw socket is not a proxy, and one that mounted the file would answer `bad-key` for every session created
+  # after it started.
+  mcp_networks="$(docker inspect hs_mcp --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | tr -d '\r')"
+  case "$mcp_networks" in
+    *'"egress"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/mcp_network" "hs_mcp is not on the egress network: $mcp_networks" ;;
+  esac
+  case "$mcp_networks" in
+    *'"mcp-proxy"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/mcp_alias" "hs_mcp carries no mcp-proxy alias, so no session resolves it: $mcp_networks" ;;
+  esac
+  mcp_source="$(docker inspect hs_mcp --format '{{range .Mounts}}{{.Source}}{{end}}' 2>/dev/null | tr -d '\r')"
+  mcp_rw="$(docker inspect hs_mcp --format '{{range .Mounts}}{{.RW}}{{end}}' 2>/dev/null | tr -d '\r')"
+  mcp_mounts="$(docker inspect hs_mcp --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | tr -d '\r')"
+  case "$mcp_source" in
+    */secrets) assertions=$((assertions + 1)) ;;
+    *)
+      fail "$name/mcp_mount" "hs_mcp does not mount the key file's directory, so it cannot read the store: $mcp_mounts"
+      ;;
+  esac
+  check "$name/mcp_mount_readonly" "false" "$mcp_rw"
+  mcp_caps="$(docker inspect hs_mcp --format '{{json .HostConfig.CapDrop}}' 2>/dev/null | tr -d '\r')"
+  check "$name/mcp_capdrop" '["ALL"]' "$mcp_caps"
+  mcp_privileges="$(docker inspect hs_mcp --format '{{json .HostConfig.SecurityOpt}}' 2>/dev/null | tr -d '\r')"
+  case "$mcp_privileges" in
+    *no-new-privileges*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/mcp_privileges" "hs_mcp may gain privileges: $mcp_privileges" ;;
+  esac
+
   # The environment: identical in both cases once each session's own id is normalised — the acceptance's "the
   # difference is topology, not configuration", read off the containers the daemon is really running and over
   # **every** variable rather than the one the story names, because the next story that adds an env var should not
@@ -2992,11 +3337,13 @@ PROBE
   # it — an `on` session would report 2 even with `apply_proxy` deleted from `resume`. Detached and then 2 is a
   # rejoin; detached and then 1 is a missing one.
   for label in off on; do
-    # The key proxy is on every session network, so the stable count is session + key proxy (2) for the
-    # off case and session + key proxy + egress proxy (3) for the on one. The egress checkbox is still the
-    # only difference, which is what makes the assertion about it.
-    if [ "$label" = off ]; then id="$off_id"; want=2; else id="$on_id"; want=3; fi
+    # The key proxy is on every session network, so the stable count is session + key proxy + MCP proxy (3) for the
+    # off case and session + key proxy + MCP proxy + egress proxy (4) for the on one. The egress checkbox is still
+    # the only difference, which is what makes the assertion about it — and both conditional proxies are detached
+    # first, so a re-join is measured rather than inherited.
+    if [ "$label" = off ]; then id="$off_id"; want=3; else id="$on_id"; want=4; fi
     docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
+    docker network disconnect --force "agents_$id" hs_mcp >/dev/null 2>&1 || true
     docker kill "s_$id" >/dev/null 2>&1 || fail "${name}_${label}_kill" "could not kill s_$id"
     body=""
     for _ in $(seq 1 200); do
@@ -10891,6 +11238,7 @@ case_disk_quota() {
   # (`case_disk_floor`'s idiom — a case that stopped it and left `serve_pid` empty fails the *next* `stop_serve`).
   docker rm --force "s_$id" >/dev/null 2>&1 || true
   docker network disconnect --force "agents_$id" hs_egress >/dev/null 2>&1 || true
+  docker network disconnect --force "agents_$id" hs_mcp >/dev/null 2>&1 || true
   docker network rm "agents_$id" >/dev/null 2>&1 || true
   docker_session_id=""
   export PATH="$saved_path"
@@ -10913,9 +11261,10 @@ case_disk_quota() {
 #   agent     inside the image: `pi --version` is the pin, git answers, both toolchains are installed, the uid is
 #             1000 (ADR-0035), and this binary runs `container snapshot --help` — the helper subcommand a session
 #             needs and the one thing a hand-built `pi-agent:local` does not have.
-#   proxy     the proxy image serves *both* proxies and runs as a user that is not root: `hs_egress` refuses a host
-#             that is not on its allow-list and `hs_key` refuses a provider path it does not know. Neither question
-#             needs TLS or the internet.
+#   proxy     the proxy image serves the proxies and runs as a user that is not root: `hs_egress` refuses a host that
+#             is not on its allow-list and `hs_key` refuses a provider path it does not know. Neither question needs TLS
+#             or the internet, and `proxy mcp` — the third mode of the same binary — is `case_mcp_proxy`'s question
+#             against the shipped artifact: what the image is asked here is that a container from it answers at all.
 #   again     the same deploy again says `satisfied` and leaves both image ids unchanged — the acceptance's "a
 #             second run changes nothing", for the step that is the most expensive to get wrong.
 #
@@ -10953,7 +11302,7 @@ case_server_images() {
   # it was started from, so an untag with them up fails and the build that follows would be a no-op), then both tags
   # are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
   # case exists to rule out.
-  timeout 120 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 120 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   timeout 120 docker image rm -f "$proxy" "$agent" >/dev/null 2>&1 || true
   for image in "$proxy" "$agent"; do
     if docker image inspect "$image" >/dev/null 2>&1; then
@@ -11145,15 +11494,15 @@ case_server_images() {
     *) fail "$name/doctor/labels" "the image pass names neither the version nor the git tag: $line" ;;
   esac
 
-  # Its own containers and its scratch go, and so do the two the deploy's step 4 started: `hs_key` mounts a
-  # directory inside this case's tree, so removing the tree under a running container would leave it crash-looping
+  # Its own containers and its scratch go, and so do the ones the deploy's step 4 started: both store readers mount
+  # a directory inside this case's tree, so removing the tree under a running container would leave it crash-looping
   # on a mount source that is no longer there. **Both images stay** (see this case's comment), which is what a later
   # `serve` boot needs to start the proxies again. The responder goes first: it is this case's listener, and the next
   # case picks its own port.
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
-  timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   rm -rf "$root"
 }
 
@@ -11267,24 +11616,25 @@ SHIM
     rm -rf "$root"
     return 0
   fi
-  # The machine's own two proxies, by **id**: a start `rm -f`s and re-runs both, and a replaced container keeps its
+  # The machine's own three proxies, by **id**: a start `rm -f`s and re-runs them, and a replaced container keeps its
   # name — only the id says whether it is the same one. They are made here rather than assumed, because
   # `case_server_images` removed them and an empty string would compare equal to itself: a vacuous check that this
   # ADR cites is the pattern this repository keeps re-finding (S2).
   sentinel="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^(holosmith-proxy:|alpine:)' | head -1)"
   proxies_before=""
   if [ -n "$sentinel" ] && docker create --name hs_egress "$sentinel" >/dev/null 2>&1 &&
-    docker create --name hs_key "$sentinel" >/dev/null 2>&1; then
-    proxies_before="$(docker inspect --format '{{.Id}}' hs_egress hs_key | tr '\n' ' ')"
+    docker create --name hs_key "$sentinel" >/dev/null 2>&1 &&
+    docker create --name hs_mcp "$sentinel" >/dev/null 2>&1; then
+    proxies_before="$(docker inspect --format '{{.Id}}' hs_egress hs_key hs_mcp | tr '\n' ' ')"
   else
-    printf 'note %s: no local image to make the two proxy sentinels from, so "the machine proxies were not replaced" was not measured\n' "$name"
+    printf 'note %s: no local image to make the proxy sentinels from, so "the machine proxies were not replaced" was not measured\n' "$name"
   fi
   code=0
   answer="$("$artifact" --config "$WORK/config.toml" smoke --binary "$artifact" --root "$root/real" 2>&1)" ||
     code=$?
   check "$name/exit" 0 "$code"
   for line in 'smoke: image: holosmith-smoke:' 'smoke: session: ' 'smoke: turn: ' 'smoke: delete: 202 then 404' \
-    'smoke: gone: smoke_s_' 'smoke: proxies: smoke_hs_egress, smoke_hs_key removed' 'smoke: ok'; do
+    'smoke: gone: smoke_s_' 'smoke: proxies: smoke_hs_egress, smoke_hs_key, smoke_hs_mcp removed' 'smoke: ok'; do
     case "$answer" in
       *"$line"*) assertions=$((assertions + 1)) ;;
       *) fail "$name/report" "the run did not print '$line': $answer" ;;
@@ -11301,12 +11651,12 @@ SHIM
   [ -z "$networks" ] || fail "$name/leftover_network" "a smoke network outlived the run: $networks"
   assertions=$((assertions + 2))
   if [ -n "$proxies_before" ]; then
-    proxies_after="$(docker inspect --format '{{.Id}}' hs_egress hs_key 2>/dev/null | tr '\n' ' ' || true)"
+    proxies_after="$(docker inspect --format '{{.Id}}' hs_egress hs_key hs_mcp 2>/dev/null | tr '\n' ' ' || true)"
     [ -n "$proxies_after" ] ||
-      fail "$name/machine_proxies" "the machine's two sentinel proxies are gone: the smoke run took them"
+      fail "$name/machine_proxies" "the machine's three sentinel proxies are gone: the smoke run took them"
     check "$name/machine_proxies" "$proxies_before" "$proxies_after"
   fi
-  docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   # The root is the run's scratch space and goes with it, so a second run cannot inherit a first one's database.
   [ ! -e "$root/real" ] || fail "$name/root" "the run left its root behind: $root/real"
 
@@ -12574,9 +12924,9 @@ case_server_deploy() {
     rm -rf "$root"
     return 0
   fi
-  # `hs_egress`/`hs_key` are the machine's names: a leftover from an earlier case would make this case's first
+  # `hs_egress`/`hs_key`/`hs_mcp` are the machine's names: a leftover from an earlier case would make this case's first
   # run read `satisfied`, so it takes them over and removes its own at the end.
-  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   # Step 3 builds `agent-image:<version>` and `holosmith-proxy:<version>`, and this case asserts `changed`: it
   # removes both tags first, because `case_server_images` deliberately leaves them. The rebuild is layer-cached.
   version="$("$artifact" version | sed -n 's/^version //p')"
@@ -12667,6 +13017,8 @@ case_server_deploy() {
   assertions=$((assertions + 1))
   docker ps --format '{{.Names}}' | grep -qx hs_key || fail "$name/online/key" "hs_key is not running"
   assertions=$((assertions + 1))
+  docker ps --format '{{.Names}}' | grep -qx hs_mcp || fail "$name/online/mcp" "hs_mcp is not running"
+  assertions=$((assertions + 1))
   docker network ls | grep -qw egress || fail "$name/online/network" "the egress network is not there"
   assertions=$((assertions + 1))
   grep -qx "deploy: url: http://localhost:$control" "$WORK/$name.online.out" ||
@@ -12713,7 +13065,7 @@ AGAIN
     fail "$name/again/origins" "the deploy configured Tailscale origins: $(cat "$log")"
   fi
   assertions=$((assertions + 1))
-  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
@@ -13765,9 +14117,9 @@ case_server_service() {
     rm -rf "$root"
     return 0
   fi
-  # `hs_egress`/`hs_key` are the machine's names: a leftover from an earlier case would make this case's first run
+  # `hs_egress`/`hs_key`/`hs_mcp` are the machine's names: a leftover from an earlier case would make this case's first run
   # read `satisfied`, so it takes them over and removes its own at the end.
-  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   rm -rf "$root"
   mkdir -p "$root"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
@@ -13885,7 +14237,7 @@ AGAIN
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
-  timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+  timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   rm -rf "$root"
 }
 
@@ -13906,7 +14258,7 @@ case_doctor_full() {
   local name=case_doctor_full image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   # Two `local`s, not one: `set -u` expands `$root` before `local` assigns it (hit again).
   local root="$repo_root/target/verify-doctor-full-$$"
-  local data="$root/data" control preview status=0 pinned networks
+  local data="$root/data" control preview status=0 pinned networks proxy
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (tests/doctor.rs drives the same checks over a fake machine)\n' "$name"
     return 0
@@ -13964,18 +14316,18 @@ case_doctor_full() {
     fail "$name/header" "the report does not name its depth: $(cat "$WORK/$name.out")"
   assertions=$((assertions + 1))
   # The four additions, each one line. `network` is the self-test's outcome, and its bare probe *is* the
-  # network-off probe (ADR-0044/ADR-0046); `proxy` is two lines because `hs_egress` and `hs_key` are two facts.
+  # network-off probe (ADR-0044/ADR-0046); `proxy` is one line per container, because `hs_egress`, `hs_key` and
+  # `hs_mcp` are three facts about the machine.
   for check in network image; do
     grep -q "^$check: pass: " "$WORK/$name.out" ||
       fail "$name/$check" "$check did not pass while the machine serves: $(cat "$WORK/$name.out")"
     assertions=$((assertions + 1))
   done
-  grep -q '^proxy: pass: hs_egress is running' "$WORK/$name.out" ||
-    fail "$name/egress" "hs_egress is not reported up: $(cat "$WORK/$name.out")"
-  assertions=$((assertions + 1))
-  grep -q '^proxy: pass: hs_key is running' "$WORK/$name.out" ||
-    fail "$name/key" "hs_key is not reported up: $(cat "$WORK/$name.out")"
-  assertions=$((assertions + 1))
+  for proxy in hs_egress hs_key hs_mcp; do
+    grep -q "^proxy: pass: $proxy is running" "$WORK/$name.out" ||
+      fail "$name/$proxy" "$proxy is not reported up: $(cat "$WORK/$name.out")"
+    assertions=$((assertions + 1))
+  done
   # The image's pi against `pins/pi.txt`, the one copy of that version: the line names it, and the case reads the
   # pin rather than repeating it.
   pinned="$(cat "$repo_root/pins/pi.txt")"
@@ -14098,8 +14450,8 @@ case_status() {
       fail "$name/sessions" "no \`sessions $word N\` line: $(cat "$WORK/$name.out")"
     assertions=$((assertions + 1))
   done
-  # Both proxy lines, each the daemon's own answer.
-  for proxy in hs_egress hs_key; do
+  # Every proxy's line, each the daemon's own answer.
+  for proxy in hs_egress hs_key hs_mcp; do
     state=""
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       state="$(docker inspect --format '{{.State.Running}}' "$proxy" 2>/dev/null || true)"
@@ -14434,31 +14786,33 @@ SHIM
     fail "$name/second/children" "the second run ran a child over a unit file that is not there: $(cat "$HS_UNIT_LOG")"
   assertions=$((assertions + 1))
 
-  # ---- 2. the two proxies: `rm --force` by the names the machine's install gave them -------------
+  # ---- 2. the proxies: `rm --force` by the names the machine's install gave them -------------------
   if ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf 'SKIP %s/proxies: no %s image to stand in for the two proxies (tests/uninstall.rs covers the removal)\n' \
+    printf 'SKIP %s/proxies: no %s image to stand in for the proxies (tests/uninstall.rs covers the removal)\n' \
       "$name" "$image"
   else
-    timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+    timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
     docker run --detach --name hs_egress --entrypoint /bin/sleep "$image" 120 >/dev/null ||
       fail "$name/proxies/egress" "could not start a stand-in for hs_egress"
     docker run --detach --name hs_key --entrypoint /bin/sleep "$image" 120 >/dev/null ||
       fail "$name/proxies/key" "could not start a stand-in for hs_key"
+    docker run --detach --name hs_mcp --entrypoint /bin/sleep "$image" 120 >/dev/null ||
+      fail "$name/proxies/mcp" "could not start a stand-in for hs_mcp"
     install -d -m 0755 "$tree/data" || fail "$name/proxies/tree" "could not recreate the data root"
     status=0
     PATH="$shims:$PATH" "$artifact" uninstall --root "$tree" --config "$WORK/config-uninstall.toml" \
       >"$root/proxies.out" 2>&1 || status=$?
     check "$name/proxies/exit" 0 "$status"
-    grep -q '^uninstall: proxies: removed: hs_egress and hs_key' "$root/proxies.out" ||
-      fail "$name/proxies/line" "both proxies were running and the line does not say so: $(cat "$root/proxies.out")"
+    grep -q '^uninstall: proxies: removed: hs_egress and hs_key and hs_mcp' "$root/proxies.out" ||
+      fail "$name/proxies/line" "every proxy was running and the line does not say so: $(cat "$root/proxies.out")"
     assertions=$((assertions + 1))
-    for proxy in hs_egress hs_key; do
+    for proxy in hs_egress hs_key hs_mcp; do
       if docker inspect "$proxy" >/dev/null 2>&1; then
         fail "$name/proxies/gone" "$proxy outlived the teardown"
       fi
       assertions=$((assertions + 1))
     done
-    timeout 60 docker rm -f hs_egress hs_key >/dev/null 2>&1 || true
+    timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   fi
   # ---- 3. --purge: refused over a live row, and it removes nothing --------------------------------
   tree="$root/purge"

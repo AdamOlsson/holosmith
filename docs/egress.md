@@ -20,6 +20,7 @@ systemctl --user restart holosmith
   toggle starts from `network_default`, which is `false` by default, and ticking it is enough for a session that needs
   cargo or npm.
 - **Provider traffic does not use this list.** It goes through the key proxy, which is why no provider host belongs in
-  `allow`.
+  `allow`. A tool's host (`mcp.linear.app`) needs no entry either: the MCP proxy reaches it over its own TLS
+  connection, and joins a session's network only while the checkbox is on (ADR-0099).
 - **Only allow-listed HTTPS is proxied.** The route out is the egress proxy (CONNECT/443); anything else is refused
   inside the session's own `--internal` network.

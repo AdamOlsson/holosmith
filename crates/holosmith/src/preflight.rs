@@ -313,7 +313,7 @@ pub fn report_with(config: &Config, tools: &Tools) -> Vec<Finding> {
     vec![daemon(config), git(&tools.git), disk(config, &tools.df)]
 }
 
-/// Whether the daemon answers, asked on its own — the check `holosmith status`'s two proxy lines rest on.
+/// Whether the daemon answers, asked on its own — the check `holosmith status`'s proxy lines rest on.
 ///
 /// One function, two callers: [`report_with`]'s list and `status`, which asks it **first** so that a daemon nobody
 /// could reach makes both proxy lines `unknown:` instead of `not running`. That distinction is the whole of ADR-0054

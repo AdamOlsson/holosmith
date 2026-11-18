@@ -33,7 +33,7 @@ pub fn run(args: StatusArgs) -> ExitCode {
         }
     };
     // The daemon is asked one question — is this container up — and constructing the handle is what names the
-    // socket: a machine without a daemon still prints every line, with both proxies `not running`.
+    // socket: a machine without a daemon still prints every line, with every proxy `not running`.
     let machine = Docker::new(loaded.config.docker_host.clone());
     let report = status::run(&loaded.config, &machine);
     print!("{}", report.render());
