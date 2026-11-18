@@ -18,6 +18,7 @@ use holosmith::agent;
 use holosmith::backend::{
     BackendError, DockerBackend, ProcessEnd, Provisioned, SessionBackend, Step,
 };
+use holosmith::config::LinearMcp;
 use holosmith::container::{ContainerSettings, Limits, SessionContainer};
 use holosmith::sessions::{Session, Status};
 use holosmith::worktree::Retained;
@@ -127,6 +128,7 @@ impl Scratch {
             container_prefix: String::new(),
             network_prefix: String::new(),
             preview_port: 3000,
+            mcp: LinearMcp::Off,
         }
     }
 }
@@ -263,7 +265,10 @@ fn a_real_container_runs_pi_and_answers_the_ready_handshake() {
         "the agent directory is not in the environment: {environment}"
     );
     assert!(environment.contains("PI_OFFLINE=1"), "{environment}");
-    assert!(environment.contains("NO_PROXY=key-proxy"), "{environment}");
+    assert!(
+        environment.contains("NO_PROXY=key-proxy,mcp-proxy"),
+        "{environment}"
+    );
 
     // The agent's directory was seeded from the template with the row's two preferences, and the launch line
     // is in the session's log.

@@ -186,6 +186,7 @@ mod tests {
         config.abort_grace = crate::config::Duration::from_millis(1500);
         config.merge.targets = vec!["develop".to_string()];
         config.egress.allow = vec!["crates.io".to_string()];
+        config.linear.mcp = crate::config::LinearMcp::Write;
         // Every flat key comes before the first table header, or TOML puts it in the table.
         let rendered = rendered(&config);
         let reparsed = validate_text(Path::new("rendered.toml"), &rendered)

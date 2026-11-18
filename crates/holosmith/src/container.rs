@@ -37,7 +37,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{Config, LinearMcp};
 use crate::docker::Docker;
 use crate::sessions::Session;
 use crate::worktree::Worktree;
@@ -92,8 +92,9 @@ pub const PROXY_START_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 ///
 /// The session id is the proxy's **username**, which is how a request is attributed to a session (item 2), and
 /// the password is empty — nothing checks it, and a secret in an environment variable is exactly what item 2
-/// forbids. `NO_PROXY=key-proxy` ([`crate::agent::ENVIRONMENT`]) keeps a provider call off this route: the key
-/// proxy is what makes a model work, not this one.
+/// forbids. `NO_PROXY=key-proxy,mcp-proxy` ([`crate::agent::ENVIRONMENT`]) keeps both proxy aliases off this route:
+/// the key proxy is what makes a model work, not this one, and a session's MCP url is plaintext on its own network,
+/// which no proxy variable should be offered the chance to rewrite (ADR-0100).
 pub fn proxy_url(session_id: &str) -> String {
     format!("http://{session_id}@{PROXY_ALIAS}:{}", crate::egress::PORT)
 }
@@ -393,6 +394,12 @@ pub struct ContainerSettings {
     /// `preview_upstream_port`: the preview listener forwards `/<host>/<id>/…` to it, so the container
     /// is told it as `HS_PREVIEW_PORT` rather than left to guess a number the listener would not forward to.
     pub preview_port: u16,
+    /// How much of Linear the session's agent is configured with, from `[linear] mcp`.
+    ///
+    /// The backend writes `pi-home/mcp.json` from it on every start and removes the file when it is `off`
+    /// ([`crate::mcpproxy::client_config`]), which is why the mode is a setting a container's start reads rather
+    /// than a value the file's writer asks for again (ADR-0100).
+    pub mcp: LinearMcp,
 }
 
 impl ContainerSettings {
@@ -431,6 +438,7 @@ impl ContainerSettings {
             container_prefix: config.container_prefix.clone(),
             network_prefix: config.network_prefix.clone(),
             preview_port: config.preview_upstream_port,
+            mcp: config.linear.mcp,
         }
     }
 
@@ -889,6 +897,7 @@ mod tests {
             container_prefix: String::new(),
             network_prefix: String::new(),
             preview_port: 3000,
+            mcp: LinearMcp::Off,
         }
     }
 
@@ -1251,7 +1260,7 @@ mod tests {
                 "HS_PREVIEW_PORT=3000".to_string(),
                 "PI_CODING_AGENT_DIR=/var/lib/holosmith/sessions/0123456789abcdef/pi-home"
                     .to_string(),
-                "NO_PROXY=key-proxy".to_string(),
+                "NO_PROXY=key-proxy,mcp-proxy".to_string(),
                 "PI_OFFLINE=1".to_string(),
                 "PI_SKIP_VERSION_CHECK=1".to_string(),
                 "PI_TELEMETRY=0".to_string(),

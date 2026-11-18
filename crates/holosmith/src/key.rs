@@ -7,7 +7,8 @@
 //!   **directory** it lives in, read-only (`container::KeyProxy::mount`, ADR-0050); no session container mounts
 //!   either the file or the directory.
 //! * `<data>/sessions/<id>/pi-home/models.json` carries the session's **dummy** key and the key proxy's URL.
-//!   That file is inside a session mount, which is exactly why it may hold nothing else.
+//!   That file is inside a session mount, which is exactly why it may hold nothing else, and `mcp.json` beside it is
+//!   the same dummy for the tool proxy ([`crate::mcpproxy::client_config`]).
 //!
 //! `keys.toml` carries every table because the proxy has no database: the provider keys are what it swaps in, the
 //! session table is what lets it answer "is this dummy key still valid?", and the tool table ([`TOOLS`]) is where
@@ -891,9 +892,9 @@ pub fn key_proxy_name(prefix: &str) -> String {
     format!("{prefix}{KEY_PROXY_NAME}")
 }
 
-/// The secrets a `models.json` file may never contain: the real provider keys **and** the real tool keys. Kept here
-/// so a test can grep a whole session directory for one without re-spelling the rule: a session mount holds a dummy
-/// and no real key of either table.
+/// The secrets a session's `models.json` or `mcp.json` may never contain: the real provider keys **and** the real tool
+/// keys. Kept here so a test can grep a whole session directory for one without re-spelling the rule: a session mount
+/// holds a dummy and no real key of either table.
 pub fn contains_real_key(secrets: &Secrets, text: &str) -> bool {
     secrets
         .providers

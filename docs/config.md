@@ -100,12 +100,18 @@ deploy and never regenerated (ADR-0058).
 |---|---|---|---|
 | `network_default` | boolean | `false` | Whether a new session's "Internet access" checkbox starts checked. The create request still decides per session. |
 | `[egress] allow` | string array | `[]` | The domains the egress proxy lets a session reach, through `CONNECT` on 443. Lowercase bare domains: no scheme, port, path or wildcard; duplicates refused. Empty means a session has **no** Internet. |
+| `[linear] mcp` | string | `"off"` | Whether a session's agent is configured with Linear's MCP tools: `off` writes no MCP configuration at all, `readonly` points it at the read-only endpoint (its 35 read tools, no create or update — the key's own permission in the workspace is the other half), and `write` uses the full endpoint. The file is written into the session's `pi-home` on every start and removed when the key says `off`; it names the MCP proxy and the session's dummy key, so it carries no credential (ADR-0100). |
 
 A session's network is `--internal`: the only ways out are the key proxy (provider calls, with a per-session dummy
 key) and, when Internet access is on, the egress proxy for the allow-list and the MCP proxy for a tool's host. The
 key proxy is joined either way, because a model call must work with the checkbox off; the other two are the checkbox,
 which is why a tool's key is spent through a container of its own rather than as a route on the key proxy (ADR-0099).
 Provider and tool keys never enter a container (ADR-0045, ADR-0048, ADR-0098).
+
+The `mcp.json` that `[linear] mcp` writes is a **convenience, and the join is the gate**: a session whose Internet
+access is off resolves no `mcp-proxy` alias at all, so the file can name the proxy and still reach nothing. That is
+why `off` writes no file rather than a disabled entry, and why the file is rewritten on every start: what the session
+may reach is the row's, and what it is configured with is the key's (ADR-0100).
 
 ## When a session stops, and what it costs
 
@@ -185,6 +191,9 @@ session_disk_soft_gb = 5
 
 [egress]
 allow = ["crates.io", "index.crates.io", "static.crates.io", "registry.npmjs.org", "github.com"]
+
+[linear]
+mcp = "readonly"
 ```
 
 A pair: an always-on hub and one server behind it. The hub's registry names the server; the server trusts the hub by

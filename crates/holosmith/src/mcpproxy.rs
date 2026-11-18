@@ -33,6 +33,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::LinearMcp;
 use crate::key::{self, Store, Tool};
 use crate::relay::{self, Head, Relayed};
 
@@ -49,6 +50,9 @@ pub const MCP_PROXY_ALIAS: &str = "mcp-proxy";
 /// The container's name. `hs_mcp`, one per machine.
 pub const MCP_PROXY_NAME: &str = "hs_mcp";
 
+/// The file pi reads a session's MCP servers from, inside the agent's own directory.
+pub const CLIENT_FILE: &str = "mcp.json";
+
 /// The name a run with this container prefix gives it: `hs_mcp`, or `smoke_hs_mcp`.
 ///
 /// Prefixed for [`crate::container::proxy_name`]'s reason, and it is the key proxy's reason: this container mounts the
@@ -56,6 +60,63 @@ pub const MCP_PROXY_NAME: &str = "hs_mcp";
 /// holding an empty store.
 pub fn mcp_proxy_name(prefix: &str) -> String {
     format!("{prefix}{MCP_PROXY_NAME}")
+}
+
+/// The `mcp.json` a session's pi-home carries: one `linear` server on this proxy, with the session's dummy key.
+///
+/// `None` for [`LinearMcp::Off`], which is the whole of "off writes no file": the caller removes what an earlier
+/// start left rather than writing an entry a session cannot use (ADR-0100). The url is composed from
+/// [`MCP_PROXY_ALIAS`], [`MCP_PROXY_PORT`] and the endpoint [`server`] reads out of [`key::tool`]'s `linear` row —
+/// the same three values [`Route::parse`] matches a request against, so a client this build configures is a route
+/// this build serves. `Authorization` carries the session's **dummy**, because this file sits inside a session mount
+/// and a real key there is a key the agent can read (ADR-0098).
+///
+/// `exposure: "deferred"` is about the size of Linear's tool set rather than a preference: a deferred server is one
+/// the model reaches with a `tool_search` call instead of one whose every tool is declared in every prompt, and
+/// `description` is the sentence that lists it until then.
+pub fn client_config(mode: LinearMcp, dummy: &str) -> Option<String> {
+    let tool = key::tool("linear")?;
+    let (endpoint, description) = server(tool, mode)?;
+    let document = serde_json::json!({
+        "mcpServers": {
+            (tool.id): {
+                "url": format!("http://{MCP_PROXY_ALIAS}:{MCP_PROXY_PORT}/{}{endpoint}", tool.id),
+                "headers": {"Authorization": format!("Bearer {dummy}")},
+                "exposure": "deferred",
+                "timeout": 30,
+                "description": description,
+            }
+        }
+    });
+    let mut text = serde_json::to_string_pretty(&document).ok()?;
+    text.push('\n');
+    Some(text)
+}
+
+/// The endpoint a mode reaches and the sentence that lists the server, out of the tool row.
+///
+/// The read-only endpoint is the row's one whose last segment is the mode's own word, and the full one is the row's
+/// other — so a changed endpoint in [`key::TOOLS`] cannot leave a session's file pointing at a path the proxy refuses.
+fn server(tool: &Tool, mode: LinearMcp) -> Option<(&'static str, &'static str)> {
+    let readonly = tool
+        .endpoints
+        .iter()
+        .copied()
+        .find(|path| path.rsplit('/').next() == Some(LinearMcp::ReadOnly.as_str()))?;
+    match mode {
+        LinearMcp::Off => None,
+        LinearMcp::ReadOnly => Some((
+            readonly,
+            "Linear's issue tracker, read-only: issues, projects and cycles can be read and not changed",
+        )),
+        LinearMcp::Write => Some((
+            tool.endpoints
+                .iter()
+                .copied()
+                .find(|path| *path != readonly)?,
+            "Linear's issue tracker: read and write this workspace's issues, projects and cycles",
+        )),
+    }
 }
 
 /// One request selected by its path, before the key is read.
@@ -414,6 +475,7 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::Secrets;
 
     fn head(method: &str, target: &str) -> String {
         format!(
@@ -535,6 +597,101 @@ mod tests {
         let parsed = parse("POST /linear/mcp HTTP/1.1\r\nx-api-key: hs-dummy-other\r\n\r\n")
             .expect("a head");
         assert_eq!(parsed.dummy(), Some("hs-dummy-other"));
+    }
+
+    /// The session's own configuration, read back as JSON: the entry is one server on this proxy, the two modes differ
+    /// only in the endpoint they name, and both endpoints come from the tool table.
+    #[test]
+    fn the_client_configuration_names_one_server_on_the_tables_two_endpoints() {
+        let tool = key::tool("linear").expect("the table names linear");
+        let write =
+            entry(&client_config(LinearMcp::Write, "hs-dummy-mcp").expect("write configures"));
+        let readonly = entry(
+            &client_config(LinearMcp::ReadOnly, "hs-dummy-mcp").expect("readonly configures"),
+        );
+        assert_eq!(write["url"], "http://mcp-proxy:8090/linear/mcp");
+        assert_eq!(readonly["url"], "http://mcp-proxy:8090/linear/mcp/readonly");
+        // The endpoints are the table's, not a second spelling: each url is the alias, the port, the tool id and one
+        // of the row's paths.
+        for endpoint in tool.endpoints {
+            let url = format!(
+                "http://{MCP_PROXY_ALIAS}:{MCP_PROXY_PORT}/{}{endpoint}",
+                tool.id
+            );
+            assert!(
+                write["url"] == url.as_str() || readonly["url"] == url.as_str(),
+                "{endpoint} is not what either mode configured: {write} {readonly}"
+            );
+        }
+        assert_ne!(write["url"], readonly["url"]);
+        assert_eq!(
+            write["url"]
+                .as_str()
+                .and_then(|url| url.strip_suffix("/mcp")),
+            readonly
+                .get("url")
+                .and_then(|url| url.as_str())
+                .and_then(|url| url.strip_suffix("/mcp/readonly")),
+            "the two modes must differ only in the endpoint they name"
+        );
+        assert_eq!(write["headers"]["Authorization"], "Bearer hs-dummy-mcp");
+        for entry in [&write, &readonly] {
+            assert_eq!(entry["exposure"], "deferred");
+            assert_eq!(entry["timeout"], 30);
+            assert!(
+                entry["description"]
+                    .as_str()
+                    .is_some_and(|description| !description.is_empty()),
+                "every configured server carries a sentence: {entry}"
+            );
+        }
+        assert!(
+            readonly["description"]
+                .as_str()
+                .is_some_and(|sentence| sentence.contains("not changed")),
+            "the read-only server must say it cannot write: {readonly}"
+        );
+        for mode in [LinearMcp::Write, LinearMcp::ReadOnly] {
+            let text =
+                client_config(mode, "hs-dummy-mcp").expect("a configured mode writes a document");
+            assert!(
+                text.ends_with('\n'),
+                "the file ends with a newline: {text:?}"
+            );
+            assert!(
+                text.contains("hs-dummy-mcp"),
+                "the dummy is missing: {text}"
+            );
+            let secrets = Secrets {
+                tools: std::collections::BTreeMap::from([(
+                    "linear".to_string(),
+                    "lin_api_the_real_key".to_string(),
+                )]),
+                ..Secrets::default()
+            };
+            assert!(
+                !key::contains_real_key(&secrets, &text),
+                "a real tool key reached the session's configuration: {text}"
+            );
+        }
+        assert!(
+            client_config(LinearMcp::Off, "hs-dummy-mcp").is_none(),
+            "off is what writes no file at all"
+        );
+    }
+
+    /// One server entry out of a client document, so a test reads the file pi reads.
+    fn entry(text: &str) -> serde_json::Value {
+        let document: serde_json::Value =
+            serde_json::from_str(text).expect("the client configuration is JSON");
+        let servers = &document["mcpServers"];
+        let entry = servers["linear"].clone();
+        assert_eq!(
+            servers.as_object().map(serde_json::Map::len),
+            Some(1),
+            "a session is configured with one server: {text}"
+        );
+        entry
     }
 
     #[test]
