@@ -102,6 +102,9 @@ this change adds; the row that points a session's client at `http://mcp-proxy:80
 dummy is the operator's (or a later change's), the way ADR-0098 left the spending of a tool key to this one. That is
 recorded here rather than hidden: a machine that runs this release and stores no tool key is unaffected, and one that
 stores one has a proxy listening for a client it must configure.
+**Amended by ADR-0100:** this build writes exactly that file — `pi-home/mcp.json`, one server on that url, from the
+machine's `[linear] mcp` and on every start — so the row is no longer the operator's to write; the operator's half is
+the key's own permission in the workspace, which is what bounds a session the file has pointed at the full endpoint.
 
 ## What pins it
 

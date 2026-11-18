@@ -42,9 +42,11 @@ table (`LinearMcp::WORDS`) so the word that parses and the word a refusal prints
 
 `DockerBackend::start_container` writes `pi-home/mcp.json` beside `pi-home/models.json`, before `Mounts::check`, for
 the reason that file is written there: the agent's directory is a mount source, and `docker run -v` creates a missing
-source as an empty root-owned directory. One call does both halves: `client_config` answers `Some` and the file is
-written, answers `None` and the file is removed, ignoring `NotFound` — so the second start under `off` is uneventful
-and the first clears what a previous start left.
+source as an empty root-owned directory. One call does both halves: `client_config` answers `Ok(Some)` and the file is
+written, `Ok(None)` and the file is removed, ignoring `NotFound` — so the second start under `off` is uneventful
+and the first clears what a previous start left. `Ok(None)` is `off` **and only `off`**: a configured mode the tool row
+cannot answer is `Err`, because a `write` that configured nothing would otherwise take the file away and report
+success, which is the one outcome this design exists to prevent.
 
 **Rewrite every start, rather than seed only what is absent.** A resume finds the directory the previous container
 left, with pi's own files in it, and `agent::ensure_home` deliberately seeds nothing over. This file is the exception
@@ -55,8 +57,10 @@ resume because every start re-renders from it.
 
 The write and the removal are one private function whose answer is data (`McpConfig::{Written, Removed, Nothing}`)
 rather than a log line, so a unit test in `docker.rs` exercises the pair against a temporary directory with no daemon
-attached. A failure is the container step's sentence naming the file and the error, the way the `models.json` arm
-beside it fails.
+attached. It is handed the file's path rather than the directory, so the caller joins `pi-home/mcp.json` once and the
+sentence naming a failed file names the same value the write was given. A failure is the container step's sentence
+naming the file and the error, the way the `models.json` arm beside it fails — and a configured mode's `Err` becomes
+that same sentence, carrying the row's reason.
 
 ## D4 — the url is the route, and the entry carries the dummy
 
@@ -98,8 +102,19 @@ that goes back must remove the section by hand — the previous release's deploy
 file at load before it writes anything. Nothing else about a rollback changes: the session's `mcp.json` is a file a
 previous release never writes and never reads, so a tree switched back over a session simply stops configuring Linear.
 
-`off` being the default is half of what keeps that cheap: a machine that never set the key renders no new section, so
-its file stays byte for byte what the previous release writes and a rollback there is uneventful.
+The hand-edit is **every** machine this release deploys, not only one whose operator chose a mode. `config::render`
+writes a line for every key the build knows and never leaves one out, so a default config renders `[linear]` with
+`mcp = "off"` — the golden file this change commits is that rendering — and `deploy` installs it wherever it differs
+from the file already there. `off` is therefore a section in the config rather than the absence of one, and a machine
+that deploys this release and rolls back carries the section the previous release refuses whether or not anyone set
+the key.
+
+ADR-0098's rollback sentence does not transfer, and the difference is what each file is. The key store is written by
+a parser that adds `[tools]` only while a tool key is stored, so a machine that stored none keeps a file byte for byte
+what the previous release writes. A config file has no such condition: it is a rendering of the whole resolved table,
+and `off` is a value in it like any other, so the section is unconditional. Leaving the key out of the rendering until
+it is set is the trade this does not take: turning Linear on would then be a hand-edit too, and `config show` could
+not print the key it reads.
 
 ## What it costs, measured rather than assumed
 
@@ -117,8 +132,10 @@ its file stays byte for byte what the previous release writes and a rollback the
 
 `mcpproxy`'s unit tests pin the document: both modes name the tool table's own endpoints, the two urls differ only in
 the endpoint they name, the file carries the dummy and no key `key::contains_real_key` knows, `exposure` is
-`deferred`, `timeout` is 30, a description is present, the read-only description says it cannot write, and `off` is
-`None`. `docker.rs`'s pin the pair: the helper writes exactly `client_config`'s text and `off` removes a file that was
+`deferred`, `timeout` is 30, a description is present, the read-only description says it cannot write, and `off` is the
+one `Ok(None)` — while a fabricated endpoint slice that lacks the mode's own endpoint is a sentence naming the mode,
+which is the arm `key::TOOLS` being a `const` would otherwise leave unmeasurable. `docker.rs`'s pin the pair: the helper
+writes exactly `client_config`'s text and `off` removes a file that was
 there, then answers `Nothing` when it is asked again. `config`'s pin the word in both directions — all three values
 parse, the rendered file reads back as the same value, an unknown word is refused naming the key and the three — and
 the key table's count. `container`'s

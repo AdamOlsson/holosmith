@@ -64,19 +64,35 @@ pub fn mcp_proxy_name(prefix: &str) -> String {
 
 /// The `mcp.json` a session's pi-home carries: one `linear` server on this proxy, with the session's dummy key.
 ///
-/// `None` for [`LinearMcp::Off`], which is the whole of "off writes no file": the caller removes what an earlier
-/// start left rather than writing an entry a session cannot use (ADR-0100). The url is composed from
-/// [`MCP_PROXY_ALIAS`], [`MCP_PROXY_PORT`] and the endpoint [`server`] reads out of [`key::tool`]'s `linear` row —
-/// the same three values [`Route::parse`] matches a request against, so a client this build configures is a route
-/// this build serves. `Authorization` carries the session's **dummy**, because this file sits inside a session mount
-/// and a real key there is a key the agent can read (ADR-0098).
+/// `Ok(None)` is [`LinearMcp::Off`] and only it, which is the whole of "off writes no file": the caller removes what
+/// an earlier start left rather than writing an entry a session cannot use (ADR-0100). `Ok(Some(text))` is a
+/// configured mode's document. `Err` is a configured mode the tool table cannot answer, in a sentence naming the mode
+/// and what the row was missing.
+///
+/// The two answers are a `Result` rather than one `Option` because the caller reads the absence of a document as "the
+/// key says off" and removes the file: a `write` whose row stopped naming its endpoint would then configure nothing
+/// and report success, which is the one outcome this file's design exists to prevent.
+///
+/// The url is composed from [`MCP_PROXY_ALIAS`], [`MCP_PROXY_PORT`] and the endpoint [`endpoint`] reads out of
+/// [`key::tool`]'s `linear` row — the same three values [`Route::parse`] matches a request against, so a client this
+/// build configures is a route this build serves. `Authorization` carries the session's **dummy**, because this file
+/// sits inside a session mount and a real key there is a key the agent can read (ADR-0098).
 ///
 /// `exposure: "deferred"` is about the size of Linear's tool set rather than a preference: a deferred server is one
 /// the model reaches with a `tool_search` call instead of one whose every tool is declared in every prompt, and
 /// `description` is the sentence that lists it until then.
-pub fn client_config(mode: LinearMcp, dummy: &str) -> Option<String> {
-    let tool = key::tool("linear")?;
-    let (endpoint, description) = server(tool, mode)?;
+pub fn client_config(mode: LinearMcp, dummy: &str) -> Result<Option<String>, String> {
+    // Answered before the row is read, so a build that stopped carrying `linear` still answers the default mode.
+    if mode == LinearMcp::Off {
+        return Ok(None);
+    }
+    let tool = key::tool("linear").ok_or_else(|| {
+        format!(
+            "a session cannot be configured with Linear's {} tools: this build has no linear tool row",
+            mode.as_str()
+        )
+    })?;
+    let endpoint = endpoint(tool.endpoints, mode)?;
     let document = serde_json::json!({
         "mcpServers": {
             (tool.id): {
@@ -84,38 +100,76 @@ pub fn client_config(mode: LinearMcp, dummy: &str) -> Option<String> {
                 "headers": {"Authorization": format!("Bearer {dummy}")},
                 "exposure": "deferred",
                 "timeout": 30,
-                "description": description,
+                "description": description(mode),
             }
         }
     });
-    let mut text = serde_json::to_string_pretty(&document).ok()?;
+    let mut text = serde_json::to_string_pretty(&document).map_err(|error| {
+        format!(
+            "a session's Linear {} configuration could not be rendered as JSON ({error})",
+            mode.as_str()
+        )
+    })?;
     text.push('\n');
-    Some(text)
+    Ok(Some(text))
 }
 
-/// The endpoint a mode reaches and the sentence that lists the server, out of the tool row.
+/// The endpoint `mode` reaches, chosen out of a tool row's endpoints.
 ///
 /// The read-only endpoint is the row's one whose last segment is the mode's own word, and the full one is the row's
 /// other — so a changed endpoint in [`key::TOOLS`] cannot leave a session's file pointing at a path the proxy refuses.
-fn server(tool: &Tool, mode: LinearMcp) -> Option<(&'static str, &'static str)> {
-    let readonly = tool
-        .endpoints
+/// `Err` names the mode and the endpoint the row did not have, because a row that cannot answer is a mode whose
+/// configuration would otherwise be missing and read as `off` ([`client_config`]).
+///
+/// A slice rather than [`Tool`], and a function of its own, so the failing arm is a test's to drive: [`key::TOOLS`] is
+/// a `const`, so no test can hand this a `linear` row that lacks an endpoint.
+fn endpoint<'a>(endpoints: &'a [&'a str], mode: LinearMcp) -> Result<&'a str, String> {
+    let readonly = endpoints
         .iter()
         .copied()
-        .find(|path| path.rsplit('/').next() == Some(LinearMcp::ReadOnly.as_str()))?;
+        .find(|path| path.rsplit('/').next() == Some(LinearMcp::ReadOnly.as_str()));
     match mode {
-        LinearMcp::Off => None,
-        LinearMcp::ReadOnly => Some((
-            readonly,
-            "Linear's issue tracker, read-only: issues, projects and cycles can be read and not changed",
+        LinearMcp::ReadOnly => readonly.ok_or_else(|| {
+            format!(
+                "a session cannot be configured with Linear's {} tools: the linear tool row names no endpoint \
+                 ending in /{}",
+                mode.as_str(),
+                LinearMcp::ReadOnly.as_str()
+            )
+        }),
+        LinearMcp::Write => endpoints
+            .iter()
+            .copied()
+            .find(|path| Some(*path) != readonly)
+            .ok_or_else(|| {
+                format!(
+                    "a session cannot be configured with Linear's {} tools: the linear tool row names no \
+                     endpoint other than /{}",
+                    mode.as_str(),
+                    LinearMcp::ReadOnly.as_str()
+                )
+            }),
+        // `client_config` answers `off` with the absence of a document before it asks for an endpoint, so no caller
+        // prints this; the arm answers rather than panicking because a mode is a value, not a programming error.
+        LinearMcp::Off => Err(format!(
+            "{} names no endpoint: a session with no Linear configuration has no mcp.json at all",
+            mode.as_str()
         )),
-        LinearMcp::Write => Some((
-            tool.endpoints
-                .iter()
-                .copied()
-                .find(|path| *path != readonly)?,
-            "Linear's issue tracker: read and write this workspace's issues, projects and cycles",
-        )),
+    }
+}
+
+/// The sentence that lists a configured server, which is what `exposure: "deferred"` leaves the model until it asks
+/// for the tools themselves.
+fn description(mode: LinearMcp) -> &'static str {
+    match mode {
+        LinearMcp::ReadOnly => {
+            "Linear's issue tracker, read-only: issues, projects and cycles can be read and not changed"
+        }
+        LinearMcp::Write => {
+            "Linear's issue tracker: read and write this workspace's issues, projects and cycles"
+        }
+        // `off` configures no server, so it has no sentence to list one with.
+        LinearMcp::Off => "",
     }
 }
 
@@ -599,16 +653,20 @@ mod tests {
         assert_eq!(parsed.dummy(), Some("hs-dummy-other"));
     }
 
+    /// The document a configured mode writes, for a test that is not about either failure arm.
+    fn configured(mode: LinearMcp, dummy: &str) -> String {
+        client_config(mode, dummy)
+            .expect("the table's row can answer both configured modes")
+            .expect("a configured mode writes a document")
+    }
+
     /// The session's own configuration, read back as JSON: the entry is one server on this proxy, the two modes differ
     /// only in the endpoint they name, and both endpoints come from the tool table.
     #[test]
     fn the_client_configuration_names_one_server_on_the_tables_two_endpoints() {
         let tool = key::tool("linear").expect("the table names linear");
-        let write =
-            entry(&client_config(LinearMcp::Write, "hs-dummy-mcp").expect("write configures"));
-        let readonly = entry(
-            &client_config(LinearMcp::ReadOnly, "hs-dummy-mcp").expect("readonly configures"),
-        );
+        let write = entry(&configured(LinearMcp::Write, "hs-dummy-mcp"));
+        let readonly = entry(&configured(LinearMcp::ReadOnly, "hs-dummy-mcp"));
         assert_eq!(write["url"], "http://mcp-proxy:8090/linear/mcp");
         assert_eq!(readonly["url"], "http://mcp-proxy:8090/linear/mcp/readonly");
         // The endpoints are the table's, not a second spelling: each url is the alias, the port, the tool id and one
@@ -652,8 +710,7 @@ mod tests {
             "the read-only server must say it cannot write: {readonly}"
         );
         for mode in [LinearMcp::Write, LinearMcp::ReadOnly] {
-            let text =
-                client_config(mode, "hs-dummy-mcp").expect("a configured mode writes a document");
+            let text = configured(mode, "hs-dummy-mcp");
             assert!(
                 text.ends_with('\n'),
                 "the file ends with a newline: {text:?}"
@@ -674,9 +731,47 @@ mod tests {
                 "a real tool key reached the session's configuration: {text}"
             );
         }
+        assert_eq!(
+            client_config(LinearMcp::Off, "hs-dummy-mcp"),
+            Ok(None),
+            "off is the one mode that writes no file at all"
+        );
+    }
+
+    /// The endpoint is the row's, and a row that cannot answer its mode is a sentence rather than a document that
+    /// configures nothing: `off` is what `Ok(None)` stands for, so the failure arm is driven through a slice — the tool
+    /// table is a `const`, and no test can write a `linear` row that lacks an endpoint.
+    #[test]
+    fn the_endpoint_comes_from_the_row_and_a_row_that_cannot_answer_is_a_sentence() {
+        let row = key::tool("linear").expect("the table names linear");
+        assert_eq!(
+            endpoint(row.endpoints, LinearMcp::ReadOnly),
+            Ok("/mcp/readonly")
+        );
+        assert_eq!(endpoint(row.endpoints, LinearMcp::Write), Ok("/mcp"));
+
+        let no_readonly =
+            endpoint(&["/mcp"], LinearMcp::ReadOnly).expect_err("there is no read-only endpoint");
         assert!(
-            client_config(LinearMcp::Off, "hs-dummy-mcp").is_none(),
-            "off is what writes no file at all"
+            no_readonly.contains("readonly"),
+            "the sentence names the mode it could not configure: {no_readonly}"
+        );
+        let empty = endpoint(&[], LinearMcp::ReadOnly).expect_err("the row names no endpoint");
+        assert!(
+            empty.contains("readonly"),
+            "an empty row is the same sentence: {empty}"
+        );
+
+        let only_readonly = endpoint(&["/mcp/readonly"], LinearMcp::Write)
+            .expect_err("the read-only endpoint is not the full one");
+        assert!(
+            only_readonly.contains("write"),
+            "the write mode is named too: {only_readonly}"
+        );
+        let empty = endpoint(&[], LinearMcp::Write).expect_err("the row names no endpoint");
+        assert!(
+            empty.contains("write"),
+            "an empty row is the same sentence: {empty}"
         );
     }
 

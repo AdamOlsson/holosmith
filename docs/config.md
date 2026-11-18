@@ -100,7 +100,7 @@ deploy and never regenerated (ADR-0058).
 |---|---|---|---|
 | `network_default` | boolean | `false` | Whether a new session's "Internet access" checkbox starts checked. The create request still decides per session. |
 | `[egress] allow` | string array | `[]` | The domains the egress proxy lets a session reach, through `CONNECT` on 443. Lowercase bare domains: no scheme, port, path or wildcard; duplicates refused. Empty means a session has **no** Internet. |
-| `[linear] mcp` | string | `"off"` | Whether a session's agent is configured with Linear's MCP tools: `off` writes no MCP configuration at all, `readonly` points it at the read-only endpoint (its 35 read tools, no create or update — the key's own permission in the workspace is the other half), and `write` uses the full endpoint. The file is written into the session's `pi-home` on every start and removed when the key says `off`; it names the MCP proxy and the session's dummy key, so it carries no credential (ADR-0100). |
+| `[linear] mcp` | string | `"off"` | Whether a session's agent is configured with Linear's MCP tools: `off` writes no MCP configuration at all, `readonly` points it at the read-only endpoint (its read tools, no create or update — the key's own permission in the workspace is the other half), and `write` uses the full endpoint. The file is written into the session's `pi-home` on every start and removed when the key says `off`; it names the MCP proxy and the session's dummy key, so it carries no credential (ADR-0100). |
 
 A session's network is `--internal`: the only ways out are the key proxy (provider calls, with a per-session dummy
 key) and, when Internet access is on, the egress proxy for the allow-list and the MCP proxy for a tool's host. The

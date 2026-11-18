@@ -565,11 +565,13 @@ impl DockerBackend {
         // The session's MCP servers, from the machine's `[linear] mcp` rather than from the row: every start writes
         // this file or takes it away with the same call, so a resume after the key changed is the key's state and not
         // the state of the directory the previous container left. It sits before `Mounts::check` for `models.json`'s
-        // reason — this directory is a mount source, so a missing file would be created as a directory.
-        write_mcp_config(&home, self.settings.mcp, &dummy).map_err(|error| {
+        // reason — this directory is a mount source, so a missing file would be created as a directory. The path is
+        // joined once here, because this sentence names the file that failed.
+        let mcp = home.join(mcpproxy::CLIENT_FILE);
+        write_mcp_config(&mcp, self.settings.mcp, &dummy).map_err(|error| {
             BackendError::failed(format!(
                 "the container step: the agent's MCP file {} could not be written or removed ({error})",
-                home.join(mcpproxy::CLIENT_FILE).display()
+                mcp.display()
             ))
         })?;
         container
@@ -1169,23 +1171,32 @@ enum McpConfig {
     Nothing,
 }
 
-/// Write the session's `mcp.json` beside its `models.json`, or take away the one a previous start wrote.
+/// Write the session's MCP configuration at `path`, beside its `models.json`, or take away the one a previous start
+/// wrote.
 ///
 /// The file is a client's convenience, never the gate: the network join is what makes `mcp-proxy` resolvable, so a
 /// session whose row says no Internet access reaches nothing whatever this file says (ADR-0100). `off` therefore
 /// removes rather than writes a disabled entry — a server the system prompt lists and the session cannot call is a
 /// cost with no use — and ignoring `NotFound` is what makes the second `off` start uneventful.
-fn write_mcp_config(home: &Path, mode: LinearMcp, dummy: &str) -> std::io::Result<McpConfig> {
-    let path = home.join(mcpproxy::CLIENT_FILE);
-    let Some(text) = mcpproxy::client_config(mode, dummy) else {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(McpConfig::Removed(path)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(McpConfig::Nothing),
-            Err(error) => Err(error),
-        };
+///
+/// A configured mode the tool row cannot answer is this step's failure rather than a removal: only `off` answers
+/// `Ok(None)`, so a `write` that could not be built cannot take the file away and report success.
+fn write_mcp_config(path: &Path, mode: LinearMcp, dummy: &str) -> std::io::Result<McpConfig> {
+    let text = match mcpproxy::client_config(mode, dummy) {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            return match std::fs::remove_file(path) {
+                Ok(()) => Ok(McpConfig::Removed(path.to_path_buf())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(McpConfig::Nothing)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        Err(sentence) => return Err(std::io::Error::other(sentence)),
     };
-    std::fs::write(&path, text)?;
-    Ok(McpConfig::Written(path))
+    std::fs::write(path, text)?;
+    Ok(McpConfig::Written(path.to_path_buf()))
 }
 
 /// Whether pi accepted a command that has nothing else to say, or the reason it did not.
@@ -1265,23 +1276,25 @@ mod tests {
         let dir = scratch("mcp-file");
         let path = dir.join(mcpproxy::CLIENT_FILE);
         assert_eq!(
-            write_mcp_config(&dir, LinearMcp::Write, "hs-dummy-test")
+            write_mcp_config(&path, LinearMcp::Write, "hs-dummy-test")
                 .expect("the file is writable"),
             McpConfig::Written(path.clone())
         );
         let text = std::fs::read_to_string(&path).expect("the file was written");
+        let expected = mcpproxy::client_config(LinearMcp::Write, "hs-dummy-test")
+            .expect("the table's row can answer write")
+            .expect("write configures a document");
         assert_eq!(
-            Some(text),
-            mcpproxy::client_config(LinearMcp::Write, "hs-dummy-test"),
+            text, expected,
             "the file a start writes is the client configuration and nothing else"
         );
         assert_eq!(
-            write_mcp_config(&dir, LinearMcp::Off, "hs-dummy-test").expect("off removes it"),
+            write_mcp_config(&path, LinearMcp::Off, "hs-dummy-test").expect("off removes it"),
             McpConfig::Removed(path.clone())
         );
         assert!(!path.exists(), "off left the file a previous start wrote");
         assert_eq!(
-            write_mcp_config(&dir, LinearMcp::Off, "hs-dummy-test")
+            write_mcp_config(&path, LinearMcp::Off, "hs-dummy-test")
                 .expect("nothing to remove is fine"),
             McpConfig::Nothing
         );
