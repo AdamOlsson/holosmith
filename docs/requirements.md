@@ -48,7 +48,7 @@ step's line says why, and names the file it ran instead, when it cannot.
 The state is one directory, `~/.local/share/holosmith`, and the config is one file,
 `~/.config/holosmith.toml`. `holosmith config show` prints the resolved config with every default,
 `config validate` checks an edit and `config edit` opens it; `docs/config.md` documents every key. `holosmith key
-list` prints which providers have a key, never the values.
+list` prints which providers and tools have a key, never the values.
 
 `min_free_gb` (default 20 GB) is the one value to fit to the machine — `doctor` refuses below it, and a refusing
 `serve` is a unit that restart-loops.
@@ -61,6 +61,10 @@ is what finishes it; `printf '…' | holosmith key set <provider>` reads the sam
 as yourself: the file's owner must be the data root's owner, or
 `doctor`'s `perms` finding fails and the next boot's `ExecStartPre` refuses to start the unit. No restart is needed —
 the key proxy reads the store per request, and the container only ever holds a per-session dummy.
+
+A tool's credential lives in the same file: `holosmith key set <tool-id>` stores one — `linear` is the tool this build
+knows — and `holosmith key revoke <tool-id>` forgets it. The proxy that spends a tool key is a later change, so this is
+a stored key nothing spends yet (ADR-0098).
 
 ## Install versus deploy
 

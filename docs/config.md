@@ -70,8 +70,16 @@ calls from another machine only if that peer's **tailnet node name** is in `allo
 | `projects_root` | path | `"~/.local/share/holosmith/projects"` | The projects root. Each project is a **repository directory directly inside it** (`<projects_root>/<project>` with a `.git` directory), and session worktrees are made under `<projects_root>/.worktrees/<id>`. Absolute, and must not be equal to, inside, or a parent of `data_root` — deleting data must never touch a repository. |
 | `docker_host` | string | unset | The daemon `docker -H` talks to: `unix://…`, `tcp://…` or `ssh://…`. Unset means the client's own default (`DOCKER_HOST`, else `unix:///var/run/docker.sock`). An `ssh://` daemon is a complaint in the preflight rather than a pass, because the checks that need a container cannot run. |
 
-`<data_root>/secrets/keys.toml` (mode 0600) is **not** a config key: `holosmith key set <provider>` owns it, and
-`key list` never prints a value. `<data_root>/secrets/vapid.toml` holds the push keys, written once by the first
+`<data_root>/secrets/keys.toml` (mode 0600) is **not** a config key: `holosmith key set <id>` owns it, and `key list`
+never prints a value. It has three tables. `[providers]` holds the model-provider keys the key proxy swaps in, and
+`[sessions]` the dummy key each live session spends; `[tools]` holds one key per tool host — `linear` is the one this
+build knows, so `key set linear` stores it and `key revoke linear` forgets it — and the table is written only while it
+holds a key, because the release before this one refuses a file that names it, so a machine holding a tool key has to
+`key revoke` it before switching back (ADR-0098). A tool is not a provider: it has no model row and nothing in
+`models.json` names it. A `[providers]` row whose id names a tool is a row an operator added by hand before the tool
+table existed: it is read as a tool key, and the next write of the file — any `key set`, or a boot that starts the key
+proxy, which prepares the file it mounts — moves it into `[tools]`.
+`<data_root>/secrets/vapid.toml` holds the push keys, written once by the first
 deploy and never regenerated (ADR-0058).
 
 ## What a session's container is
