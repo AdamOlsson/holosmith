@@ -95,8 +95,9 @@ pub const BAD_THINKING: &str = "bad_thinking";
 /// machine holds no key for — for [`BAD_TARGET`]'s reason: the client's move is one (send a model string this
 /// machine can serve) while the operator's next step is the sentence's. It is not [`BAD_MODEL`]'s: the model
 /// string is well formed, and which providers a machine forwards to is a fact about the build and the key store
-/// rather than about the request's shape.
-pub const PROVIDER_WITHOUT_KEY: &str = "provider_without_key";
+/// rather than about the request's shape. The name is the *fact* both sentences carry — the model names a provider
+/// this machine does not serve — so neither sentence has to fit a word that is true of only one of them.
+pub const MODEL_PROVIDER_UNSERVED: &str = "model_provider_unserved";
 
 /// A create named a project whose `.git` is not a directory (spec item 1).
 pub const GIT_NOT_DIRECTORY: &str = "git_not_directory";
@@ -492,15 +493,18 @@ impl ApiError {
 
     /// What a create whose model names a provider this build does not forward to answers.
     ///
-    /// The sentence names the table and the command that makes one of it usable, because that is the operator's
-    /// next step and this refusal exists instead of a session whose first prompt fails inside a container.
+    /// The sentence names the command that makes a provider usable first, and the provider-free fallback second:
+    /// a bare id is resolved across every provider that has a key, so recommending it first would recommend the
+    /// form pi answers `status: "ambiguous"` for. The table follows the command, because `key set <provider>` needs
+    /// a name to take.
     pub fn unknown_model_provider(provider: &str) -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            PROVIDER_WITHOUT_KEY,
+            MODEL_PROVIDER_UNSERVED,
             format!(
-                "the model names the provider \"{provider}\", which this build does not forward to: send a \
-                 model id without a provider, or set a key for one of {} with `holosmith key set <provider>`",
+                "the model names the provider \"{provider}\", which this build does not forward to: name a \
+                 provider this machine has a key for with `holosmith key set <provider>` (one of {}), or send a \
+                 model id with no provider at all",
                 crate::key::provider_ids().join(", ")
             ),
         )
@@ -514,7 +518,7 @@ impl ApiError {
     pub fn provider_without_key(provider: &str) -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            PROVIDER_WITHOUT_KEY,
+            MODEL_PROVIDER_UNSERVED,
             format!(
                 "the model names the provider \"{provider}\" and this machine holds no key for it: run \
                  `holosmith key set {provider}`"
@@ -1177,15 +1181,16 @@ mod tests {
     #[test]
     fn an_unserved_provider_is_one_422_code_with_a_sentence_per_fact() {
         // The client's move is one — send a model string this machine can serve — while the operator's next step
-        // is the sentence's: one names the table and `key set`, the other names the command with the provider it
+        // is the sentence's: one names the command and the table, the other names the command with the provider it
         // has to carry. Neither carries a code or an internal reference, and neither is `bad_model`'s: the model
-        // string is well formed.
+        // string is well formed. The code is true of both facts: the model names a provider this machine does not
+        // serve.
         for error in [
             ApiError::unknown_model_provider("not-a-provider"),
             ApiError::provider_without_key("opencode-go"),
         ] {
             assert!(
-                !error.body.message.contains(PROVIDER_WITHOUT_KEY),
+                !error.body.message.contains(MODEL_PROVIDER_UNSERVED),
                 "a message repeats its code: {}",
                 error.body.message
             );
@@ -1197,7 +1202,7 @@ mod tests {
             assert_answer(
                 error,
                 StatusCode::UNPROCESSABLE_ENTITY,
-                PROVIDER_WITHOUT_KEY,
+                MODEL_PROVIDER_UNSERVED,
             );
         }
         assert_eq!(
@@ -1205,12 +1210,23 @@ mod tests {
             "the model names the provider \"opencode-go\" and this machine holds no key for it: run \
              `holosmith key set opencode-go`"
         );
+
+        // The unknown-provider sentence leads with the command, not with the provider-free fallback: a bare id
+        // is resolved across every provider that has a key, so pi answers several candidates with
+        // `status: "ambiguous"`. The fallback stays, second, and the table follows the command that needs a name.
+        let unknown = ApiError::unknown_model_provider("not-a-provider")
+            .body
+            .message;
+        let command = unknown
+            .find("`holosmith key set <provider>`")
+            .unwrap_or_else(|| panic!("the sentence does not lead to the command: {unknown}"));
+        let fallback = unknown
+            .find("model id with no provider")
+            .unwrap_or_else(|| panic!("the sentence drops the provider-free fallback: {unknown}"));
+        assert!(command < fallback, "the fallback leads: {unknown}");
         assert!(
-            ApiError::unknown_model_provider("not-a-provider")
-                .body
-                .message
-                .contains(&crate::key::provider_ids().join(", ")),
-            "the unknown-provider sentence does not name the table"
+            unknown.contains(&crate::key::provider_ids().join(", ")),
+            "the unknown-provider sentence does not name the table: {unknown}"
         );
     }
 

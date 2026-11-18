@@ -210,13 +210,15 @@ fn is_thinking_byte(byte: u8) -> bool {
 /// the sentence names the command that fixes it.
 ///
 /// **A bare model id is allowed**, whatever it names: pi's bundled catalog is the only list of model ids this build
-/// has, and the quick start's `claude-sonnet-4.5` names no provider at all. Only a non-empty first segment is a
-/// claim about this machine's providers.
+/// has, and the quick start's `claude-sonnet-4.5` names no provider at all. **Bare is `agent::seed`'s rule, one
+/// spelling for both callers**: a model with no `/`, or with an empty half, is bare — `google/` and `/model` name no
+/// provider either, so neither is a claim about this machine's providers and `seed` writes both as a bare
+/// `defaultModel`. Only a model with two non-empty halves is checked.
 ///
 /// The key store is read only when the model names a provider, so a bare id's create does not touch the file.
 fn model_provider_refusal(state: &AppState, model: &str) -> Option<ApiError> {
-    let (named, _) = model.split_once('/')?;
-    if named.is_empty() {
+    let (named, rest) = model.split_once('/')?;
+    if named.is_empty() || rest.is_empty() {
         return None;
     }
     let Some(provider) = key::provider(named) else {

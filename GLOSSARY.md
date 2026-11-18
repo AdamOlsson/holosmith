@@ -850,12 +850,25 @@ _Avoid_: Health check, smoke test, probe
 A **mode of this binary** (`holosmith proxy key`), run as the `hs_key` container on the `egress` network and
 joined to every session network under the alias `key-proxy`. Pi is configured with
 `http://key-proxy:8080/<provider>` and a per-session **dummy key**; the proxy validates that dummy against
-`<data>/secrets/keys.toml`, swaps in the provider's real key in the header that provider uses, and forwards the
-request over TLS. The provider is selected by the first path segment from a fixed table (`key::PROVIDERS`), so
-a request cannot name its own host or port. It logs one line per request with the session, the provider, the
-host and the bytes. Its machine names are `keyproxy::Route`, `container::KeyProxy`,
-`key::KEY_PROXY_NAME`, `key::KEY_PROXY_ALIAS` and `key::KEY_PROXY_PORT`.
+`<data>/secrets/keys.toml`, swaps in the provider's real key in the header that provider's **API shape** uses, and
+forwards the request over TLS. The provider is selected by the first path segment from a fixed table
+(`key::PROVIDERS`), and a row that serves more than one API names a base path **and** a header per **API shape**,
+selected from the endpoint tail the model's client appends — so a request cannot name its own host or port, and
+neither forwarded path comes from the request. It logs one line per request with the session, the provider, the
+host and the bytes. Its machine names are `keyproxy::Route`, `container::KeyProxy`, `key::PROVIDERS`,
+`key::Shape`, `key::KEY_PROXY_NAME`, `key::KEY_PROXY_ALIAS` and `key::KEY_PROXY_PORT`.
 _Avoid_: Auth proxy, gateway, sidecar
+
+**API shape**:
+One API a provider serves on its host, as `key::Shape`: the endpoint the model's client appends to the `baseUrl`
+(`/v1/messages` for an `anthropic-messages` model, `/chat/completions` for an `openai-completions` one), the base
+path that provider publishes the endpoint under, and the header the shape's client sends the key in. It is a
+property of the **model**, not of the provider: pi's bundled catalog is the only component that knows it, and it
+says so in the path it appends, which is why the key proxy selects the shape from the request's tail rather than
+from a provider id that would have to carry catalog metadata. A row's shapes are constants
+(`key::Provider::shapes`, empty for every row but `opencode-go`), and an endpoint no shape names keeps the row's
+own base path and header.
+_Avoid_: Provider variant, API dialect, protocol
 
 **Dummy key**:
 The per-session throwaway credential the agent holds instead of a real key. It is minted by

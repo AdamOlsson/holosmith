@@ -12,7 +12,7 @@ use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::error::{
     BAD_BODY, BAD_CLIENT, BAD_IDEMPOTENCY_KEY, BAD_MODEL, BAD_PROJECT, BAD_THINKING, CAP_REACHED,
-    MISSING_IDEMPOTENCY_KEY, PROVIDER_WITHOUT_KEY, UNKNOWN_FIELD,
+    MISSING_IDEMPOTENCY_KEY, MODEL_PROVIDER_UNSERVED, UNKNOWN_FIELD,
 };
 use holosmith::http::{self, AppState};
 use holosmith::sessions::state::Trigger;
@@ -326,7 +326,7 @@ async fn the_shape_rules_accept_their_own_values() {
 // ---- the model's provider ---------------------------------------------------------------
 
 #[tokio::test]
-async fn a_model_naming_a_provider_without_a_key_is_422_provider_without_key() {
+async fn a_model_naming_a_provider_without_a_key_is_422_model_provider_unserved() {
     // The pair pi resolves inside the session: `<provider>/<model>`. A provider this machine holds no key for is a
     // session whose first prompt fails in a container, so it is refused before a row exists and the sentence names
     // the command that makes it servable.
@@ -335,7 +335,7 @@ async fn a_model_naming_a_provider_without_a_key_is_422_provider_without_key() {
     let served = Served::start(http::router(state.clone()), GRACE).await;
     let body = body_with_model(KEYED_MODEL);
     let refused = post_create(served.addr, Some("no-key"), &body).await;
-    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    assert_refusal(&refused, 422, MODEL_PROVIDER_UNSERVED);
     let envelope: serde_json::Value =
         serde_json::from_str(&refused.body).expect("an envelope is JSON");
     let message = envelope["message"].as_str().expect("a message");
@@ -374,7 +374,7 @@ async fn a_model_naming_an_unknown_provider_is_refused_even_when_this_machine_ha
         &body_with_model("not-a-provider/some-model"),
     )
     .await;
-    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    assert_refusal(&refused, 422, MODEL_PROVIDER_UNSERVED);
     let envelope: serde_json::Value =
         serde_json::from_str(&refused.body).expect("an envelope is JSON");
     let message = envelope["message"].as_str().expect("a message");
@@ -393,15 +393,28 @@ async fn a_model_naming_an_unknown_provider_is_refused_even_when_this_machine_ha
 
 #[tokio::test]
 async fn a_bare_model_id_still_creates_on_a_machine_with_no_keys() {
-    // A model id without a `/` names no provider, so this build has nothing to check it against: pi's bundled
-    // catalog is the only list of model ids, and `claude-sonnet-4.5` is the quick start's. A data root with no
-    // secrets directory at all is the machine this must not refuse.
+    // A model with no `/` names no provider, so this build has nothing to check it against: pi's bundled catalog
+    // is the only list of model ids, and `claude-sonnet-4.5` is the quick start's. **Bare is `agent::seed`'s rule,
+    // with the same spelling**: an empty half names no provider either, so `google/` and `/model` are bare too and
+    // `seed` writes all three as a bare `defaultModel`. A data root with no secrets directory at all is the machine
+    // this must not refuse.
     let dir = TempDir::new("api-bare-model");
     let state = state_in(&dir, config_in(&dir));
     let served = Served::start(http::router(state.clone()), GRACE).await;
     assert!(!dir.file("data/secrets/keys.toml").exists());
-    let (id, _) = assert_created(&post_create(served.addr, Some("bare"), BODY).await);
-    assert_eq!(locked_row(&state, &id).model, "claude-sonnet-4.5");
+    for (key, model) in [
+        ("bare", "claude-sonnet-4.5"),
+        ("bare-empty-tail", "google/"),
+        ("bare-empty-head", "/model"),
+    ] {
+        let created = post_create(served.addr, Some(key), &body_with_model(model)).await;
+        let (id, _) = assert_created(&created);
+        assert_eq!(
+            locked_row(&state, &id).model,
+            model,
+            "{model:?} was refused"
+        );
+    }
     served.finish().await.expect("a clean shutdown");
 }
 
@@ -438,7 +451,7 @@ async fn a_retried_create_answers_its_row_after_the_key_went_away() {
     assert_eq!(live_count(&state), 1, "the retry wrote a second row");
 
     let fresh = post_create(served.addr, Some("fresh"), &body).await;
-    assert_refusal(&fresh, 422, PROVIDER_WITHOUT_KEY);
+    assert_refusal(&fresh, 422, MODEL_PROVIDER_UNSERVED);
     assert_eq!(live_count(&state), 1);
     served.finish().await.expect("a clean shutdown");
 }
@@ -464,7 +477,7 @@ async fn a_refused_model_does_not_evict_the_idle_session_it_would_have_displaced
     wait_idle(&state, &id).await;
 
     let refused = post_create(served.addr, Some("refused"), &body_with_model(KEYED_MODEL)).await;
-    assert_refusal(&refused, 422, PROVIDER_WITHOUT_KEY);
+    assert_refusal(&refused, 422, MODEL_PROVIDER_UNSERVED);
     assert_eq!(
         locked_row(&state, &id).status,
         Status::Idle,

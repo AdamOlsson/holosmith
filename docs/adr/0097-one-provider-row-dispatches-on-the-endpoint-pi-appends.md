@@ -63,13 +63,17 @@ header instead of the row's.
 The session in the measurement was created and then failed every turn from inside a container. So `POST
 /api/sessions` now refuses a `model` whose first `/`-separated segment names a provider this machine cannot serve:
 a segment this build does not forward to, or one the key store holds no key for. One code,
-`422 provider_without_key`, and a sentence per fact — the provider table and `key set` for an unknown segment,
-`holosmith key set <provider>` for a missing key — because the client's move is one and the operator's next step
-is the sentence's.
+`422 model_provider_unserved`, and a sentence per fact — `holosmith key set <provider>` and the table for an
+unknown segment, the same command with the provider it has to name for a missing key — because the client's move
+is one and the operator's next step is the sentence's. The unknown segment's sentence names the command first and
+the provider-free fallback second, because a bare id is resolved across every provider that has a key and pi
+answers several candidates with `status: "ambiguous"` (ADR-0093).
 
 A **bare** model id names no provider and is allowed exactly as before: pi's catalog is the only list of model ids
 this build has, so a machine cannot call a bare id wrong, and `claude-sonnet-4.5` is what the quick start, the
-form's example and every check in `scripts/verify.sh` sends.
+form's example and every check in `scripts/verify.sh` sends. Bare is `agent::seed`'s rule and not a second spelling
+of it: a model with no `/` **or with an empty half** is bare, because `seed` writes both as a bare
+`defaultModel`, so `google/` and `/model` create a row here too.
 
 The refusal rides `create`'s chain of the machine's own refusals, which `create_locked` raises **after** the
 idempotency key's lookup and **before** the cap's count. Both halves are load-bearing: a retry whose first attempt
@@ -85,16 +89,27 @@ They are shapes on this row like the other two — no new mechanism — and they
 report this fixes is the `openai-completions` one and each deserves its own measurement against a real key
 rather than a guess.
 
-## What pins it
+## What pins it, and what is not measured yet
 
+**The fix is pinned without a network.**
 `key::tests::opencode_go_names_one_shape_per_endpoint_and_every_other_row_names_none` pins the table: two shapes
 with those exact paths and headers, the anthropic triple as the row's own, an endpoint matched exactly and not as a
 prefix of a longer segment, and no other row carrying a shape.
-`keyproxy::tests::an_open_code_go_route_takes_its_shape_from_the_endpoint_pi_appended` pins the forwarded request
-line, host and header for both endpoints, `a_query_string_survives_the_shape_s_rewrite` the preserved query,
+`keyproxy::tests::an_opencode_go_route_takes_its_shape_from_the_endpoint_pi_appended` pins the forwarded request
+line, host and header for both endpoints — the bytes that were wrong, which is the whole of the defect —
+`a_query_string_survives_the_shape_s_rewrite` the preserved query,
 `a_row_without_shapes_keeps_its_own_path_and_header_whatever_the_endpoint` the rows that did not change, and
 `a_dummy_key_never_survives_into_the_upstream_request` that the selected shape's header is the only one that carries
-a key. `tests/sessions_api.rs` pins the create's refusal, its two sentences, the bare-id allowance, a retry
-answering its row after the key went away, and the idle session the refusal must not evict. The by-hand proof is
-ADR-0050's measurement redone: a machine whose only key is `opencode-go` prompts an `openai-completions` model and
-reads an answer, and the proxy's log line names the request that reached it.
+a key. `tests/sessions_api.rs` pins the create's refusal, its two sentences, the bare-id allowance with both empty
+halves, a retry answering its row after the key went away, and the idle session the refusal must not evict.
+`scripts/verify.sh`'s `case_key_proxy_request` asks the **shipped artifact** both endpoints through a stand-in TLS
+client and asserts each forwarded request line and header, so the bytes the binary produces are pinned too. ADR-0050
+makes the same distinction for V3–V5: a request that is built right is not a provider that answered.
+
+**The two real-key criteria are not measured on this branch.** No real provider key exists on the machine this was
+written on, so neither half of the story was run: an `openai-completions` session
+(`opencode-go/deepseek-v4.1-flash`) drawing text deltas, a tool pair and `usage` on `message.end`, and `hs_key`
+logging `status=forwarded` for it — the line a head-only request never produced, because the provider waited it out
+and closed it (ADR-0050). What exists here is the request the proxy would hand its TLS client, asserted byte for
+byte; what a promotion owes is the by-hand run ADR-0050 describes with that model in place of `claude-haiku-5-5` —
+the deltas, the tool pair, the `usage`, and the `forwarded` line.

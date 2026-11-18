@@ -2483,7 +2483,8 @@ PY
 # and no daemon — a gate cannot have those, and the real forward is the recorded demo.
 case_key_proxy_request() {
   local name=case_key_proxy_request root="$WORK/key-proxy-request-$$"
-  local fake="$root/openssl" capture="$root/request.bin" port keyproxy_pid answered
+  local fake="$root/openssl" capture="$root/request.bin" capture_openai="$root/request-openai.bin"
+  local port keyproxy_pid answered
   local body='{"model":"claude-haiku-5-5","max_tokens":8}'
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to speak HTTP to the key proxy (tests/key_proxy.rs covers the wire)\n' "$name"
@@ -2558,6 +2559,63 @@ PYASK
   assertions=$((assertions + 1))
   if [ "$(tail -c ${#body} "$capture" 2>/dev/null)" != "$body" ]; then
     fail "$name/body" "the forwarded request ends without the body: $(tail -c 200 "$capture" | tr -d '\r')"
+  fi
+  assertions=$((assertions + 1))
+
+  # The second shape a single row serves: an `openai-completions` model appends `/chat/completions`, and the
+  # endpoint decides both the forwarded path and the header the key goes in. Its own capture, because the shim
+  # truncates the one file it is told to write, and its own proxy, so the arm above is measured exactly as it was.
+  # pi's OpenAI client sends the dummy in `Authorization: Bearer`, which is the header this shape's request carries.
+  rm -f "$capture_openai"
+  port="$(python3 - <<'PYFREEPORT_OPENAI'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PYFREEPORT_OPENAI
+)" || fail "$name/openai-port" "could not ask the kernel for a port"
+  PATH="$fake:$PATH" CAPTURE="$capture_openai" \
+    "$artifact" proxy key --listen "127.0.0.1:$port" --keys "$root/data/secrets/keys.toml" \
+    >"$WORK/responses/$name-openai-proxy.log" 2>&1 &
+  keyproxy_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'the key proxy is listening' "$WORK/responses/$name-openai-proxy.log" 2>/dev/null && break
+    kill -0 "$keyproxy_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  answered="$(python3 - "$port" "$body" <<'PYASK_OPENAI'
+import socket, sys
+
+port, body = int(sys.argv[1]), sys.argv[2].encode()
+head = (b"POST /opencode-go/chat/completions HTTP/1.1\r\nHost: key-proxy:8080\r\n"
+        b"Content-Type: application/json\r\nAuthorization: Bearer hs-dummy-verify\r\n"
+        + b"Content-Length: %d\r\n\r\n" % len(body))
+with socket.create_connection(("127.0.0.1", port), timeout=20) as sock:
+    sock.sendall(head + body)
+    answer = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+print(answer.decode("utf-8", "replace").replace("\r\n", " ").strip()[:120])
+PYASK_OPENAI
+)" || fail "$name/openai-driver" "the python3 driver failed"
+  case "$answered" in
+    "HTTP/1.1 200 OK"*" ok") assertions=$((assertions + 1)) ;;
+    *) fail "$name/openai-answer" "the proxy did not forward the canned answer: $answered" ;;
+  esac
+  kill -TERM "$keyproxy_pid" 2>/dev/null || true
+  wait "$keyproxy_pid" 2>/dev/null || true
+  check "$name/openai-request" "POST /inference/go/openai/v1/chat/completions HTTP/1.1" \
+    "$(head -1 "$capture_openai" 2>/dev/null | tr -d '\r' || true)"
+  check "$name/openai-body" "$(tail -c ${#body} "$capture_openai" 2>/dev/null)" "$body"
+  grep -q '^Authorization: Bearer sk-opencode-go-verify' "$capture_openai" 2>/dev/null ||
+    fail "$name/openai-key" "the forwarded request does not carry the stored key in Bearer: $(head -c 400 "$capture_openai")"
+  assertions=$((assertions + 1))
+  if grep -qE '^(x-api-key|Authorization: Bearer hs-dummy)' "$capture_openai" 2>/dev/null; then
+    fail "$name/openai-dummy" "the forwarded request carries a dummy or the row's own header: $(head -c 400 "$capture_openai")"
   fi
   assertions=$((assertions + 1))
   rm -rf "$root"
@@ -14470,13 +14528,20 @@ SHIM
 # The config default is `127.0.0.1:8081`, and this gate must run on a machine that is itself running Holosmith:
 # the product binds exactly that port for its own preview listener, so every fixture that took the default would
 # fail its boot with `Address in use` on the one host most likely to run this script. A case that pins a preview
-# port keeps it; only `start_serve`/`start_peer` fixtures that said nothing are rewritten, and `sed -i` keeps the
-# file's mode because `doctor`'s `perms` check reads it.
+# port keeps it; only `start_serve`/`start_peer` fixtures that said nothing are rewritten.
+#
+# The insert is followed by an explicit `chmod 0644`, as `case_doctor_quick` does, so the mode claim is true by
+# construction rather than by trusting `sed`'s own behaviour: `doctor`'s `perms` check compares the file `--config`
+# names against the 0644 `server deploy` writes, and this shell's umask leaves a rewritten fixture at 0664. No case
+# yet both takes this insert and hands the file to `doctor`, so nothing here is exercised today — it is the shape a
+# future case would need, and asserting it would mean a case whose fixture is read by a check that is not its own.
 ensure_preview_listen() {
   local config="$1"
   if ! grep -qE '^[[:space:]]*preview_listen[[:space:]]*=' "$config"; then
     sed -i '1i preview_listen = "127.0.0.1:0"' "$config" ||
       fail "serve/config" "could not give $config an ephemeral preview port"
+    chmod 0644 "$config" ||
+      fail "serve/config" "could not set $config to 0644"
   fi
 }
 
