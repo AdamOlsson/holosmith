@@ -756,6 +756,10 @@ commit that says nothing. It runs on every `agent_settled` (`Turn::finished`), b
 `holosmith container snapshot`.
 _Avoid_: Stash, backup, autosave, checkpoint
 
+**Commit author**:
+The `user.name`/`user.email` pair git stamps on a commit, and the one value this build gives a session: `holosmith <holosmith@localhost>`, the same constant a **WIP snapshot** and a **Merge** carry. It reaches the **Session container** as `<data>/sessions/<id>/pi-home/gitconfig`, written on every start and named by `GIT_CONFIG_GLOBAL` — two non-secret strings that appear in `git log` anyway, which is why this is not the credential the mount and environment rules forbid. Every commit in a session carries it, so the history is coherent but says nothing about who drove it. Its machine names are `container::{git_config, GIT_CONFIG_FILE, GIT_CONFIG_ENV}` and `DockerBackend`'s `write_git_config`.
+_Avoid_: Identity (that is the **Machine**'s, and an unreadable one is a refusal), committer, signature (that is `commit.gpgsign`)
+
 **Project backup**:
 One git bundle of a project repository — every branch and tag, `--all` — taken at most once per calendar day (UTC) when `project_backup` is on: `<data>/backups/<project>-<YYYY-MM-DD>.bundle`. It is written aside, verified with `git bundle verify`, then renamed into place, and the last seven days per project are kept; the create takes it before the session can touch the repository, and a failure is a log line that does not block the session. Its machine names are `backup::Backups` and `Backups::take`.
 _Avoid_: Snapshot (that is the message snapshot and the WIP snapshot), archive, dump, checkpoint

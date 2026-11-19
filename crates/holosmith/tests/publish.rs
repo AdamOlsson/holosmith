@@ -20,7 +20,9 @@
 //! The credential assertion is deliberately **two halves in one test**: the session's container carries no git
 //! credential (no mount, no environment variable, no seeded file), and the push above ran on the host into a
 //! directory under this test's own `TempDir` — a path no container's mount vector names. The absence is what the
-//! acceptance asks for; the presence is the half that can fail.
+//! acceptance asks for; the presence is the half that can fail. The one `GIT_*` variable the container does carry
+//! names the commit author's file, which is two strings `git log` prints and not a credential: the second half of
+//! that test reads the file and asserts it holds those two lines and nothing else.
 //!
 //! The wire group at the end boots the real router over the same repository, because a `TempDir` cannot prove
 //! what a client sees: the three keys, the destination's name, and every refusal as status **and** code.
@@ -31,7 +33,7 @@ use std::time::Duration;
 use axum::http::Method;
 use holosmith::clock;
 use holosmith::config::{Config, Merge, Publish};
-use holosmith::container::{ContainerSettings, SessionContainer};
+use holosmith::container::{ContainerSettings, GIT_CONFIG_FILE, SessionContainer, git_config};
 use holosmith::http::{self, AppState};
 use holosmith::publish::{PublishError, Pushed, Request, publish};
 use holosmith::sessions::NewSession;
@@ -779,12 +781,18 @@ fn a_session_container_carries_no_git_credential() {
     //
     // 1. the mount vector — five mounts, and none of them a home directory, a `.ssh`, a `.gitconfig`, a
     //    `.git-credentials`, a `.netrc`, the key store or the secrets directory;
-    // 2. the environment — no `GIT_*`, no `SSH_*`, no askpass variable;
-    // 3. the agent directory the server seeds — exactly one file, `settings.json`, whose keys are the model and
-    //    the thinking level.
+    // 2. the environment — a named allow-list: `GIT_CONFIG_GLOBAL` names the commit author's file inside the
+    //    pi-home, and no askpass, no `SSH_*`, no `GIT_SSH*`, no second git config location and nothing named for a
+    //    credential may be there;
+    // 3. the agent directory the server leaves — two files, `settings.json` and the commit author's `gitconfig`,
+    //    whose keys are the model, the thinking level, and the author's two strings.
     //
-    // The positive half is the pushes above: they land in a bare repository under a `TempDir`, a path no mount
-    // vector here names, which is what makes "the host did it" a measurement rather than a claim.
+    // The allowance is the story's line and not a weakening of it: a mount and an environment variable are how a
+    // *credential* reaches a container, and `user.name`/`user.email` are not one — they are what every commit in
+    // the history shows to everybody. A `.gitconfig` is still refused as a *mount* below, and that is the leak this
+    // rule exists for: an operator's own config may name a `credential.helper`, an `url.*.insteadOf`, a
+    // `core.sshCommand` or an `include.path`. The file this build writes is inside the pi-home mount, not a mount
+    // of its own, and the third read is what pins its contents.
     let fixture = Fixture::new("publish-credential");
     let session = {
         let database = fixture
@@ -840,7 +848,7 @@ fn a_session_container_carries_no_git_credential() {
         .expect("the project's config is one of the mounts");
     assert!(config_mount.ends_with(":ro"), "{config_mount}");
 
-    // 2. The environment: every `--env KEY=VALUE`, and no credential-ish name among them.
+    // 2. The environment: every `--env KEY=VALUE`, one named `GIT_*` variable allowed and the rest refused by name.
     let environment: Vec<&String> = arguments
         .iter()
         .enumerate()
@@ -848,8 +856,50 @@ fn a_session_container_carries_no_git_credential() {
         .map(|(_, argument)| argument)
         .collect();
     assert!(!environment.is_empty(), "the container has no environment");
-    for variable in &environment {
-        let name = variable.split('=').next().unwrap_or_default();
+    let names: Vec<&str> = environment
+        .iter()
+        .map(|variable| variable.split('=').next().unwrap_or_default())
+        .collect();
+    // The allow-list is one name, and it is the commit author's file's: spelled through the constant, so a second
+    // `GIT_*` variable cannot arrive by accident — which is what a blanket "no `GIT_*`" was standing in for.
+    assert!(
+        names.contains(&holosmith::container::GIT_CONFIG_ENV),
+        "the container does not name the commit author's file: {environment:?}"
+    );
+    let mut author_variables = environment.iter().filter(|variable| {
+        variable.split('=').next() == Some(holosmith::container::GIT_CONFIG_ENV)
+    });
+    let author_variable = author_variables
+        .next()
+        .expect("the allow-listed variable is in the environment");
+    // Exactly once: the residual loop below skips this *name*, so a second `GIT_CONFIG_GLOBAL` pointing
+    // somewhere else would be allowed by every other read — and Docker resolves a duplicated `--env` last-wins.
+    assert!(
+        author_variables.next().is_none(),
+        "the container names the commit author's file more than once: {environment:?}"
+    );
+    assert!(
+        author_variable.ends_with(&format!("/{GIT_CONFIG_FILE}")),
+        "the variable does not name the commit author's file: {author_variable}"
+    );
+    // The refused names, explicitly: each one would put git's configuration somewhere this build does not write.
+    for forbidden in [
+        "GIT_ASKPASS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+    ] {
+        assert!(
+            !names.contains(&forbidden),
+            "the container carries {forbidden}: {environment:?}"
+        );
+    }
+    // …and the blanket rule for every name nobody listed: one `GIT_*` is allowed and it is the one above.
+    for (variable, name) in environment.iter().zip(&names) {
+        if *name == holosmith::container::GIT_CONFIG_ENV {
+            continue;
+        }
         for forbidden in ["GIT_", "SSH_", "ASKPASS", "CREDENTIAL"] {
             assert!(
                 !name.to_ascii_uppercase().contains(forbidden),
@@ -858,9 +908,13 @@ fn a_session_container_carries_no_git_credential() {
         }
     }
 
-    // 3. The seed: one file, two keys, no secret.
+    // 3. The agent directory: pi's settings and the commit author's file, and nothing else.
     let home = holosmith::agent::home(fixture._dir.path(), &fixture.id);
     holosmith::agent::ensure_home(&home, &session).expect("the agent directory is seeded");
+    // The container step's own write of this directory, made here because this test has no daemon to run it
+    // (`backend`'s `write_git_config` is the per-start half, and `GIT_CONFIG_GLOBAL` is what names it).
+    std::fs::write(home.join(GIT_CONFIG_FILE), git_config())
+        .expect("the commit author's file is writable");
     let mut seeded: Vec<String> = std::fs::read_dir(&home)
         .expect("the agent directory is readable")
         .filter_map(|entry| entry.ok())
@@ -869,8 +923,22 @@ fn a_session_container_carries_no_git_credential() {
     seeded.sort();
     assert_eq!(
         seeded,
-        vec!["settings.json".to_string()],
-        "the seed wrote more than pi's settings"
+        vec![
+            GIT_CONFIG_FILE.to_string(),
+            holosmith::agent::SETTINGS.to_string()
+        ],
+        "the agent directory holds more than pi's settings and the commit author"
+    );
+    // The commit author's file is git's global config, so it is also where a credential could be written: a
+    // `credential.helper`, an `url.*.insteadOf`, a `core.sshCommand` or an `include.path` in it would be exactly
+    // what the mount rule above refuses. The build writes one `[user]` section and nothing else, so this asserts
+    // the whole file rather than a substring of it.
+    let author = std::fs::read_to_string(home.join(GIT_CONFIG_FILE))
+        .expect("the commit author's file is readable");
+    assert_eq!(
+        author.lines().map(str::trim).collect::<Vec<_>>(),
+        vec!["[user]", "name = holosmith", "email = holosmith@localhost"],
+        "the commit author's file carries more than its two strings: {author}"
     );
     let settings: Value = serde_json::from_str(
         &std::fs::read_to_string(home.join("settings.json")).expect("the seed is readable"),

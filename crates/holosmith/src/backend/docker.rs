@@ -37,7 +37,7 @@ use serde_json::json;
 use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::agent::{self, Agent, AgentError, Ended};
 use crate::config::LinearMcp;
-use crate::container::{ContainerSettings, SessionContainer, network_name};
+use crate::container::{ContainerSettings, GIT_CONFIG_FILE, SessionContainer, network_name};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
@@ -572,6 +572,17 @@ impl DockerBackend {
             BackendError::failed(format!(
                 "the container step: the agent's MCP file {} could not be written or removed ({error})",
                 mcp.display()
+            ))
+        })?;
+        // The commit author, written on every start like `mcp.json` and for a sharper reason: it is this build's
+        // file rather than pi's, so a resume must carry this build's rendering and not whatever the container
+        // before it left in the directory. `agent::ensure_home` seeds only what is not there, which is the rule
+        // that would keep a stale one.
+        let author = home.join(GIT_CONFIG_FILE);
+        write_git_config(&author).map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the agent's gitconfig {} could not be written ({error})",
+                author.display()
             ))
         })?;
         container
@@ -1199,6 +1210,18 @@ fn write_mcp_config(path: &Path, mode: LinearMcp, dummy: &str) -> std::io::Resul
     Ok(McpConfig::Written(path.to_path_buf()))
 }
 
+/// Write the session's commit author at `path`: the file `GIT_CONFIG_GLOBAL` names inside the container.
+///
+/// A session's container has a working repository and no git author — measured in the agent image, `git var
+/// GIT_AUTHOR_IDENT` answers `Author identity unknown`, there is no `/etc/gitconfig` and `$HOME` is the image's —
+/// so every `git commit` an agent makes fails until it passes `-c user.name=… -c user.email=…` itself. The file is
+/// [`crate::container::git_config`] from [`crate::snapshot::IDENTITY`], the pair a WIP snapshot and a merge commit
+/// already carry, so one build stamps one author (ADR-0103). It is not a credential: `user.name` and `user.email` are
+/// two strings the resulting `git log` shows to everybody, and this file holds nothing else.
+fn write_git_config(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, crate::container::git_config())
+}
+
 /// Whether pi accepted a command that has nothing else to say, or the reason it did not.
 fn accept(operation: &str, reply: &crate::agent::Reply) -> Result<(), BackendError> {
     if reply.success {
@@ -1297,6 +1320,30 @@ mod tests {
             write_mcp_config(&path, LinearMcp::Off, "hs-dummy-test")
                 .expect("nothing to remove is fine"),
             McpConfig::Nothing
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launch's gitconfig is `container::git_config`'s text, and a second start replaces what an earlier one
+    /// left: the first half is the text a start writes, the second plants a different file and asserts it was
+    /// overwritten, which is the fact that separates this from `agent::ensure_home`'s seed-what-is-not-there rule.
+    #[test]
+    fn the_gitconfig_is_the_builds_author_and_a_second_start_rewrites_it() {
+        let dir = scratch("gitconfig-file");
+        let path = dir.join(GIT_CONFIG_FILE);
+        write_git_config(&path).expect("the file is writable");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file was written"),
+            crate::container::git_config(),
+            "the file a start writes is the commit author and nothing else"
+        );
+        std::fs::write(&path, "[user]\n\tname = an earlier start\n")
+            .expect("the decoy is writable");
+        write_git_config(&path).expect("a second start rewrites it");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file was rewritten"),
+            crate::container::git_config(),
+            "a start keeps what an earlier one wrote instead of writing this build's author"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
