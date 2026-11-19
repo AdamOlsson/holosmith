@@ -34,7 +34,13 @@ pub const REF_PREFIX: &str = "refs/holosmith/wip/";
 /// The commit message spec item 9 spells.
 pub const MESSAGE: &str = "holosmith snapshot";
 
-/// The identity the snapshot commit carries. `-c` on the command, never a global config write.
+/// The pair a snapshot commit carries, and the one the build gives a session.
+///
+/// The snapshot passes it as `-c user.name=… -c user.email=…` on its own `commit-tree`, because the snapshot is the
+/// host's commit and takes no config from the worktree. The same pair is also written into a session's
+/// `pi-home/gitconfig`, which `GIT_CONFIG_GLOBAL` names for every git process in the container
+/// ([`crate::container::git_config`]): a snapshot and the agent's own commits are one author, which is the point of
+/// one constant (ADR-0103).
 pub const IDENTITY: [(&str, &str); 2] = [
     ("user.name", "holosmith"),
     ("user.email", "holosmith@localhost"),

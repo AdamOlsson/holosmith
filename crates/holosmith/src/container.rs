@@ -99,6 +99,34 @@ pub fn proxy_url(session_id: &str) -> String {
     format!("http://{session_id}@{PROXY_ALIAS}:{}", crate::egress::PORT)
 }
 
+/// The file inside a session's pi-home that gives its commits an author.
+///
+/// Not pi's: git's global config, in the one writable directory a session has. A container's `$HOME` is the
+/// image's, and the image carries no `/etc/gitconfig`, so without this file `git var GIT_AUTHOR_IDENT` answers
+/// `Author identity unknown` and every `git commit` an agent makes fails until it passes
+/// `-c user.name=… -c user.email=…` itself (ADR-0103).
+pub const GIT_CONFIG_FILE: &str = "gitconfig";
+
+/// The variable that names [`GIT_CONFIG_FILE`] to every git process in the container.
+///
+/// Named for the idea, like [`PROXY_ENV`] and [`SESSION_ID_ENV`], because the value is a path the container's
+/// pi-home composes and no other module spells.
+pub const GIT_CONFIG_ENV: &str = "GIT_CONFIG_GLOBAL";
+
+/// What [`GIT_CONFIG_FILE`] holds: one `[user]` section, from [`crate::snapshot::IDENTITY`].
+///
+/// The pair a **WIP snapshot** and a **Merge** commit already carry, so a session's history and the snapshots
+/// beside it name one author. It is not a credential: `user.name` and `user.email` are two strings every `git log`
+/// prints, and this file holds those two and nothing else (ADR-0103).
+pub fn git_config() -> String {
+    let mut text = String::from("[user]\n");
+    for (key, value) in crate::snapshot::IDENTITY {
+        let name = key.strip_prefix("user.").unwrap_or(key);
+        text.push_str(&format!("\t{name} = {value}\n"));
+    }
+    text
+}
+
 /// A session's private network: `agents_<id>`, with this run's network prefix in front of it.
 ///
 /// The prefix is a value rather than a constant because the **smoke run** (item 10 step 2) must not touch the
@@ -582,6 +610,14 @@ impl SessionContainer {
         // through the egress proxy that is not there yet.
         arguments.push("--env".to_string());
         arguments.push(format!("PI_CODING_AGENT_DIR={}", self.home.display()));
+        // The commit author (ADR-0103), here rather than among the four switches below because it carries a path
+        // the way `PI_CODING_AGENT_DIR` does, and the file it names lives in that directory. It is not a switch:
+        // it is where git reads its global config, which is what a plain `git commit` in the container needs.
+        arguments.push("--env".to_string());
+        arguments.push(format!(
+            "{GIT_CONFIG_ENV}={}",
+            self.home.join(GIT_CONFIG_FILE).display()
+        ));
         for (name, value) in crate::agent::ENVIRONMENT {
             arguments.push("--env".to_string());
             arguments.push(format!("{name}={value}"));
@@ -1241,10 +1277,12 @@ mod tests {
         );
     }
 
-    /// The launch variables of spec item 2 — the agent's directory and the four switches — and the one port
-    ///  adds: what the preview listener will forward to, so the container is told rather than left to guess.
+    /// The launch variables of spec item 2 — the agent's directory and the four switches — the commit author's
+    /// file beside them, and the one port adds: what the preview listener will forward to, so the container is
+    /// told rather than left to guess. The sixth variable is the one ADR-0103 adds, and it is a path like the
+    /// first: a session's `git commit` has no author without it.
     #[test]
-    fn the_launch_environment_is_the_agent_directory_four_switches_and_the_preview_port() {
+    fn the_launch_environment_is_the_agent_directory_the_gitconfig_the_switches_and_the_port() {
         let container = container();
         let arguments = container.run_args();
         let mut environment: Vec<String> = Vec::new();
@@ -1259,6 +1297,8 @@ mod tests {
                 "HS_SESSION_ID=0123456789abcdef".to_string(),
                 "HS_PREVIEW_PORT=3000".to_string(),
                 "PI_CODING_AGENT_DIR=/var/lib/holosmith/sessions/0123456789abcdef/pi-home"
+                    .to_string(),
+                "GIT_CONFIG_GLOBAL=/var/lib/holosmith/sessions/0123456789abcdef/pi-home/gitconfig"
                     .to_string(),
                 "NO_PROXY=key-proxy,mcp-proxy".to_string(),
                 "PI_OFFLINE=1".to_string(),

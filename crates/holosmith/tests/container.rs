@@ -29,8 +29,8 @@ use std::process::{Command, Output};
 use holosmith::backend::{DockerBackend, Provisioned, SessionBackend, Step};
 use holosmith::config::LinearMcp;
 use holosmith::container::{
-    ContainerSettings, Limits, Mounts, PROXY_ALIAS, PROXY_NAME, SessionContainer, Source,
-    network_name,
+    ContainerSettings, GIT_CONFIG_ENV, GIT_CONFIG_FILE, Limits, Mounts, PROXY_ALIAS, PROXY_NAME,
+    SessionContainer, Source, network_name,
 };
 use holosmith::docker::Docker;
 use holosmith::sessions::{Session, Status};
@@ -46,6 +46,7 @@ const ID_RESUME: &str = "aaaabbbbccccdddd";
 const ID_START: &str = "1111222233334444";
 const ID_RACE: &str = "9999888877776666";
 const ID_PROXY: &str = "5555666677778888";
+const ID_AUTHOR: &str = "13579bdf2468ace0";
 
 /// A scratch repository under the workspace's `target/`, which the daemon can see.
 ///
@@ -439,6 +440,76 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
     );
 }
 
+#[test]
+fn a_commits_author_is_the_builds_and_a_plain_git_commit_works_in_the_container() {
+    // The container has the repository and, until this story, no git author: `git var GIT_AUTHOR_IDENT` in
+    // `agent-image` answered `Author identity unknown`, so every `git commit` an agent made failed until it passed
+    // `-c user.name=… -c user.email=…` itself. The measurement is a commit with **no** `-c` and no
+    // `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in the environment, and its author read back out of `git log` — the file's
+    // text on its own would only prove that a file was written (ADR-0103).
+    //
+    // The second half is a *resume*: the file is written on every start rather than seeded with the directory, so a
+    // session the first container left behind commits with the same author after its container is replaced. Both
+    // launches get the same environment read below, so neither can pass for an author its image supplied instead.
+    if !ready() {
+        return;
+    }
+    let runtime = runtime();
+    let scratch = Scratch::new("author", ID_AUTHOR);
+    scratch.project();
+    let settings = settings(&scratch.path);
+    let backend = DockerBackend::new(settings.clone());
+    let docker = settings.docker();
+    let session = session(ID_AUTHOR);
+    let container = SessionContainer::of(&settings, &session);
+    rm_container(&container.name);
+    docker.remove_network(&container.network);
+
+    start(&runtime, &backend, &session);
+    assert_the_launch_names_the_author_file_and_no_other_author(&docker, &container);
+    let committed = exec(
+        &container.name,
+        "cd /work && git commit --quiet --allow-empty -m 'the author is the build' && \
+         git log -1 --format='%an <%ae>'",
+    );
+    // The line is the evidence and the assertion is the fact: this is what `git log` answers for a commit the
+    // container made on its own.
+    println!("the container's last commit: {committed}");
+    assert_eq!(
+        committed, "holosmith <holosmith@localhost>",
+        "a plain `git commit` in the container does not carry the build's author"
+    );
+
+    // The same after a resume: a new container, the same file, the same author.
+    runtime.block_on(async {
+        backend.stop(&session).await.expect("a stop works");
+    });
+    assert!(
+        wait_gone(&docker, &container.name),
+        "`--rm` left the container behind for two seconds"
+    );
+    start(&runtime, &backend, &session);
+    assert_the_launch_names_the_author_file_and_no_other_author(&docker, &container);
+    let resumed = exec(
+        &container.name,
+        "cd /work && echo second > second.txt && git add second.txt && \
+         git commit --quiet -m 'the resumed container commits too' && \
+         git log -1 --format='%an <%ae>'",
+    );
+    println!("the resumed container's last commit: {resumed}");
+    assert_eq!(
+        resumed, "holosmith <holosmith@localhost>",
+        "a resumed session's commit does not carry the build's author"
+    );
+
+    runtime.block_on(async {
+        backend
+            .delete(&session, &Retained::nothing())
+            .await
+            .expect("the teardown works");
+    });
+}
+
 /// The limits the run test asks for: deliberately *not* the defaults, so "the limits come from config" is
 /// what the assertions prove.
 const TEST_LIMITS: Limits = Limits {
@@ -675,6 +746,52 @@ fn wait_gone(docker: &Docker, name: &str) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     false
+}
+
+/// The launch's environment names the commit author's file, and holds no other author.
+///
+/// The commit beside this read is evidence only if nothing else could have answered for the author: an image that
+/// baked a `/etc/gitconfig`, or that set `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, would turn the case green with
+/// `GIT_CONFIG_GLOBAL` doing nothing — the alternative ADR-0103 rejects because `cargo test` could then no longer
+/// see the mechanism at all. The name is asserted once, because Docker resolves a duplicated `--env` last-wins.
+fn assert_the_launch_names_the_author_file_and_no_other_author(
+    docker: &Docker,
+    container: &SessionContainer,
+) {
+    let json = docker
+        .inspect(&container.name, "{{json .Config.Env}}")
+        .expect("the running container answers for its environment");
+    let environment: Vec<String> =
+        serde_json::from_str(&json).expect("the environment is a JSON array of strings");
+    let mut named = environment
+        .iter()
+        .filter(|variable| variable.split('=').next() == Some(GIT_CONFIG_ENV));
+    let author = named
+        .next()
+        .expect("the launch does not name the commit author's file");
+    assert!(
+        named.next().is_none(),
+        "the launch names the commit author's file more than once: {environment:?}"
+    );
+    assert_eq!(
+        author,
+        &format!(
+            "{GIT_CONFIG_ENV}={}",
+            container.home.join(GIT_CONFIG_FILE).display()
+        ),
+        "the launch does not name the file this build writes"
+    );
+    for variable in &environment {
+        let name = variable.split('=').next().unwrap_or_default();
+        assert!(
+            !name.starts_with("GIT_AUTHOR_") && !name.starts_with("GIT_COMMITTER_"),
+            "the launch carries an author of its own, so the commit below does not measure the file: {variable}"
+        );
+        assert_ne!(
+            name, "GIT_CONFIG_SYSTEM",
+            "the launch redirects the system config at a file of its own: {variable}"
+        );
+    }
 }
 
 /// `docker exec s_<id> sh -c <script>`, answering its stdout.

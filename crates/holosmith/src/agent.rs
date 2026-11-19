@@ -74,7 +74,9 @@ pub const TEMPLATE: &str = include_str!("../templates/pi-home/settings.json");
 /// proxy aliases off the egress route: a model call through the key proxy must not be handed to it (item 2 §3), and
 /// a session's MCP url is plaintext on its own network, which only `HTTPS_PROXY` being the sole proxy variable set
 /// keeps out of it today — a fact a url should not have to depend on (ADR-0100).
-/// The fifth variable is the agent directory, which is a path and so is not in this table.
+/// The two variables outside this table that are paths rather than switches are both composed by
+/// [`crate::container::SessionContainer::run_args`]: `PI_CODING_AGENT_DIR`, and `GIT_CONFIG_GLOBAL` naming the
+/// `gitconfig` inside it, which is what gives a session's commits an author (ADR-0103).
 pub const ENVIRONMENT: [(&str, &str); 4] = [
     ("NO_PROXY", "key-proxy,mcp-proxy"),
     ("PI_OFFLINE", "1"),

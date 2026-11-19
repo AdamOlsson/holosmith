@@ -3309,9 +3309,10 @@ PROBE
   done
 
   # The real keys are in `keys.toml` and nowhere a session can reach: not in the session's directory (which is a
-  # mount), not in the container's environment, and not in its mounts. `models.json` and `mcp.json` are the only two
-  # files the agent reads that could carry a credential, and both carry the dummy — a tool's key is a real key like
-  # a provider's, so the same grep covers both tables.
+  # mount), not in the container's environment, and not in its mounts. `models.json` and `mcp.json` are the two files
+  # the agent reads that could carry a credential, and both carry the dummy — a tool's key is a real key like a
+  # provider's, so the same grep covers both tables. The third file a start writes into the pi-home is `gitconfig`,
+  # and it is not one of them: it holds the commit author's two strings, which every `git log` prints anyway.
   real_key='sk-ant-toggle-real-do-not-leak'
   real_tool_key='lin_api_toggle_real_do_not_leak'
   for id in "$off_id" "$on_id"; do

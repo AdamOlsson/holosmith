@@ -226,7 +226,9 @@ the two. Facts that cost an hour when you learn them the hard way:
   `git worktree add` from a commit the repository already has — no fetch, no remote — so a repository with no
   commit cannot be provisioned from. The mounts are the worktree at `/work`, the repository's `.git` at its own
   host path, and `.git/hooks` + `.git/config` read-only over it (ADR-0035). The agent's `pi-home` and its logs
-  live under the **data root**, so a Docker session's data root has to be a path the daemon can see too.
+  live under the **data root**, so a Docker session's data root has to be a path the daemon can see too. Every
+  start writes `<data>/sessions/<id>/pi-home/gitconfig` and names it with `GIT_CONFIG_GLOBAL`, which is what lets a
+  plain `git commit` in the container work: without it the image has no author to stamp and git refuses (ADR-0103).
 - **The container is the agent**, and its shape is one value (ADR-0039, `container.rs`): attached (`-i`, never
   `--detach`), `--rm --init --cap-drop ALL --security-opt no-new-privileges`, one `--internal` network per session
   (`agents_<id>`), the five mounts, and the four switches that keep pi off the network (`NO_PROXY=key-proxy,mcp-proxy`,
