@@ -1,7 +1,7 @@
 # TODO
 
 ## Holosmith To Be Issues
-- configurable default model to deepseek-v4.1-flash from opencode-go
+- make the new-session default model configurable per machine (the fixed default is now `opencode-go/deepseek-v4.1-flash`)
 - develop holosmith using holosmith
 - patch version increments per issue
 - serve page over https, and deny http

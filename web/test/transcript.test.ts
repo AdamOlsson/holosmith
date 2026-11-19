@@ -20,7 +20,8 @@ import {
   HOST_ADD_LABEL,
   HOST_FORCE_LABEL,
   NO_CREATE_TARGET,
-  EXAMPLE_MODEL,
+  DEFAULT_MODEL,
+  FALLBACK_MODEL,
   modelPrefill,
   noKeyNotice,
   targetKeyFacts,
@@ -1741,31 +1742,34 @@ test("the button says which machine before the click, and a hub with nothing to 
 
 test("the model field starts at a provider this machine has a key for", () => {
   const defaultProvider = "opencode-go";
-  // The fresh machine the story is about: one key, and it is the default provider's.
+  // The fresh machine the story is about: one key, and it is the default provider's. The literal is the assertion —
+  // interpolating the constant would pass even if the constant named a model nothing in this build replays.
   assert.equal(
     modelPrefill({ providers: [defaultProvider], default_provider: defaultProvider }),
-    `opencode-go/${EXAMPLE_MODEL}`,
+    "opencode-go/deepseek-v4.1-flash",
   );
+  assert.equal(DEFAULT_MODEL, "deepseek-v4.1-flash");
   // The default provider wins even when another key sorts (or is listed) before it: this is the machine's own
   // first row, not the list's first element.
   assert.equal(
     modelPrefill({ providers: ["anthropic", defaultProvider], default_provider: defaultProvider }),
-    `opencode-go/${EXAMPLE_MODEL}`,
+    "opencode-go/deepseek-v4.1-flash",
   );
   // A machine with a key for something else starts at the first provider it does have — the list is in table order,
   // so that choice is the same on every load — and still names it. That pair is an **example the operator edits**:
-  // only `opencode-go/${EXAMPLE_MODEL}` is a provider and model this build measured together, and nothing here can
-  // know another provider's catalog. The qualified form is still the one to start from, because a bare id is the
-  // ambiguity this prefill exists to remove.
+  // nothing here can know another provider's catalog, and `claude-haiku-5-5` was measured on the default provider,
+  // not on this one, so the fallback keeps the tail of that measured pair. The qualified form is still the one to
+  // start from, because a bare id is the ambiguity this prefill exists to remove.
   assert.equal(
     modelPrefill({ providers: ["anthropic", "openai"], default_provider: defaultProvider }),
-    `anthropic/${EXAMPLE_MODEL}`,
+    "anthropic/claude-haiku-5-5",
   );
+  assert.equal(FALLBACK_MODEL, "claude-haiku-5-5");
   // No key at all: the field and the sentence below it name the same provider, so `key set` is the command that makes
   // the value the operator is looking at real.
   assert.equal(
     modelPrefill({ providers: [], default_provider: defaultProvider }),
-    `opencode-go/${EXAMPLE_MODEL}`,
+    "opencode-go/deepseek-v4.1-flash",
   );
   // Always `provider/model`: a bare id is the shape pi answers with `ambiguous` when several providers have a key.
   for (const keys of [
@@ -1809,10 +1813,12 @@ test("the form's facts are the selected machine's, and an unanswered peer names 
   const unknown = targetKeyFacts("workshop", own, null);
   assert.deepEqual(unknown, { providers: [], default_provider: "opencode-go" });
   // Which is the default provider's own qualified example: the field is never empty and never a bare id.
-  assert.equal(modelPrefill(unknown), `opencode-go/${EXAMPLE_MODEL}`);
+  assert.equal(modelPrefill(unknown), "opencode-go/deepseek-v4.1-flash");
+  // A peer that has not answered yet still gets the default tail, qualified with the provider id it named — here a
+  // hypothetical build whose first row is `groq`.
   assert.equal(
     modelPrefill(targetKeyFacts("workshop", { providers: ["anthropic"], default_provider: "groq" }, null)),
-    `groq/${EXAMPLE_MODEL}`,
+    "groq/deepseek-v4.1-flash",
   );
 });
 

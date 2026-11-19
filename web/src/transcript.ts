@@ -1362,26 +1362,36 @@ export const NO_CREATE_TARGET =
 // spells it.
 export type KeyFacts = { providers: string[]; default_provider: string };
 
-// The one model id the page names: the tail of `opencode-go/claude-haiku-5-5`, the model this build's credential
-// path was measured with (ADR-0050, ADR-0093). One constant rather than a table of every provider's catalog, which
-// nothing here could keep current — so on a machine whose key is **another** provider this id and that provider are
-// a pair nothing measured, an example the operator edits. The qualified form is still worth starting from: the bare
-// id is resolved across every provider that has a key, and pi answers several candidates with `status: "ambiguous"`
-// (the reading ADR-0050's measurement exists to remove), while `<provider>/` at least names one.
-export const EXAMPLE_MODEL = "claude-haiku-5-5";
+// The model the form starts on when the machine's default provider has a key: `deepseek-v4.1-flash`, the tail of
+// the `opencode-go` row on the `openai-completions` shape ADR-0097 added to it — the model the smoke recording
+// captures and the keyed create tests store, though ADR-0097 says the real-key turn for it is still owed (ADR-0104). The
+// constant is coupled to the provider table's first row, because that is what `default_provider` is: a release that
+// made another provider the first row would have to pick that row's tail with it. One constant rather than a table
+// of every provider's catalog, which nothing here could keep current, and the qualified form is still worth
+// starting from: the bare id is resolved across every provider that has a key, and pi answers several candidates
+// with `status: "ambiguous"` (the reading ADR-0050's measurement exists to remove), while `<provider>/` at least
+// names one.
+export const DEFAULT_MODEL = "deepseek-v4.1-flash";
+
+// The example tail for a machine whose only key is another provider: `claude-haiku-5-5`, the tail of the pair the
+// credential path measured, `opencode-go/claude-haiku-5-5` (ADR-0050, ADR-0093) — the model was measured, not this
+// provider's pair. Nothing here knows this provider's catalog, so the pair stays an example the operator edits, and
+// `DEFAULT_MODEL` is the tail this build's own recording captures.
+export const FALLBACK_MODEL = "claude-haiku-5-5";
 
 // The model field's starting value: `<provider>/<model>`, never a bare id.
 //
 // The provider is the machine's default when this machine has a key for it, else the first one it does have (the list
 // is in table order, so that answer is stable), else the default again: a machine with no key starts the field at the
-// provider the sentence below tells the operator to store one for, so the two agree. Only the default arm is a pair
-// this build measured; the other arm is the same example qualified with whichever provider the machine has, and the
-// operator owns the tail (see `EXAMPLE_MODEL`).
+// provider the sentence below tells the operator to store one for, so the two agree. The tail follows the same split:
+// the default arm is `DEFAULT_MODEL`, the tail the smoke recording captures and the keyed create tests store; a
+// fallback provider gets `FALLBACK_MODEL` qualified with itself, an example the operator owns (see `FALLBACK_MODEL`).
 export function modelPrefill(keys: KeyFacts): string {
   const provider = keys.providers.includes(keys.default_provider)
     ? keys.default_provider
     : (keys.providers[0] ?? keys.default_provider);
-  return `${provider}/${EXAMPLE_MODEL}`;
+  const model = provider === keys.default_provider ? DEFAULT_MODEL : FALLBACK_MODEL;
+  return `${provider}/${model}`;
 }
 
 // What the form says beside itself on a machine with no provider key: the command, with the machine's own default

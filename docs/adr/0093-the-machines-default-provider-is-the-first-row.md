@@ -84,13 +84,15 @@ looks.
 ## D4 — the form starts at a provider, and says the command when there is none
 
 The model field's starting value is `<provider>/<model>`, never a bare id: the machine's default provider when it
-has a key for it, otherwise the first provider it does have, otherwise the default again. One model-id constant,
-not a table — nothing in this repository can keep a catalog current — and the id it names is the tail of
-`opencode-go/claude-haiku-5-5`, the model this build's credential path was measured with. That pair is the one
-measured combination; the field's other arm is the same tail qualified with whichever provider a non-default
-machine holds, which is an example **the operator edits**, because nothing in this repository can know that
-provider's catalog. It is still the right starting value: the alternative the issue names is a bare id, which pi's
-resolver answers with `ambiguous` when several providers have a key.
+has a key for it, otherwise the first provider it does have, otherwise the default again. Two model-id constants,
+not a table — nothing in this repository can keep a catalog current — and the default arm's tail is
+`deepseek-v4.1-flash` (ADR-0104), while the fallback arm keeps `claude-haiku-5-5`, the tail of the pair this
+build's credential path was measured with on the default provider. The default pair is the one this build's smoke
+fixture replays and the keyed create tests store, though ADR-0097 still owes the real-key turn for it; the field's other
+arm is that fallback tail qualified with whichever provider a non-default machine holds, which is an example **the
+operator edits**, because nothing in this repository can know that provider's catalog. It is still the right
+starting value: the alternative the issue names is a bare id, which pi's resolver answers with `ambiguous` when
+several providers have a key.
 
 "The machine" here is the machine the picker names, which is not always the one drawing the page. A create posts to
 `POST /api/hosts/<host>/sessions`, so on a `hub` — where `createTargets` offers peers only — every fact this form
@@ -109,6 +111,11 @@ error paragraph, because a refusal replaces that paragraph and this fact is true
 button. The key proxy's `503` keeps its shape and becomes reachable for the first time: the default provider now
 has a route for it to name.
 
+**Amended by ADR-0104:** the default arm's tail is now `deepseek-v4.1-flash`, the model this build's smoke fixture
+replays and the keyed create tests store, on the `openai-completions` shape ADR-0097 added; the non-default arm keeps
+`claude-haiku-5-5` as the example the operator edits. Everything else in this section stands — the provider rule,
+the target rule, the no-key sentence and the refusal shape are unchanged.
+
 ## What measures it
 
 - `key::tests::the_first_row_is_the_default_provider_and_the_refusal_opens_with_it` pins the id, that it is the
@@ -122,10 +129,11 @@ has a route for it to name.
   list. The same file's configs name a data root of their own: a test left on the default one would read the
   machine running it.
 - `web/test/transcript.test.ts` pins the prefill's four arms — the default with a key, the default over an earlier
-  key, the first key when the default has none, and no key — and the no-key sentence built from the id it was given
-  rather than a literal. It also pins the target rule: this machine's own answer for `LOCAL_HOST`, a peer's own
-  answer for a peer, the default provider's qualified example while a peer's answer is still out, and no sentence
-  about a peer's store.
+  key, the first key when the default has none, and no key — and both tails literally: the default arm's
+  `opencode-go/deepseek-v4.1-flash` and the fallback arm's `<provider>/claude-haiku-5-5` (ADR-0104). It also pins the
+  no-key sentence built from the id it was given rather than a literal, and the target rule: this machine's own answer
+  for `LOCAL_HOST`, a peer's own answer for a peer, the default provider's qualified example while a peer's answer is
+  still out, and no sentence about a peer's store.
 
 ## Refused
 

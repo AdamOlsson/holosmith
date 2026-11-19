@@ -875,8 +875,8 @@ mod tests {
 
     #[test]
     fn a_qualified_model_seeds_the_provider_beside_the_model_it_serves() {
-        // What the form prefills, and what a create that named its provider answers: pi reads the two keys and
-        // resolves one model instead of guessing among the providers the machine has a key for.
+        // A qualified model the form may send, and what a create that named its provider answers: pi reads the two
+        // keys and resolves one model instead of guessing among the providers the machine has a key for.
         let document: Value =
             serde_json::from_str(&seed(&session_with_model("opencode-go/claude-haiku-5-5")))
                 .expect("the seed is JSON");
