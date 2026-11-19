@@ -3,8 +3,9 @@
 //! The command is two depths of **one list**, because that is how the spec uses it: `doctor --quick` is what
 //! `server deploy` step 1 runs and what the unit file runs as `ExecStartPre` (item 10 §5), and `doctor --full`
 //! is item 10 §7 — run *after* the deploy, once the machine is already serving — which adds the egress
-//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state and the
-//! agent image's pi version.
+//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state, the
+//! agent image's pi version and one line per tool row saying whether the key this machine stores for it still
+//! answers ([`tool_key`], ADR-0101).
 //!
 //! Three rules hold the design together:
 //!
@@ -13,7 +14,9 @@
 //! - **Only a failure changes the exit code.** An [`Outcome::Unknown`] is "this check did not produce a verdict
 //!   about whether `serve` may run here", and its sentence says what was missing and what does need it. That is
 //!   ADR-0044's rule for the self-test, applied to a machine with no systemd and no Tailscale daemon — where
-//!   `serve` by hand is a supported way to run (ADR-0054).
+//!   `serve` by hand is a supported way to run (ADR-0054). The tool-key check leans on it again: a host that
+//!   answered 404, a TLS client that could not start and a machine with no key stored are all "not measured",
+//!   and only a 401 or a 403 is a failure.
 //! - **`doctor` starts nothing that outlives it.** The self-test removes its own network and probe container,
 //!   the image question is a `docker run --rm --network none`, and the proxies are *read*, not started. There is
 //!   no unit file to write: `ExecStartPre=holosmith doctor --quick` is the line, and this story's contract
@@ -36,7 +39,8 @@ use crate::container::PROXY_ALIAS;
 use crate::db;
 use crate::docker::Docker;
 use crate::images::{Expectation, Kind};
-use crate::key::KEY_PROXY_ALIAS;
+use crate::key::{self, KEY_PROXY_ALIAS, Store, Tool};
+use crate::mcpproxy::{self, Probe};
 use crate::preflight::{self, Check, Finding, Outcome};
 use crate::proxies;
 use crate::release::{self, Release};
@@ -275,6 +279,12 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
             because,
         ));
         findings.push(image_check(config, machine, image, docker_ok, because));
+        // One finding per tool row, after the container questions so those stay contiguous. A stored tool key is a
+        // value `serve` reads per request, so whether it still answers is the one fact a rotation cannot show
+        // without a session: `doctor --full` asks it here (ADR-0101).
+        for tool in key::TOOLS {
+            findings.push(tool_key(config, tool));
+        }
     }
     Report { depth, findings }
 }
@@ -328,8 +338,132 @@ fn openssl(program: &Path) -> Finding {
     )
 }
 
-/// Whether this machine has systemd, where "not there" is a fact rather than a failure.
+/// Whether the key this machine stores for one tool still answers, asked of the tool's own host.
 ///
+/// A tool key is rotated with `printf '%s' <key> | holosmith key set <tool>`, and nothing else on this machine shows
+/// whether the new value works: the MCP proxy reads the store per request, so the next session call would be the
+/// first evidence, and a revoked key would arrive as a tool call's 401 long after the rotation looked successful.
+/// This is the one measurement that closes that gap (ADR-0101).
+///
+/// **`--full` only.** `--quick` is the unit's `ExecStartPre` (item 10 §5), so a check there refuses a boot, and a
+/// machine whose stored key is refused runs sessions that never call a tool — the key is not a machine requirement,
+/// and it is nobody's boot to refuse.
+///
+/// A **hub** is asked nothing: it runs no sessions, so nothing on it spends a tool key, and this function returns
+/// before it reads the store or touches the network. The sentence says that in this check's own words rather than in
+/// the container checks' — whether a stored key answers is measured on a server with no session, so a reason borrowed
+/// from them would contradict the fact this line reports.
+fn tool_key(config: &Config, tool: &Tool) -> Finding {
+    if config.role == Role::Hub {
+        return Finding::unknown(
+            Check::ToolKey,
+            not_measured(
+                &format!("whether the stored {} key still answers", tool.id),
+                "a hub runs no sessions, so nothing on it spends a tool key",
+            ),
+        );
+    }
+    let store = Store::from_data_root(&config.data_root);
+    let stored = store
+        .load()
+        .map(|secrets| Store::tool_key(&secrets, tool.id).map(str::to_string))
+        .map_err(|error| error.to_string());
+    tool_key_from(&store, tool, stored, |key| {
+        // `doctor` is synchronous and is never called from inside a runtime, so a runtime of its own is the smallest
+        // way to spend the one TLS client the proxies use. A runtime that cannot be built is "not measured" — there
+        // is no fact about the key in a machine that could not start one (ADR-0101).
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(mcpproxy::probe(tool, key)),
+            Err(error) => Probe::Unmeasured(format!(
+                "an async runtime for the TLS client could not be built ({error})"
+            )),
+        }
+    })
+}
+
+/// The four arms of [`tool_key`], as one function of the store's read and the probe's answer.
+///
+/// | state | outcome |
+/// | --- | --- |
+/// | the store cannot be read | **fail**, naming the path, the error and the command that rewrites it |
+/// | no key is stored for this row | **unknown**, in the MCP proxy's own 503 sentence |
+/// | the key answers 2xx | **pass**, naming the status, the endpoint and the host |
+/// | it answers 401 or 403 | **fail** — the key is wrong or revoked, and a new one is the fix |
+/// | any other status | **unknown** — not a verdict about the key |
+/// | no status at all | **unknown**, naming what stopped the measurement |
+///
+/// The probe is a closure rather than a value because it is only spent when a key is stored: a machine with no key is
+/// one line and no request, and a hub is neither (see [`tool_key`]). `stored` carries the store's own `Err` so the
+/// first arm is the readable sentence a missing permission needs.
+fn tool_key_from(
+    store: &Store,
+    tool: &Tool,
+    stored: Result<Option<String>, String>,
+    probe: impl FnOnce(&str) -> Probe,
+) -> Finding {
+    let key = match stored {
+        Err(error) => {
+            return Finding::fail(
+                Check::ToolKey,
+                format!(
+                    "the key store at {} could not be read ({error}): a {} key it holds cannot be spent, and \
+                     `holosmith key set {}` writes a store this machine can read again",
+                    store.path().display(),
+                    tool.id,
+                    tool.id
+                ),
+            );
+        }
+        Ok(None) => {
+            return Finding::unknown(Check::ToolKey, mcpproxy::no_key_sentence(tool.id));
+        }
+        Ok(Some(key)) => key,
+    };
+    match probe(&key) {
+        Probe::Status { status, endpoint } => {
+            let target = format!("POST {endpoint} on {}", tool.host);
+            match status {
+                200..=299 => Finding::pass(
+                    Check::ToolKey,
+                    format!(
+                        "the stored {} key answered {status} for {target}, so a session's next tool call spends one \
+                         this host accepts",
+                        tool.id
+                    ),
+                ),
+                401 | 403 => Finding::fail(
+                    Check::ToolKey,
+                    format!(
+                        "the stored {} key is refused: {target} answered {status}, so the key is wrong or has been \
+                         revoked — issue a new one and store it with `holosmith key set {}`",
+                        tool.id, tool.id
+                    ),
+                ),
+                _ => Finding::unknown(
+                    Check::ToolKey,
+                    format!(
+                        "{target} answered {status}, which says nothing about whether the stored {} key is accepted: \
+                         this is not a verdict about the key",
+                        tool.id
+                    ),
+                ),
+            }
+        }
+        Probe::Unmeasured(said) => Finding::unknown(
+            Check::ToolKey,
+            format!(
+                "whether the stored {} key still answers was not measured ({said}): this is not a verdict about the \
+                 key",
+                tool.id
+            ),
+        ),
+    }
+}
+
+/// Whether this machine has systemd, where "not there" is a fact rather than a failure.
 /// `/run/systemd/system` exists exactly while systemd is the init, and its absence is the supported way to run
 /// `serve` by hand (AGENTS.md says so). A `server deploy` is where systemd becomes a prerequisite,
 /// and that step is where the refusal belongs — refusing here would make `doctor` unrunnable on the machine that
@@ -1429,6 +1563,186 @@ mod tests {
             "the failure does not name the step that builds one: {}",
             finding.sentence
         );
+    }
+
+    /// A tool row's finding, in the four sentences an operator can meet (ADR-0101). The store is a path this test
+    /// wrote, and the probe is a closure, so no arm needs a socket, a key or a daemon.
+    #[test]
+    fn a_tool_key_is_one_of_four_sentences_and_only_a_refusal_is_a_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-doctor-tool-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("secrets")).expect("the scratch store is creatable");
+        let store = Store::new(dir.join("secrets").join("keys.toml"));
+        let tool = key::tool("linear").expect("the table names linear");
+
+        // No key stored: the MCP proxy's own 503 sentence, so the report and the session's refusal are one spelling
+        // of one fact.
+        let none = tool_key_from(&store, tool, Ok(None), |_| {
+            panic!("a machine with no key must not be probed")
+        });
+        assert_eq!(none.outcome, Outcome::Unknown);
+        assert_eq!(none.sentence, mcpproxy::no_key_sentence("linear"));
+        assert!(
+            none.sentence.contains("key set linear"),
+            "{}",
+            none.sentence
+        );
+
+        // A store that cannot be read is the one failure a rotation can leave behind, and it names the path, the
+        // error and the command that writes a readable one.
+        let unreadable = tool_key_from(
+            &store,
+            tool,
+            Err("the key file's line 3 is not key = value".to_string()),
+            |_| panic!("an unreadable store has no key to probe"),
+        );
+        assert_eq!(unreadable.outcome, Outcome::Fail, "{}", unreadable.sentence);
+        assert!(
+            unreadable
+                .sentence
+                .contains(&store.path().display().to_string()),
+            "the failure does not name the store: {}",
+            unreadable.sentence
+        );
+        assert!(
+            unreadable.sentence.contains("not key = value"),
+            "the failure does not carry the store's own error: {}",
+            unreadable.sentence
+        );
+        assert!(
+            unreadable.sentence.contains("key set linear"),
+            "the failure names no fix: {}",
+            unreadable.sentence
+        );
+
+        // A stored key that answers is the pass, and it names what was asked and what answered.
+        let accepted = tool_key_from(
+            &store,
+            tool,
+            Ok(Some("lin_api_rotated".to_string())),
+            |key| {
+                assert_eq!(key, "lin_api_rotated", "the probe spends the stored key");
+                Probe::Status {
+                    status: 200,
+                    endpoint: "/mcp",
+                }
+            },
+        );
+        assert_eq!(accepted.outcome, Outcome::Pass, "{}", accepted.sentence);
+        for said in ["200", "POST /mcp", "mcp.linear.app"] {
+            assert!(
+                accepted.sentence.contains(said),
+                "the pass does not name {said}: {}",
+                accepted.sentence
+            );
+        }
+
+        // 401 and 403 are the two statuses that are a verdict about the key: revoked or wrong.
+        for status in [401, 403] {
+            let refused = tool_key_from(&store, tool, Ok(Some("lin_api_old".to_string())), |_| {
+                Probe::Status {
+                    status,
+                    endpoint: "/mcp",
+                }
+            });
+            assert_eq!(refused.outcome, Outcome::Fail, "{}", refused.sentence);
+            assert!(
+                refused.sentence.contains(&status.to_string()),
+                "the failure does not name the status: {}",
+                refused.sentence
+            );
+            assert!(
+                refused.sentence.contains("key set linear"),
+                "the failure names no fix: {}",
+                refused.sentence
+            );
+        }
+
+        // Every other status is not a verdict about the key, so it must not change the exit code: a 404 on the
+        // endpoint or a 500 from the host says nothing about whether this machine's key is good.
+        for status in [400, 404, 500, 503] {
+            let unclear = tool_key_from(
+                &store,
+                tool,
+                Ok(Some("lin_api_rotated".to_string())),
+                |_| Probe::Status {
+                    status,
+                    endpoint: "/mcp",
+                },
+            );
+            assert_eq!(unclear.outcome, Outcome::Unknown, "{}", unclear.sentence);
+            assert!(!unclear.is_failure());
+            assert!(
+                unclear.sentence.contains(&status.to_string()),
+                "the line does not say what answered: {}",
+                unclear.sentence
+            );
+        }
+
+        // And a measurement that never happened is unknown, carrying the sentence of what stopped it.
+        let stopped = tool_key_from(
+            &store,
+            tool,
+            Ok(Some("lin_api_rotated".to_string())),
+            |_| Probe::Unmeasured("the host did not answer before the proxy's bound".to_string()),
+        );
+        assert_eq!(stopped.outcome, Outcome::Unknown, "{}", stopped.sentence);
+        assert!(
+            stopped.sentence.contains("before the proxy's bound"),
+            "the line does not say why it was not measured: {}",
+            stopped.sentence
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hub is asked nothing about a tool key, and the proof is the store it did not read: an unreadable one would
+    /// be a **fail** on any other machine.
+    #[test]
+    fn a_hub_is_not_asked_about_a_tool_key_and_reads_no_store() {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-doctor-hub-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("secrets")).expect("the scratch store is creatable");
+        std::fs::write(dir.join("secrets").join("keys.toml"), "[not-a-table]\n")
+            .expect("the unreadable store is writable");
+        let config = Config {
+            role: Role::Hub,
+            data_root: dir.clone(),
+            ..Config::default()
+        };
+        let tool = key::tool("linear").expect("the table names linear");
+        let finding = tool_key(&config, tool);
+        assert_eq!(finding.outcome, Outcome::Unknown, "{}", finding.sentence);
+        assert!(
+            finding.sentence.contains("hub")
+                && finding.sentence.contains("nothing on it spends a tool key"),
+            "the sentence does not say why a hub is asked nothing: {}",
+            finding.sentence
+        );
+        // The reason is this check's own. A borrowed one said a tool key needs a session to spend it — measured false
+        // on a server with no session — and ended by naming a Docker question a `tool-key` line is not about.
+        for borrowed in ["needs a session to spend it", "Docker"] {
+            assert!(
+                !finding.sentence.contains(borrowed),
+                "the hub's line carries the container checks' reason ({borrowed}): {}",
+                finding.sentence
+            );
+        }
+        // The same store on a server is the failure arm, which is what makes the line above evidence of not reading
+        // it rather than of a store that happens to be readable.
+        let server = Config {
+            role: Role::Server,
+            ..config
+        };
+        let read = tool_key(&server, tool);
+        assert_eq!(read.outcome, Outcome::Fail, "{}", read.sentence);
+        assert!(
+            read.sentence.contains("could not be read"),
+            "{}",
+            read.sentence
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A machine whose container questions all answer "nothing there" — the daemon-less half of a machine.

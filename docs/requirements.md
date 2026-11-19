@@ -66,7 +66,8 @@ A tool's credential lives in the same file: `holosmith key set <tool-id>` stores
 knows — and `holosmith key revoke <tool-id>` forgets it. The MCP proxy (`hs_mcp`, reached by a session at
 `http://mcp-proxy:8090/<tool>/<endpoint>` with the session's dummy key) spends it, and it is joined to a session's
 network only when that session allows Internet access, so a tool's host is never reachable with the checkbox off
-(ADR-0098, ADR-0099).
+(ADR-0098, ADR-0099). [Rotating a tool key](keys.md) is the runbook for that credential, including the
+`doctor --full` line that says whether the host accepts the stored one.
 
 ## Install versus deploy
 

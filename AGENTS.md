@@ -38,8 +38,9 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
 | `README.md` | The human overview, including the getting-started path: install, key, project, phone, tailnet |
-| `docs/*.md` | Operator guides: requirements, egress, remote access, hub, troubleshooting, architecture |
+| `docs/*.md` | Operator guides: requirements, egress, remote access, hub, keys, troubleshooting, architecture |
 | `docs/config.md` | Every config key: type, default, rule, and what reads it |
+| `docs/keys.md` | The tool-key runbook: rotating a stored key, why no restart is needed, and the four `doctor --full` lines |
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |
@@ -262,6 +263,29 @@ Two failure signatures worth recognising first: a `502 the provider closed the c
 means the forwarded request declared a `Content-Length` it did not carry, and `401 … session=- … status=bad-key`
 for a session that exists means the proxy is reading a `keys.toml` from before the create — a file mount rather
 than the directory.
+
+## The stored tool key
+
+The tool table is a second credential (ADR-0098), spent by `hs_mcp` (ADR-0099), and **measured** by `doctor --full`'s
+`tool-key` finding (ADR-0101). A rotation is `printf '%s' '<new key>' | holosmith key set linear` and needs no
+restart — the proxy loads the store per request and mounts the directory — and this is the end-to-end that proves the
+new key is one Linear accepts. It needs a real key from the workspace's security settings, the internet, a daemon and
+a session whose `[linear] mcp` is not `off`:
+
+- inside the session's container, `pi mcp list` shows the **`linear`** server, and one `list_projects` tool call
+  answers;
+- `docker logs hs_mcp | tail` shows the call attributed to it — `session=<id> tool=linear host=mcp.linear.app
+  status=forwarded`;
+- `holosmith doctor --full` on that machine shows `tool-key: pass` for the key, and the same line turns `fail` on a
+  key revoked in the workspace's settings.
+
+What the gate measures instead, with **no key and no internet**: `scripts/verify.sh`'s `case_doctor_tool_key` runs the
+artifact three times against a stand-in `openssl` on `PATH` and asserts the three findings — `unknown` with no key
+stored, `fail` for a `401`, `pass` for a `200` — plus that `--quick` says nothing about it. The two layers under that
+are split by what each can see: `doctor`'s own unit tests pin the sentences and the hub arm, `tests/doctor.rs` drives
+the report's shape over a store it wrote (one `unknown` per row with no key, one `fail` per row over an unreadable
+store, and nothing at all on `--quick`) with no socket, and `mcpproxy`'s and `relay`'s unit tests pin the probe's
+bytes and the one `openssl s_client` argument list.
 
 ## Fixtures: re-recording one
 

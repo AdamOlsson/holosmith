@@ -98,6 +98,13 @@ pub enum Check {
     /// It is in this enum because it is reported like every other machine question and only `doctor` asks it: no
     /// startup check runs it, because a missing notification channel must not refuse a boot (ADR-0071's D9).
     Openssl,
+    /// Whether the key this machine stores for a tool still answers, one finding per [`crate::key::TOOLS`] row.
+    ///
+    /// Here for [`Openssl`](Self::Openssl)'s reason and [`Release`](Self::Release)'s: only `doctor --full` asks it, and
+    /// a word in a second table would be a second way for an operator's grep to miss it. It refuses no boot — a
+    /// machine that has stored no key runs sessions that never call the tool, which is a machine `serve` must start
+    /// (ADR-0101).
+    ToolKey,
     /// The release tree: what `current` resolves to, and whether the unit can execute through it.
     ///
     /// One word for one question, so an operator greps `release` and finds the tree rather than a `version` line. It is
@@ -124,6 +131,7 @@ impl Check {
             Self::Image => "image",
             Self::Openssl => "openssl",
             Self::Release => "release",
+            Self::ToolKey => "tool-key",
         }
     }
 }

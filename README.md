@@ -33,6 +33,7 @@ No `sudo` is needed for the install itself: it belongs to your own account, and 
 - [The agent cannot reach the Internet](docs/egress.md) — off by default, so `cargo` and `npm` fail.
 - [Use it from your phone](docs/remote-access.md) — the LAN, the tailnet, and where TLS comes from.
 - [Drive several machines from one page](docs/hub.md) — a hub and its host registry.
+- [Rotate a tool key](docs/keys.md) — store a new one and prove the host accepts it.
 - [Something broke](docs/troubleshooting.md) — start with `holosmith doctor`.
 - [Configuration](docs/config.md), [architecture](docs/architecture.md), [glossary](GLOSSARY.md),
   [decisions](docs/adr/).
