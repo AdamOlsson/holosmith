@@ -3005,8 +3005,9 @@ PY
 #
 # Then the halves that no container can show: `docker inspect`'s environment (identical modulo the session id,
 # which is the acceptance's "the difference is topology, not configuration"), the `hs_mcp` facts (alias, read-only
-# directory mount, `--cap-drop ALL`), each session's own `pi-home/mcp.json` (the proxy's alias, the table's full
-# endpoint and a deferred exposure, on **both** sessions because which of them may reach the proxy is the row's),
+# directory mount, `--cap-drop ALL`), each session's own `pi-home/mcp.json` (the entry named for the machine, the
+# proxy's alias, the table's full endpoint and a deferred exposure, on **both** sessions because which of them may
+# reach the proxy is the row's),
 # the two real keys' absence from every session directory and container, and a `kill` + `resume` pair after which
 # the network's endpoint count is the checkbox itself: **2** for the off session — the session and `hs_key`, which is
 # joined unconditionally — and **4**
@@ -3101,6 +3102,17 @@ case_internet_toggle() {
     id="${pair##*:}"
     mcp_text="$(cat "$data/sessions/$id/pi-home/mcp.json" 2>/dev/null)" ||
       fail "${name}_${label}_mcp_file" "the session has no pi-home/mcp.json: $data/sessions/$id/pi-home"
+    # The entry's key, not just its contents: the name is the machine's, because pi lets a repository replace a global
+    # entry of the same name and a session's file is the global scope (ADR-0102). `case` with a quoted expansion, so
+    # the pattern is the literal words the file carries rather than a regular expression reading them.
+    case "$mcp_text" in
+      *'"holosmith-linear"'*)
+        assertions=$((assertions + 1))
+        ;;
+      *)
+        fail "${name}_${label}_mcp_name" "mcp.json's entry is not named for the machine: $mcp_text"
+        ;;
+    esac
     case "$mcp_text" in
       *'"http://mcp-proxy:8090/linear/mcp"'*)
         assertions=$((assertions + 1))
@@ -10977,7 +10989,7 @@ PY
 case_doctor_tool_key() {
   local name=case_doctor_tool_key root="$repo_root/target/verify-doctor-tool-key-$$"
   local config="$WORK/config-doctor-tool-key.toml" shim="$root/bin" capture="$root/request.bin"
-  local key='lin_api_verify_rotated'
+  local key='lin_api_verify_rotated' accepted_line line
   rm -rf "$root"
   # `install -d -m 0755` and `-m 0700` for `case_doctor_quick`'s reason: `doctor`'s `perms` compares the tree against
   # the modes `server deploy` writes, and this shell's umask leaves directories wider than that. The fixture has to be
@@ -11056,17 +11068,24 @@ SH
     fail "$name/capture" "the stand-in TLS client was never started"
   fi
 
-  # 3. A stored key the host accepts: the pass, naming the status, the endpoint and the host.
+  # 3. A stored key the host accepts: the pass, naming the status, the endpoint and the host. It also names the mode,
+  # and this fixture config has no `[linear]` section — so the artifact must say `off`, and that this machine
+  # configures no session with it. A line claiming a session spends the key is false of a machine whose mode is the
+  # default, which is what this case's config is.
   PATH="$shim:$PATH" ANSWER="$root/answer-200" CAPTURE="$capture" \
     "$artifact" doctor --full --config "$config" --root "$root" \
     >"$WORK/$name.accepted.out" 2>&1 || true
   grep -q '^tool-key: pass: ' "$WORK/$name.accepted.out" ||
     fail "$name/accepted" "an accepted key is not a pass: $(cat "$WORK/$name.accepted.out")"
   assertions=$((assertions + 1))
-  for line in 200 'POST /mcp' mcp.linear.app; do
-    grep -q "^tool-key: pass: .*$line" "$WORK/$name.accepted.out" ||
-      fail "$name/accepted/name" "the pass does not name $line: $(grep '^tool-key: ' "$WORK/$name.accepted.out")"
-    assertions=$((assertions + 1))
+  accepted_line="$(grep '^tool-key: pass: ' "$WORK/$name.accepted.out")"
+  # `case` rather than a grep pattern: `[linear]` is a bracket expression to a regex, and this asserts the literal
+  # words the line has to carry.
+  for line in 200 'POST /mcp' mcp.linear.app '[linear] mcp is off'; do
+    case "$accepted_line" in
+      *"$line"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/accepted/name" "the pass does not name $line: $accepted_line" ;;
+    esac
   done
 
   # 4. `--quick` is the unit's `ExecStartPre` and asks none of it: a stored key must not decide whether a machine

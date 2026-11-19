@@ -40,7 +40,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `README.md` | The human overview, including the getting-started path: install, key, project, phone, tailnet |
 | `docs/*.md` | Operator guides: requirements, egress, remote access, hub, keys, troubleshooting, architecture |
 | `docs/config.md` | Every config key: type, default, rule, and what reads it |
-| `docs/keys.md` | The tool-key runbook: rotating a stored key, why no restart is needed, and the four `doctor --full` lines |
+| `docs/keys.md` | The tool-key runbook: rotating a stored key, why no restart is needed, and the five `doctor --full` lines |
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |
@@ -272,8 +272,8 @@ restart — the proxy loads the store per request and mounts the directory — a
 new key is one Linear accepts. It needs a real key from the workspace's security settings, the internet, a daemon and
 a session whose `[linear] mcp` is not `off`:
 
-- inside the session's container, `pi mcp list` shows the **`linear`** server, and one `list_projects` tool call
-  answers;
+- inside the session's container, `pi mcp list` shows the **`holosmith-linear`** server, and one `list_projects`
+  tool call answers;
 - `docker logs hs_mcp | tail` shows the call attributed to it — `session=<id> tool=linear host=mcp.linear.app
   status=forwarded`;
 - `holosmith doctor --full` on that machine shows `tool-key: pass` for the key, and the same line turns `fail` on a

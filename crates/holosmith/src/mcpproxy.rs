@@ -54,6 +54,18 @@ pub const MCP_PROXY_NAME: &str = "hs_mcp";
 /// The file pi reads a session's MCP servers from, inside the agent's own directory.
 pub const CLIENT_FILE: &str = "mcp.json";
 
+/// The one server that file carries, named for the machine rather than for the tool.
+///
+/// pi gives a **project** entry precedence over a global one of the same name, and the file this build writes is the
+/// global scope (`$PI_CODING_AGENT_DIR/mcp.json`) while a session's repository is loaded with `--approve`. A server
+/// called `linear` here would therefore be replaced by any repository that names one, and that repository's is the
+/// public host: a session cannot reach it and cannot complete OAuth, so the machine's entry would be configured and
+/// the session would have no Linear tools at all. The name is the machine's, so it carries the product's name.
+///
+/// Only pi's server name changes: the route, the tool table's id and every url still spell `linear`, and a tool name
+/// the model sees is `mcp__holosmith_linear__*`.
+pub const SERVER_NAME: &str = "holosmith-linear";
+
 /// The name a run with this container prefix gives it: `hs_mcp`, or `smoke_hs_mcp`.
 ///
 /// Prefixed for [`crate::container::proxy_name`]'s reason, and it is the key proxy's reason: this container mounts the
@@ -63,7 +75,11 @@ pub fn mcp_proxy_name(prefix: &str) -> String {
     format!("{prefix}{MCP_PROXY_NAME}")
 }
 
-/// The `mcp.json` a session's pi-home carries: one `linear` server on this proxy, with the session's dummy key.
+/// The `mcp.json` a session's pi-home carries: one [`SERVER_NAME`] server on this proxy, with the session's dummy key.
+///
+/// The entry's key is the constant and never [`key::tool`]'s id, because pi lets a repository's `.pi/mcp.json` replace
+/// a global entry of the same name: naming the server for the tool would hand any repository the power to replace the
+/// machine's entry with one a session cannot reach (ADR-0102).
 ///
 /// `Ok(None)` is [`LinearMcp::Off`] and only it, which is the whole of "off writes no file": the caller removes what
 /// an earlier start left rather than writing an entry a session cannot use (ADR-0100). `Ok(Some(text))` is a
@@ -96,7 +112,7 @@ pub fn client_config(mode: LinearMcp, dummy: &str) -> Result<Option<String>, Str
     let endpoint = endpoint(tool.endpoints, mode)?;
     let document = serde_json::json!({
         "mcpServers": {
-            (tool.id): {
+            (SERVER_NAME): {
                 "url": format!("http://{MCP_PROXY_ALIAS}:{MCP_PROXY_PORT}/{}{endpoint}", tool.id),
                 "headers": {"Authorization": format!("Bearer {dummy}")},
                 "exposure": "deferred",
@@ -965,18 +981,45 @@ mod tests {
         assert_eq!(status_of(""), None);
     }
 
-    /// One server entry out of a client document, so a test reads the file pi reads.
+    /// One server entry out of a client document, so a test reads the file pi reads. The document's one key is
+    /// [`SERVER_NAME`], because that name is the whole of what keeps a repository from replacing the entry.
     fn entry(text: &str) -> serde_json::Value {
         let document: serde_json::Value =
             serde_json::from_str(text).expect("the client configuration is JSON");
-        let servers = &document["mcpServers"];
-        let entry = servers["linear"].clone();
+        let servers = document["mcpServers"]
+            .as_object()
+            .expect("the servers are one object");
         assert_eq!(
-            servers.as_object().map(serde_json::Map::len),
-            Some(1),
-            "a session is configured with one server: {text}"
+            servers.keys().map(String::as_str).collect::<Vec<_>>(),
+            [SERVER_NAME],
+            "a session is configured with one server, named for the machine: {text}"
         );
-        entry
+        servers[SERVER_NAME].clone()
+    }
+
+    /// The server's name is not the tool's id, and that inequality is the point rather than a spelling: pi's
+    /// `loadMcpConfig` gives a **project** entry precedence over a global entry of the same name, a session's file is
+    /// the global scope, and `--approve` loads the repository's own `.pi/mcp.json` — so an entry named for the tool is
+    /// an entry any repository can replace, and the replacement is a public host a session cannot reach.
+    #[test]
+    fn the_server_is_named_for_the_machine_and_not_for_the_tool() {
+        let tool = key::tool("linear").expect("the table names linear");
+        assert_eq!(SERVER_NAME, "holosmith-linear");
+        assert_ne!(
+            SERVER_NAME, tool.id,
+            "a server named for the tool is one a repository's `.pi/mcp.json` may replace"
+        );
+        let document: serde_json::Value =
+            serde_json::from_str(&configured(LinearMcp::Write, "hs-dummy-mcp"))
+                .expect("the client configuration is JSON");
+        let servers = document["mcpServers"]
+            .as_object()
+            .expect("the servers are one object");
+        assert!(servers.contains_key(SERVER_NAME), "{document}");
+        assert!(
+            !servers.contains_key(tool.id),
+            "the tool's id is not the server's name: {document}"
+        );
     }
 
     #[test]

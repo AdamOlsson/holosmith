@@ -45,7 +45,8 @@ One `tool-key` line per tool the build knows:
 
 | Line | What it means |
 | --- | --- |
-| `tool-key: pass: the stored linear key answered 200 for POST /mcp on mcp.linear.app, …` | the host accepted the stored key; the next tool call spends a good one |
+| `tool-key: pass: the stored linear key answered 200 for POST /mcp on mcp.linear.app, and [linear] mcp is readonly, …` | the host accepted the stored key and the mode configures a session with it, so the next tool call of a session that may reach the proxy spends a good one; the line names the mode it read — `readonly` or `write` |
+| `tool-key: pass: … but [linear] mcp is off, so this machine configures no session with it …` | the host accepted the stored key, but this machine configures no session with it: `readonly` or `write` is what makes it worth storing |
 | `tool-key: unknown: no linear key is stored on this machine; the operator runs …` | nothing is stored, so nothing was probed — the same sentence a session's tool call gets as a 503, naming `holosmith key set linear` as the fix |
 | `tool-key: unknown: … this is not a verdict about the key` | the key was not measured: no network, no `openssl`, a host that closed or stopped mid-answer, or a status that says nothing about a key (a 404, a 5xx) |
 | `tool-key: fail: the stored linear key is refused: POST /mcp on mcp.linear.app answered 401, …` | the key is wrong or has been revoked, and a new one is the fix |

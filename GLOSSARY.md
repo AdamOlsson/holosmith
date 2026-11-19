@@ -909,14 +909,17 @@ third container is that being on the key proxy would make a tool's host reachabl
 _Avoid_: Tool proxy, integration proxy, MCP gateway
 
 **MCP server (the session's)**:
-The `linear` entry in the file a session's agent reads, `<data>/sessions/<id>/pi-home/mcp.json`, written by the
-backend on every start from `[linear] mcp` and removed when that key is `off`. It is one streamable-HTTP server: its
+The `holosmith-linear` entry in the file a session's agent reads, `<data>/sessions/<id>/pi-home/mcp.json`, written by
+the backend on every start from `[linear] mcp` and removed when that key is `off`. It is named for the machine rather
+than for the tool because pi gives a **project** entry precedence over a global entry of the same name: a session's
+file is the global scope, so a server called `linear` here would be the one a repository's `.pi/mcp.json` replaces
+with a public host a session cannot reach (ADR-0102). It is one streamable-HTTP server: its
 `url` is the **MCP proxy**'s alias and port with the tool table's endpoint (`http://mcp-proxy:8090/linear/mcp`, or
 `/linear/mcp/readonly`), its `Authorization` header carries the session's **dummy key**, and its `exposure` is
 `deferred`, so a server with dozens of tools is reached by one `tool_search` call rather than declared in every
 prompt. It is a convenience and not the gate: a session with Internet access off resolves no `mcp-proxy` at all,
 which is why `off` writes no file rather than a disabled entry (ADR-0100). Its machine names are
-`mcpproxy::{client_config, CLIENT_FILE}` and `config::LinearMcp`.
+`mcpproxy::{client_config, CLIENT_FILE, SERVER_NAME}` and `config::LinearMcp`.
 _Avoid_: MCP config, MCP endpoint, tool gateway, linear.json
 
 **Egress proxy**:

@@ -81,6 +81,11 @@ of tools needs; `description` is the sentence that lists it until then. `timeout
 default because a tool call that has not answered in half a minute is one the turn has moved past, and a failure the
 model can read costs less than a prompt that hangs.
 
+**Amended by ADR-0102:** this D4's entry is named `holosmith-linear`. It said `linear`, and pi gives a project
+entry precedence over a global one of the same name — a session's file is the global scope, so a repository's own
+`.pi/mcp.json` replaced the machine's entry with the public host a session cannot reach, and an agent had no Linear
+tools at all. The url, the dummy, the exposure and the timeout above stay as they are.
+
 ## D5 — `NO_PROXY` gains the MCP proxy's alias
 
 `ENVIRONMENT` becomes `NO_PROXY=key-proxy,mcp-proxy`. Today nothing changes for a request, because the only proxy

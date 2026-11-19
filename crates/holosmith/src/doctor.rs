@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::agent;
-use crate::config::{Config, Role};
+use crate::config::{Config, LinearMcp, Role};
 use crate::container::PROXY_ALIAS;
 use crate::db;
 use crate::docker::Docker;
@@ -345,6 +345,10 @@ fn openssl(program: &Path) -> Finding {
 /// first evidence, and a revoked key would arrive as a tool call's 401 long after the rotation looked successful.
 /// This is the one measurement that closes that gap (ADR-0101).
 ///
+/// A key the host accepts is only half of what an operator wants to know: the mode `[linear] mcp` decides whether any
+/// session's agent is configured with the server that spends it, so the pass sentence of the row that mode is about
+/// names it and what it means for a session (ADR-0102, [`linear_mode`]).
+///
 /// **`--full` only.** `--quick` is the unit's `ExecStartPre` (item 10 §5), so a check there refuses a boot, and a
 /// machine whose stored key is refused runs sessions that never call a tool — the key is not a machine requirement,
 /// and it is nobody's boot to refuse.
@@ -368,7 +372,7 @@ fn tool_key(config: &Config, tool: &Tool) -> Finding {
         .load()
         .map(|secrets| Store::tool_key(&secrets, tool.id).map(str::to_string))
         .map_err(|error| error.to_string());
-    tool_key_from(&store, tool, stored, |key| {
+    tool_key_from(&store, tool, linear_mode(config, tool), stored, |key| {
         // `doctor` is synchronous and is never called from inside a runtime, so a runtime of its own is the smallest
         // way to spend the one TLS client the proxies use. A runtime that cannot be built is "not measured" — there
         // is no fact about the key in a machine that could not start one (ADR-0101).
@@ -384,16 +388,33 @@ fn tool_key(config: &Config, tool: &Tool) -> Finding {
     })
 }
 
-/// The four arms of [`tool_key`], as one function of the store's read and the probe's answer.
+/// The machine's mode, for the one row it is a setting about.
+///
+/// `[linear] mcp` decides whether a session's agent is configured with the Linear server, so it is a fact about Linear
+/// and not about a tool key in general: the pass arm prints the key `[linear] mcp` and its word, which would be a false
+/// sentence about a second row's key. So the row is named here rather than the tool table assumed to have one entry, and
+/// every other row answers `None` and gets the pass sentence that claims no mode (ADR-0102 D1: a future row inherits
+/// the rule, not the sentence).
+fn linear_mode(config: &Config, tool: &Tool) -> Option<LinearMcp> {
+    (tool.id == "linear").then_some(config.linear.mcp)
+}
+
+/// The arms of [`tool_key`], as one function of the store's read, the row's mode and the probe's answer.
 ///
 /// | state | outcome |
 /// | --- | --- |
 /// | the store cannot be read | **fail**, naming the path, the error and the command that rewrites it |
 /// | no key is stored for this row | **unknown**, in the MCP proxy's own 503 sentence |
-/// | the key answers 2xx | **pass**, naming the status, the endpoint and the host |
+/// | the key answers 2xx | **pass**, naming the status, the endpoint and the host — and, on a row with a mode, `[linear] mcp` and what it makes of the key for a session |
 /// | it answers 401 or 403 | **fail** — the key is wrong or revoked, and a new one is the fix |
 /// | any other status | **unknown** — not a verdict about the key |
 /// | no status at all | **unknown**, naming what stopped the measurement |
+///
+/// `mode` is `[linear] mcp` for the row it is about and `None` for every other row (see [`linear_mode`]), because the
+/// key decides whether a session's agent is configured with a Linear server at all (ADR-0100). A key the host accepts
+/// is a fact about the key; whether a session spends it is a second fact, and a sentence that carried only the first
+/// was measured claiming a session's next tool call while the machine's mode was `off` and no session had a Linear
+/// server. So the pass arm names both where the row has a mode, and only what a tool call spends where it does not.
 ///
 /// The probe is a closure rather than a value because it is only spent when a key is stored: a machine with no key is
 /// one line and no request, and a hub is neither (see [`tool_key`]). `stored` carries the store's own `Err` so the
@@ -401,6 +422,7 @@ fn tool_key(config: &Config, tool: &Tool) -> Finding {
 fn tool_key_from(
     store: &Store,
     tool: &Tool,
+    mode: Option<LinearMcp>,
     stored: Result<Option<String>, String>,
     probe: impl FnOnce(&str) -> Probe,
 ) -> Finding {
@@ -428,11 +450,25 @@ fn tool_key_from(
             match status {
                 200..=299 => Finding::pass(
                     Check::ToolKey,
-                    format!(
-                        "the stored {} key answered {status} for {target}, so a session's next tool call spends one \
-                         this host accepts",
-                        tool.id
-                    ),
+                    match mode {
+                        None => format!(
+                            "the stored {} key answered {status} for {target}, so the next tool call of a session \
+                             that may reach the proxy spends one this host accepts",
+                            tool.id
+                        ),
+                        Some(mode @ LinearMcp::Off) => format!(
+                            "the stored {} key answered {status} for {target}, but [linear] mcp is {}, so this \
+                             machine configures no session with it: readonly or write is what configures a session",
+                            tool.id,
+                            mode.as_str()
+                        ),
+                        Some(mode @ (LinearMcp::ReadOnly | LinearMcp::Write)) => format!(
+                            "the stored {} key answered {status} for {target}, and [linear] mcp is {}, so the next \
+                             tool call of a session that may reach the proxy spends one this host accepts",
+                            tool.id,
+                            mode.as_str()
+                        ),
+                    },
                 ),
                 401 | 403 => Finding::fail(
                     Check::ToolKey,
@@ -1565,10 +1601,11 @@ mod tests {
         );
     }
 
-    /// A tool row's finding, in the four sentences an operator can meet (ADR-0101). The store is a path this test
-    /// wrote, and the probe is a closure, so no arm needs a socket, a key or a daemon.
+    /// A tool row's finding, in the sentences an operator can meet (ADR-0101, ADR-0102). The store is a path this test
+    /// wrote, and the probe is a closure, so no arm needs a socket, a key or a daemon. The name carries no count: the
+    /// pass arm gained a second sentence for the mode, and a count in a test's name is a line that drifts.
     #[test]
-    fn a_tool_key_is_one_of_four_sentences_and_only_a_refusal_is_a_failure() {
+    fn a_tool_key_is_a_pass_a_fail_or_an_unknown_and_only_a_refusal_is_a_failure() {
         let dir =
             std::env::temp_dir().join(format!("holosmith-doctor-tool-key-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1578,7 +1615,7 @@ mod tests {
 
         // No key stored: the MCP proxy's own 503 sentence, so the report and the session's refusal are one spelling
         // of one fact.
-        let none = tool_key_from(&store, tool, Ok(None), |_| {
+        let none = tool_key_from(&store, tool, Some(LinearMcp::Write), Ok(None), |_| {
             panic!("a machine with no key must not be probed")
         });
         assert_eq!(none.outcome, Outcome::Unknown);
@@ -1594,6 +1631,7 @@ mod tests {
         let unreadable = tool_key_from(
             &store,
             tool,
+            Some(LinearMcp::Write),
             Err("the key file's line 3 is not key = value".to_string()),
             |_| panic!("an unreadable store has no key to probe"),
         );
@@ -1616,10 +1654,13 @@ mod tests {
             unreadable.sentence
         );
 
-        // A stored key that answers is the pass, and it names what was asked and what answered.
+        // A stored key that answers is the pass. It names what was asked and what answered, and then the second fact
+        // the line exists for: the mode, and whether a session is configured at all — a key `off` never spends is a
+        // key the host accepts and no session uses.
         let accepted = tool_key_from(
             &store,
             tool,
+            Some(LinearMcp::Write),
             Ok(Some("lin_api_rotated".to_string())),
             |key| {
                 assert_eq!(key, "lin_api_rotated", "the probe spends the stored key");
@@ -1630,22 +1671,92 @@ mod tests {
             },
         );
         assert_eq!(accepted.outcome, Outcome::Pass, "{}", accepted.sentence);
-        for said in ["200", "POST /mcp", "mcp.linear.app"] {
+        for said in [
+            "200",
+            "POST /mcp",
+            "mcp.linear.app",
+            "[linear] mcp is write",
+            "the next tool call of a session that may reach the proxy spends one this host accepts",
+        ] {
             assert!(
                 accepted.sentence.contains(said),
                 "the pass does not name {said}: {}",
                 accepted.sentence
             );
         }
+        // Both configured modes pass and both name their own word: `readonly` is not a lesser pass, and a sentence
+        // hardcoded to `write` would be wrong on the endpoint half the operators choose.
+        for mode in [LinearMcp::ReadOnly, LinearMcp::Write] {
+            let configured = tool_key_from(
+                &store,
+                tool,
+                Some(mode),
+                Ok(Some("lin_api_rotated".to_string())),
+                |_| Probe::Status {
+                    status: 200,
+                    endpoint: "/mcp",
+                },
+            );
+            assert_eq!(configured.outcome, Outcome::Pass, "{}", configured.sentence);
+            assert!(
+                configured
+                    .sentence
+                    .contains(&format!("[linear] mcp is {}", mode.as_str())),
+                "the pass does not name the configured mode: {}",
+                configured.sentence
+            );
+        }
+        // `off` is still a pass for the key and says what it is worth to a session: nothing until a mode configures
+        // one. This is the arm whose absence produced a line claiming a session's next tool call on a machine where no
+        // session had a Linear server.
+        let unconfigured = tool_key_from(
+            &store,
+            tool,
+            Some(LinearMcp::Off),
+            Ok(Some("lin_api_rotated".to_string())),
+            |_| Probe::Status {
+                status: 200,
+                endpoint: "/mcp",
+            },
+        );
+        assert_eq!(
+            unconfigured.outcome,
+            Outcome::Pass,
+            "{}",
+            unconfigured.sentence
+        );
+        for said in [
+            "200",
+            "POST /mcp",
+            "mcp.linear.app",
+            "[linear] mcp is off",
+            "this machine configures no session with it",
+            "readonly or write is what configures a session",
+        ] {
+            assert!(
+                unconfigured.sentence.contains(said),
+                "the off pass does not name {said}: {}",
+                unconfigured.sentence
+            );
+        }
+        assert!(
+            !unconfigured.sentence.contains("next tool call"),
+            "an off machine configures no session to spend the key: {}",
+            unconfigured.sentence
+        );
 
         // 401 and 403 are the two statuses that are a verdict about the key: revoked or wrong.
         for status in [401, 403] {
-            let refused = tool_key_from(&store, tool, Ok(Some("lin_api_old".to_string())), |_| {
-                Probe::Status {
+            let refused = tool_key_from(
+                &store,
+                tool,
+                Some(LinearMcp::Write),
+                Ok(Some("lin_api_old".to_string())),
+                |_| Probe::Status {
                     status,
                     endpoint: "/mcp",
-                }
-            });
+                },
+            );
             assert_eq!(refused.outcome, Outcome::Fail, "{}", refused.sentence);
             assert!(
                 refused.sentence.contains(&status.to_string()),
@@ -1665,6 +1776,7 @@ mod tests {
             let unclear = tool_key_from(
                 &store,
                 tool,
+                Some(LinearMcp::Write),
                 Ok(Some("lin_api_rotated".to_string())),
                 |_| Probe::Status {
                     status,
@@ -1684,6 +1796,7 @@ mod tests {
         let stopped = tool_key_from(
             &store,
             tool,
+            Some(LinearMcp::Write),
             Ok(Some("lin_api_rotated".to_string())),
             |_| Probe::Unmeasured("the host did not answer before the proxy's bound".to_string()),
         );
@@ -1693,6 +1806,71 @@ mod tests {
             "the line does not say why it was not measured: {}",
             stopped.sentence
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row that is not Linear's carries no mode, so its pass names the key and what a tool call spends, and says
+    /// nothing about `[linear] mcp` — that key and its word are a fact about Linear's row (ADR-0102 D1). The row is
+    /// synthetic, `mcpproxy`'s `NO_ENDPOINT` pattern, because `key::TOOLS` has one entry today and the assertion is
+    /// about the second one.
+    #[test]
+    fn a_tool_row_that_is_not_linear_says_nothing_about_a_mode() {
+        const OTHER: Tool = Tool {
+            id: "github",
+            host: "example.invalid",
+            auth: key::Auth::Bearer,
+            endpoints: &["/mcp"],
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "holosmith-doctor-tool-key-mode-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("secrets")).expect("the scratch store is creatable");
+        let store = Store::new(dir.join("secrets").join("keys.toml"));
+        let config = Config::default();
+        assert_eq!(
+            linear_mode(&config, &OTHER),
+            None,
+            "a row that is not linear's has no [linear] mcp"
+        );
+        let linear = key::tool("linear").expect("the table names linear");
+        assert_eq!(
+            linear_mode(&config, linear),
+            Some(config.linear.mcp),
+            "linear's row is the one the machine's mode is about"
+        );
+        let accepted = tool_key_from(
+            &store,
+            &OTHER,
+            linear_mode(&config, &OTHER),
+            Ok(Some("ghp_rotated".to_string())),
+            |key| {
+                assert_eq!(key, "ghp_rotated", "the probe spends the stored key");
+                Probe::Status {
+                    status: 200,
+                    endpoint: "/mcp",
+                }
+            },
+        );
+        assert_eq!(accepted.outcome, Outcome::Pass, "{}", accepted.sentence);
+        for said in [
+            "the stored github key answered 200 for POST /mcp on example.invalid",
+            "the next tool call of a session that may reach the proxy spends one this host accepts",
+        ] {
+            assert!(
+                accepted.sentence.contains(said),
+                "the pass does not name {said}: {}",
+                accepted.sentence
+            );
+        }
+        for absent in ["[linear] mcp", "Linear", "mcp is"] {
+            assert!(
+                !accepted.sentence.contains(absent),
+                "a row with no mode names one ({absent}): {}",
+                accepted.sentence
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

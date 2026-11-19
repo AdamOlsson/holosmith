@@ -27,6 +27,10 @@ The statuses are read as three different kinds of statement:
 | any other status (`400`, `404`, `5xx`, …) | **unknown** | an endpoint that moved or a host having a bad minute says nothing about the key |
 | no status at all (no `openssl`, a host that closed, a bound) | **unknown** | "could not measure" is not "measured a bad key" |
 
+**Amended by ADR-0102:** the pass is two arms — a configured mode says the next tool call of a session that may reach
+`hs_mcp` spends the key, `off` says this machine configures no session with it — and the operator page has five
+findings rather than four.
+
 Only the failure changes the exit code. That is ADR-0044's rule one check over: a `doctor` that fails because a
 tool's host was down would refuse a machine that serves sessions perfectly, and the same rule is why a machine with
 **no** stored key is an `unknown` rather than a failure — it is a supported machine, and the sentence it gets is the
@@ -90,7 +94,7 @@ rather than a panic.
 ## What was refused
 
 - **A `Machine` trait method for the probe.** `tests/doctor.rs` drives `Depth::Full` over a `FakeMachine` and a store
-  with no key, so that path is a `unknown` with no network; the four sentences are unit-tested over the arm function
+  with no key, so that path is a `unknown` with no network; the five findings are unit-tested over the arm function
   (`doctor::tool_key_from`), and `scripts/verify.sh`'s `case_doctor_tool_key` measures the real subprocess path with a
   stand-in `openssl`. A fifth trait method would have been a seam for one sentence.
 - **Checking the key against the project it is pointed at.** Whether the key may read a given team is Linear's to
@@ -103,8 +107,10 @@ rather than a panic.
 
 ## What pins it
 
-`doctor`'s unit tests pin the four sentences (no key, unreadable store, 2xx, 401/403, other statuses, no measurement)
-and the hub arm, including the assertion that a hub does not read the store it was given an unreadable copy of.
+`doctor`'s unit tests pin the five findings — a pass for a configured mode, a pass for `off`, an `unknown` with no
+key, an `unknown` that could not measure, a `fail` on a refusal — and the hub arm, including the assertion that a hub
+does not read the store it was given an unreadable copy of. A row that is not Linear's gets the pass with no claim
+about a mode: that is the row ADR-0102 D1 anticipates rather than a sixth finding.
 `tests/doctor.rs` pins the report's shape — nothing at all on `--quick`, exactly one `unknown` per `key::TOOLS` row
 with no key stored, one `fail` per row over an unreadable store — and needs no socket for any of it. `relay`'s pin
 the one argument list and the answer's bounds, over bytes and over time. `mcpproxy`'s pin the probe's request bytes
@@ -112,7 +118,7 @@ the one argument list and the answer's bounds, over bytes and over time. `mcppro
 status-line reader. `deploy`'s pin the rule that a refused stored key is named on the health step's line rather than
 failing it. `scripts/verify.sh`'s `case_doctor_tool_key` runs the artifact three times with a stand-in TLS client — no
 key stored, then `401`, then `200` — and asserts each line, plus that `--quick` says nothing about it. `docs/keys.md`
-is the operator's page: the four commands, why no restart is needed, and the four findings.
+is the operator's page: the four commands, why no restart is needed, and the five findings.
 
 ## Not measured here
 
