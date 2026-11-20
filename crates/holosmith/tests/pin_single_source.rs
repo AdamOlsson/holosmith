@@ -1,4 +1,4 @@
-//! The pinned pi version lives in `pins/pi.txt` and nowhere else.
+//! The pinned pi version lives in `pins/pi.txt` and nowhere else, and the two build recipes name one rust base.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,54 +57,88 @@ fn no_other_tracked_file_contains_the_pin() {
     );
 }
 
-/// The digest the builder recipe's rust base is pinned to, read out of the recipe itself.
+/// The rust base a recipe is built from, read out of the recipe itself.
 ///
-/// A builder image's pin is its `FROM` line, the same place the two product recipes keep theirs. What this test
-/// adds is the rule `pins/pi.txt` has: the value lives in **one** file, so a second copy — in a doc, a review, or a
-/// second Dockerfile — is a failure rather than a value that can drift.
-fn builder_base_digest() -> String {
-    let line = holosmith::builder::DOCKERFILE
+/// An image's pin is its `FROM` line, the same place the two product recipes keep theirs, and this one is a
+/// **second** such line: `agent.Dockerfile` copies its rust toolchain out of `builder.Dockerfile`'s base, so the two
+/// must name the identical reference or a session compiles with a different compiler than a release build.
+///
+/// The reference is a literal in both files because **a Dockerfile cannot `include` anything**: there is no
+/// mechanism that would let one recipe name another's stage or share a fragment, and a build argument would move
+/// the pin into the Rust that passes it — which is the second copy this one-file rule exists to forbid.
+/// `pins/pi.txt` is what an `include` would look like here, and it is not available to a `FROM` line, so the drift
+/// is caught by this test instead.
+fn rust_base_reference(dockerfile: &str) -> String {
+    let line = dockerfile
         .lines()
         .map(str::trim)
         .find(|line| line.starts_with("FROM rust:"))
-        .expect("the builder recipe names a rust base");
-    // The `FROM <ref> AS <stage>` line's second word is the reference; the digest is its last `@sha256:` field.
+        .expect("the recipe names a rust base");
+    // The `FROM <ref> AS <stage>` line's second word is the reference.
     line.split_whitespace()
         .nth(1)
-        .and_then(|reference| reference.rsplit_once("@sha256:"))
-        .map(|(_, digest)| digest.to_string())
-        .expect("the builder's rust base is pinned by digest")
+        .map(str::to_string)
+        .expect("the recipe's rust line carries a reference")
 }
 
 #[test]
-fn the_builder_recipes_base_digest_appears_in_one_file() {
-    let digest = builder_base_digest();
+fn the_two_recipes_name_one_rust_base_and_no_third_file_does() {
+    // Both halves of one rule: the two references are the same string (so a bump is two edits that cannot drift),
+    // and that string's digest appears in **exactly** those two files — a third copy in a doc or a review is the
+    // stale one nobody edits.
+    let agent = rust_base_reference(holosmith::images::AGENT_DOCKERFILE);
+    let builder = rust_base_reference(holosmith::builder::DOCKERFILE);
+    assert_eq!(
+        agent, builder,
+        "the agent image and the builder must be built from one rust base: a session would otherwise compile with a \
+         different compiler than a release build"
+    );
+    let digest = agent
+        .rsplit_once("@sha256:")
+        .map(|(_, digest)| digest)
+        .expect("the rust base is pinned by digest, not by tag");
     assert_eq!(digest.len(), 64, "a digest is 64 hex characters: {digest}");
+
     let root = repo_root();
     let files = match tracked_files(&root) {
         Some(files) => files,
         None => walk_files(&root),
     };
     assert!(!files.is_empty(), "no files to search under {root:?}");
+    let recipes = [
+        "crates/holosmith/images/agent.Dockerfile",
+        "crates/holosmith/images/builder.Dockerfile",
+    ];
     let needle = digest.as_bytes();
     let mut offenders: Vec<&str> = files
         .iter()
-        .filter(|file| *file != "crates/holosmith/images/builder.Dockerfile")
+        .filter(|file| !recipes.contains(&file.as_str()))
         .filter(|file| std::fs::read(root.join(file)).is_ok_and(|bytes| contains(&bytes, needle)))
         .map(String::as_str)
         .collect();
     offenders.sort_unstable();
     assert!(
         offenders.is_empty(),
-        "the builder image's base digest {digest} also appears in {offenders:?}; it belongs in \
-         crates/holosmith/images/builder.Dockerfile only"
+        "the rust base digest {digest} also appears in {offenders:?}; it belongs in {recipes:?} only"
     );
+    // And the two files the rule names are the two the test read, so a rename cannot leave it searching for a file
+    // that is not there.
+    for recipe in recipes {
+        assert!(
+            files.iter().any(|file| file == recipe),
+            "{recipe} is not a tracked file, so the search above proved nothing about it"
+        );
+        assert!(root.join(recipe).is_file(), "{recipe} does not exist");
+    }
 }
 
 /// Every file in the worktree except build output and git history, for trees with no
 /// `.git` to list tracked files from.
 fn walk_files(root: &Path) -> Vec<String> {
-    const SKIPPED: [&str; 3] = [".git", "target", "dist"];
+    // Build output and installed packages, the same ones `scripts/verify.sh`'s toolchain case leaves out of
+    // its copy: none holds a tracked file, and `web/node_modules` holds a package's version string that is
+    // not this tree's pin.
+    const SKIPPED: [&str; 4] = [".git", "target", "dist", "node_modules"];
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {

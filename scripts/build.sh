@@ -79,8 +79,11 @@ for target in "${targets[@]}"; do
   if linker_missing "$target"; then
     printf 'build.sh: %s is not on PATH, and %s needs it.\n' \
       "$(linker_for "$target")" "$target" >&2
-    printf 'Put the musl cross toolchains on PATH; on a host with ~/.pi/toolchains, run it as:\n' >&2
+    printf 'On a host, put the musl cross toolchains on PATH — this tree ships no rust-toolchain.toml to supply them:\n' >&2
     printf '  . ~/.pi/toolchains/env.sh && scripts/build.sh\n' >&2
+    printf 'Inside a container (the builder image for `holosmith build`, the agent image for a session) nothing is\n' >&2
+    printf 'missing: both cross toolchains are installed there, so a linker absent in that container is an image fault\n' >&2
+    printf 'rather than a setup step.\n' >&2
     exit 1
   fi
 done

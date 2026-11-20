@@ -101,8 +101,14 @@ for name in "${names[@]}"; do
 done
 
 # The toolchain, before any phase: a green fmt under a different rustfmt is not the gate's answer.
+# Two fixes, because two machines reach this sentence: a host needs the toolchain put on PATH by hand, and
+# a session's container already has it on PATH — so a session that gets here is running a broken image, not
+# missing a setup step. The host's line is spelled out in full because it is the one that has to be copied.
 if ! command -v cargo >/dev/null 2>&1; then
-  printf 'gate-quick: cargo is not on PATH: . ~/.pi/toolchains/env.sh first (AGENTS.md)\n' >&2
+  printf 'gate-quick: cargo is not on PATH, so there is no toolchain to run the gate with.\n' >&2
+  printf '            On a host: . ~/.pi/toolchains/env.sh (AGENTS.md)\n' >&2
+  printf '            Inside a session container the toolchain is already on PATH, so this is a broken image\n' >&2
+  printf '            rather than a missing setup step: rebuild agent-image and retry.\n' >&2
   exit 2
 fi
 cargo_version="$(cargo --version 2>/dev/null | awk '{print $2}')"

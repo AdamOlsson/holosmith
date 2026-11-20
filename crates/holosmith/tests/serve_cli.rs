@@ -134,18 +134,11 @@ impl Server {
     }
 
     /// `kill -<signal>` and the exit code that followed.
+    ///
+    /// The signal goes through a shell's builtin (`support::signal`): `/bin/kill` is procps, which the agent image's
+    /// `node:24-bookworm-slim` base does not carry, and a session sends the same command line.
     fn signal(&mut self, signal: &str) -> i32 {
-        let status = Command::new("kill")
-            .arg(format!("-{signal}"))
-            .arg(self.child.id().to_string())
-            .status()
-            .expect("/bin/kill is on PATH");
-        assert!(status.success(), "kill -{signal} failed");
-        self.child
-            .wait()
-            .expect("the child is waitable")
-            .code()
-            .expect("the child exited normally")
+        support::signal(&mut self.child, signal)
     }
 
     /// One HTTP/1.1 request, answered in full because `Connection: close` ends the body.
@@ -809,14 +802,9 @@ fn the_binary_serves_the_app_from_a_directory_that_holds_only_the_binary() {
     stream.read_to_string(&mut health).expect("health is read");
     assert!(health.contains(r#""name":"holosmith""#), "{health}");
 
-    let status = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .expect("/bin/kill is on PATH");
-    assert!(status.success());
     assert_eq!(
-        child.wait().expect("waitable").code(),
-        Some(0),
+        support::signal(&mut child, "TERM"),
+        0,
         "SIGTERM must exit 0"
     );
 

@@ -34,8 +34,9 @@ fields are zero (`images::archive` writes ustar by hand rather than taking a dep
 64 KiB and the build deadlocks. So `Docker::build_bounded` sends stdout and stderr to a temporary file, writes
 the archive from a **spawned thread** (a deadline is worthless if the call is stuck in `write`), polls
 `try_wait` to the bound, kills the child on expiry, and reads the file back. `Ok(None)` means "did not
-finish", which is a sentence, not a hang: `BUILD_TIMEOUT` is twenty minutes, because a first build installs pi
-and the toolchains over the network.
+finish", which is a sentence, not a hang: `BUILD_TIMEOUT` is forty minutes, because a first build installs pi and
+pulls both bases and the two musl.cc cross toolchains over the network — ADR-0105 D5 records the measurement
+behind that number.
 
 ## The proxy image is `alpine:3` **with openssl**, and that is not a preference
 

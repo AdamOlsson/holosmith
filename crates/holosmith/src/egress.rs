@@ -1103,9 +1103,17 @@ mod tests {
         assert!(answer.contains("example.com"), "{answer}");
         // **In** the allow-list and still refused: `localhost` resolves to a loopback address, and item 2 says
         // the address rule wins. This is the case that would pass if the check were skipped for listed names.
+        //
+        // Either loopback spelling, because the refusal names the address the resolver handed back and which one
+        // that is, is the resolver's business: on this host `getaddrinfo("localhost")` answers `127.0.0.1` first
+        // and in a container (where `/etc/hosts` is the daemon's) it answers `::1`. Asserting one spelling made
+        // this a host-shaped test that failed two runs out of two inside the agent image.
         let answer = ask("CONNECT localhost:443 HTTP/1.1\r\n\r\n").await;
         assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
-        assert!(answer.contains("127.0.0.1"), "{answer}");
+        assert!(
+            answer.contains("127.0.0.1") || answer.contains("::1"),
+            "the refusal does not name the loopback address it resolved: {answer}"
+        );
         assert!(answer.contains("allow-list"), "{answer}");
         server.abort();
     }
