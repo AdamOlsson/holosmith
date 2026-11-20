@@ -28,7 +28,23 @@ resolved in the **host's** namespace, which is the landmine that has cost this p
 build then fails on a `COPY` inside the image rather than at the boundary where the mistake was made. A tar on
 a pipe has no path at all. Measured on Docker 29.9.2: `docker build -t x -` from a 6.5 MB archive holding
 `Dockerfile` and `holosmith` builds, and the archive is reproducible because its `uid`, `gid` and `mtime`
-fields are zero (`images::archive` writes ustar by hand rather than taking a dependency for two entries).
+fields are zero (`images::archive` writes ustar by hand rather than taking a dependency for it).
+
+**The agent image's context also carries the crate set a build can vendor from** — `images::Kind::context`'s six
+entries, each written under its real relative path in this repository: the workspace and member manifests, the
+member's real `src/lib.rs`, `Cargo.lock`, and `web/package.json` with its lock. Six files rather than a generated
+stub, because a vendored directory has to be *this* tree's: `cargo vendor` from the three manifests alone answers
+`no targets specified in the manifest`, and with the member's own `lib.rs` present the six produce the crate set a
+vendor over the whole tree does.
+
+The proxy image's context is still the two entries, because its recipe runs no Rust — an entry there would be
+bytes every build sent and no instruction read. The lock is an input of the **binary** as well, since it is
+`include_str!`ed: an edited lock changes `org.holosmith.binary-sha256`, so a deploy rebuilds the image with no
+other label of its own having moved.
+
+That is the context's half only. `agent.Dockerfile` copies none of the six yet, so the image's contents are what
+they were and a recipe that vendors from them is a separate change — one that the archive now makes possible
+without the build reaching back into this machine's tree.
 
 **The build's output cannot go to a pipe.** A build prints hundreds of lines; a pipe nobody drains fills at
 64 KiB and the build deadlocks. So `Docker::build_bounded` sends stdout and stderr to a temporary file, writes
