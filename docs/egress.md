@@ -4,7 +4,9 @@ Read this when an agent cannot install packages, or before you widen what sessio
 [Back to README](../README.md).
 
 **A session has no Internet by default.** `[egress] allow = []` means the agent reaches its provider through the key
-proxy and nothing else, so `cargo build` or `npm install` fails. Add the hosts a project needs in
+proxy and nothing else, so `cargo build` or `npm install` fails — the toolchain is in the image (rustc, cargo,
+rustfmt, clippy and both musl cross linkers are part of the fixed set), so what a session lacks with this list empty
+is the **network**, not a compiler. Add the hosts a project needs in
 `holosmith config edit`, then restart:
 
 ```toml

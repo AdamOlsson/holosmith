@@ -621,6 +621,7 @@ serve_cases=(
   case_disk_floor
   case_disk_quota
   case_server_images
+  case_agent_toolchain
   case_build
   case_smoke
   case_upgrade
@@ -3759,8 +3760,8 @@ case_schema_newer() {
   # database rather than at the machine's `/data`.
   # A `hub` on purpose: its `doctor` list has no Docker or git check (item 10 §6), so the doctor run below is the
   # same on a machine with a daemon and on one without — the database is the only thing this case breaks.
-  printf 'owner = "%s"\nrole = "hub"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 1\n' \
-    "$owner" "$root/data" >"$WORK/config-schema-newer.toml"
+  printf 'owner = "%s"\nrole = "hub"\nbackend = "stub"\ndata_root = "%s"\nprojects_root = "%s"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$root/projects" >"$WORK/config-schema-newer.toml"
   # One boot to create and migrate the database, then the row is rewritten to a version from the future.
   start_serve "$WORK/config-schema-newer.toml" "$root/data" >/dev/null
   stop_serve
@@ -10855,8 +10856,8 @@ case_doctor_quick() {
 
   # `role = "server"` because that is who runs the Docker and git checks (item 10 §6 omits them for a hub),
   # and `backend = "stub"` so nothing in this case can start a container.
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\n' \
-    "$owner" "$control" "$preview" "$root/data" "$root" >"$WORK/config-doctor-quick.toml"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\n' \
+    "$owner" "$control" "$preview" "$root/data" "$root/projects" "$root" >"$WORK/config-doctor-quick.toml"
   # `chmod` for the same reason `install -d -m 0755` made the data root: `perms` compares the config against the
   # 0644 `server deploy` writes, and this shell's umask leaves a redirect at 0664. The fixture has to be the machine
   # the deploy leaves. The file is the one `--config` names, so the check now really measures it — a config the deploy
@@ -10949,8 +10950,8 @@ PY
   holder_pid=""
 
   # 3. A daemon that is not there: one failure, its sentence, and the rest of the list still printed.
-  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\ndata_root = "%s"\nmin_free_gb = 1\n' \
-    "$owner" "$root" "$root/data" >"$WORK/config-doctor-absent.toml"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\ndocker_host = "unix://%s/absent.sock"\ndata_root = "%s"\nprojects_root = "%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root" "$root/data" "$root/projects" >"$WORK/config-doctor-absent.toml"
   status=0
   "$artifact" doctor --quick --config "$WORK/config-doctor-absent.toml" --root "$root" \
     >"$WORK/$name.absent.out" 2>&1 || status=$?
@@ -11018,8 +11019,8 @@ SH
   # `role = "server"` (a hub is asked nothing about a tool key, and that arm is `src/doctor.rs`'s unit test),
   # `backend = "stub"` so nothing here can start a container, and a `docker_host` that answers nothing so the daemon
   # question fails cheaply and in the sentence it fails with on a machine that has no daemon.
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\ndocker_host = "unix://%s/no-such.sock"\nmin_free_gb = 1\n' \
-    "$owner" "$root/data" "$root" >"$config"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:0"\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\nprojects_root = "%s"\ndocker_host = "unix://%s/no-such.sock"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$root/projects" "$root" >"$config"
   chmod 0644 "$config" || fail "$name/chmod" "could not set the config to 0644"
 
   # 1. A store with no `[tools]` row: the MCP proxy's own 503 sentence, so a session's refusal and this line are one
@@ -11708,6 +11709,146 @@ case_server_images() {
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
   timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
+  rm -rf "$root"
+}
+
+# The agent image can run this tree's own gate: rustc, cargo, rustfmt, clippy and both musl cross linkers, at the
+# version the recipe pins (ADR-0105).
+#
+# The case's whole reason is that a **host cannot answer an image question**. `cargo fmt` on the gate's machine says
+# nothing about what a session's container holds, and the image is what a session runs: so the three commands a
+# worker runs are the three measured here, in a container shaped exactly like a session's — `--network none`, the
+# invoking uid (`--user "$(id -u):$(id -g)"`, because `container.rs` passes the data root's owner, which is *not*
+# the image's `node`), and a session's limits (`--cpus 2 --memory 4096m`) so what is measured is the product's shape
+# rather than a generous one.
+#
+# The numbers, measured on this host, are why the shape is what it is: the image is ~3.4 GB (725 MB before the
+# toolchain), `cargo fmt --check` answers in 1 s, `cargo clippy --all-targets` in ~50 s, `cargo test --no-run` in
+# ~153 s, and one full `cargo test` writes **8.9 GB** of `target/`. So the tree is **copied** into this case's own
+# directory under `$repo_root/target/` rather than mounted writable (`$WORK` is a `mktemp -d` on a tmpfs the daemon
+# may not see, ADR-0035's rule), and nothing is left behind but the image.
+#
+# `--network none` is the point — a session's container reaches only the proxies — so cargo cannot fetch and
+# `Cargo.lock`'s crates have to come from somewhere: a **warm registry** is copied out of `$CARGO_HOME` and mounted
+# at `/tmp/cargo`, which is the image's `CARGO_HOME`. `--offline` says so out loud rather than letting a machine with
+# a proxy allow-list quietly succeed.
+#
+# The image itself is `agent-image:$version`, which `case_server_images` builds and leaves in place: it removes both
+# tags at its start, so the tag this case reads is one built from **this** tree, and the ordering in `serve_cases` is
+# what makes that true. A machine where it is absent skips with the reason rather than measuring an older image.
+case_agent_toolchain() {
+  local name=case_agent_toolchain root="$repo_root/target/verify-toolchain-$$"
+  local agent version pinned answer code tree cargo status
+  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (no test can cover this: the three commands need the image, which case_server_images builds)\n' "$name"
+    return 0
+  fi
+  version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
+  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
+  agent="agent-image:$version"
+  if ! docker image inspect "$agent" >/dev/null 2>&1; then
+    printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
+      "$name" "$agent"
+    return 0
+  fi
+  # The version the recipe pins, read out of the recipe: a literal here would be a second copy of the pin, and the
+  # `FROM rust:1.99.1-bookworm@sha256:… AS rust` line is the only place the toolchain's version is written.
+  pinned="$(sed -n 's/^FROM rust:\([^-]*\)-[^@]*@sha256:.*/\1/p' \
+    "$repo_root/crates/holosmith/images/agent.Dockerfile")"
+  case "$pinned" in
+    '' | *[!0-9.]*) fail "$name/pin" "the agent recipe names no rust version to compare against: '$pinned'" ;;
+  esac
+
+  rm -rf "$root"
+  mkdir -p "$root/cargo"
+  # The session's runtime, as a session mounts it: a copy, so a `--network none` run has the source and not the
+  # operator's tree, and the copy — not `target/` — is what gets built. The copy is **`git ls-files`**: the tracked
+  # tree, byte for byte as it stands (a dirty tree is what a worker's tree is), so what runs in the container is what
+  # this repository would commit. `.git` is not there for the reason a session's history is not the point of a build,
+  # and because a test that found it would write to the operator's own repository; build output (`target/`,
+  # `web/dist`, `node_modules`) and whatever else this run left in the tree are untracked, so they go by construction
+  # rather than by a list that could miss one — a stray file with the pinned version in it broke this once.
+  tree="$root/src"
+  mkdir -p "$tree"
+  git -C "$repo_root" ls-files -z | tar -C "$repo_root" --null -T - -cf - | tar -C "$tree" -xf - ||
+    fail "$name/copy" "could not copy the tracked tree into $tree"
+  assertions=$((assertions + 1))
+  cargo="${CARGO_HOME:-$HOME/.cargo}"
+  if [ ! -d "$cargo/registry" ]; then
+    printf 'SKIP %s: no cargo registry at %s/registry to mount, so an offline build cannot fetch its crates\n' \
+      "$name" "$cargo"
+    rm -rf "$root"
+    return 0
+  fi
+  cp -a "$cargo/registry" "$root/cargo/registry" ||
+    fail "$name/registry" "could not copy $cargo/registry into the case's tree"
+
+  # One shape for all five runs, because the point is that it is a session's and not a convenient one: no network,
+  # the invoking uid, the session's limits, the copied tree writable at `/src`, and the warm registry at the image's
+  # own `CARGO_HOME`.
+  in_image() {
+    local entrypoint="$1"
+    shift
+    docker run --rm --network none \
+      --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+      -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+      --entrypoint "$entrypoint" "$agent" "$@" 2>&1
+  }
+
+  # The compiler is the one the recipe pins, asked of the toolchain rather than of the recipe's text again.
+  answer="$(in_image cargo --version)" || fail "$name/cargo" "cargo does not run in the agent image: $answer"
+  check "$name/cargo/version" "cargo $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
+  answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in the agent image: $answer"
+  check "$name/rustc/version" "rustc $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
+  # Both cross linkers, by name: `.cargo/config.toml` names them for the two musl targets, and a session that cannot
+  # find one gets a linker-not-found that reads like a code error.
+  for linker in x86_64-linux-musl-gcc aarch64-linux-musl-gcc; do
+    answer="$(in_image "$linker" --version)" ||
+      fail "$name/$linker" "$linker does not run in the agent image: $answer"
+    case "$answer" in
+      *"$linker"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/$linker/version" "$linker answered something else: $answer" ;;
+    esac
+  done
+
+  # The three commands a worker runs, in that order and from the copied tree. `cargo test` is the one that needs the
+  # registry and the one whose failure mode is a hang, so it is named and removed rather than left to `--rm` when a
+  # `timeout` kills the CLI (a killed `docker` does not stop its container).
+  code=0
+  timeout 300 docker run --rm --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+    --entrypoint cargo "$agent" fmt --check >"$WORK/$name.fmt.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] || fail "$name/fmt" "cargo fmt --check exited $code: $(tail -20 "$WORK/$name.fmt.out")"
+  assertions=$((assertions + 1))
+  code=0
+  timeout 900 docker run --rm --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+    --entrypoint cargo "$agent" clippy --offline --all-targets -- -D warnings \
+    >"$WORK/$name.clippy.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] || fail "$name/clippy" "cargo clippy exited $code: $(tail -20 "$WORK/$name.clippy.out")"
+  assertions=$((assertions + 1))
+  status=0
+  timeout 1200 docker run --rm --name "hs_toolchain_test_$$" --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+    --entrypoint cargo "$agent" test --offline --no-fail-fast -- --nocapture \
+    >"$WORK/$name.test.out" 2>&1 || status=$?
+  timeout 60 docker rm -f "hs_toolchain_test_$$" >/dev/null 2>&1 || true
+  [ "$status" -eq 0 ] ||
+    fail "$name/test" "cargo test exited $status in the agent image: $(tail -40 "$WORK/$name.test.out")"
+  assertions=$((assertions + 1))
+  # `--nocapture` is there for this line: the container-shaped binaries print their `SKIP` to stderr, which a
+  # captured run would swallow — so "the suite ran here" is a measurement rather than four green binaries that
+  # never entered the code the container is about.
+  grep -Eq 'SKIP.*[Dd]ocker daemon' "$WORK/$name.test.out" ||
+    fail "$name/test/skip" \
+      "no SKIP line in the container's cargo test names a missing daemon, so --nocapture did not carry it: $(grep -c SKIP "$WORK/$name.test.out" || true) SKIP lines"
+  assertions=$((assertions + 1))
+
+  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy, the
+  # registry and the outputs are this case's own and go.
   rm -rf "$root"
 }
 
@@ -14603,8 +14744,8 @@ case_status() {
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
   # `data_root`, both listeners and the control origin are in the *file*, because `status` reads the config and
   # nothing else (`--port` and `--data-dir` are `serve` overrides).
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nidle_stop_min = 0\nmin_free_gb = 1\n' \
-    "$owner" "$root/data" "$control" "$control" "$preview" >"$WORK/config-status.toml"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\nprojects_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nidle_stop_min = 0\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$root/projects" "$control" "$control" "$preview" >"$WORK/config-status.toml"
   serve_err="$WORK/serve-status.err"
   "$artifact" serve --config "$WORK/config-status.toml" --data-dir "$root/data" \
     --admin-dir "$WORK/data/run" \
@@ -14721,8 +14862,8 @@ case_status() {
   # measured zeros. A file where the database should be is the cheapest way to make SQLite refuse.
   mkdir -p "$root/broken"
   printf 'this is not a database' >"$root/broken/app.db"
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\nmin_free_gb = 1\n' \
-    "$owner" "$root/broken" "$control" >"$WORK/config-status-broken.toml"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ndata_root = "%s"\nprojects_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root/broken" "$root/broken-projects" "$control" >"$WORK/config-status-broken.toml"
   status=0
   "$artifact" status --config "$WORK/config-status-broken.toml" >"$WORK/$name.broken.out" 2>&1 || status=$?
   check "$name/broken/exit" 1 "$status"
@@ -14774,8 +14915,8 @@ SHIM
   chmod 0755 "$shims/journalctl"
   log="$root/data/sessions/0123456789abcdef/session.log"
   printf 'launch: pi --mode rpc\nexit 0\n' >"$log"
-  printf 'owner = "%s"\nbackend = "stub"\ndata_root = "%s"\nmin_free_gb = 1\n' \
-    "$owner" "$root/data" >"$WORK/config-logs.toml"
+  printf 'owner = "%s"\nbackend = "stub"\ndata_root = "%s"\nprojects_root = "%s"\nmin_free_gb = 1\n' \
+    "$owner" "$root/data" "$root/projects" >"$WORK/config-logs.toml"
 
   # The server's log: one child, inherited stdout, and its own exit code.
   status=0
@@ -15104,6 +15245,28 @@ ensure_preview_listen() {
   fi
 }
 
+# Every boot gets a projects root of its own when its config names none, for the same reason it gets a preview port:
+# a fixture must not inherit a fact from the machine it runs on.
+#
+# The fact here is the account's default `projects_root`, `<home>/.local/share/holosmith/projects`. A case's
+# `--data-dir` is the case's own directory under this repository's `target/`, and a gate run whose tree was cloned
+# **inside** that default — which is exactly what a machine running Holosmith over its own project looks like — has
+# its `data_root` refused as `must not be inside projects_root`. That refusal is right and is ADR-0006's rule; what
+# was wrong was a case leaving one half of a pair of roots to a default while pinning the other.
+#
+# The root sits beside the data dir (`<data>-projects`) and is created here, so a case that provisions nothing in it
+# still boots; a fixture that names its own `projects_root` — the ones that provision a project — keeps it.
+ensure_projects_root() {
+  local config="$1" data="$2" root="$data-projects"
+  if grep -qE '^[[:space:]]*projects_root[[:space:]]*=' "$config"; then
+    return 0
+  fi
+  mkdir -p "$root" || fail "serve/config" "could not create the projects root $root"
+  sed -i "1i projects_root = \"$root\"" "$config" ||
+    fail "serve/config" "could not give $config a projects root of its own"
+  chmod 0644 "$config" || fail "serve/config" "could not set $config to 0644"
+}
+
 # start_serve [config] [data dir]: boot the artifact and read the values the cases need from its
 # banner. `case_token_budget` boots a second time with a config of its own, so both files are
 # parameters, and so is the banner it reads: a case that ran against the first boot must not read the
@@ -15112,6 +15275,7 @@ start_serve() {
   local config="${1:-$WORK/config.toml}" data="${2:-$WORK/data}" listen="${3:-0}" tag=serve
   [ "$data" = "$WORK/data" ] || tag="serve-$(basename "$data")"
   ensure_preview_listen "$config"
+  ensure_projects_root "$config" "$data"
   serve_err="$WORK/$tag.err"
   # --port 0 asks the kernel for the port, and it is also what makes serve re-derive
   # control_origin from the bound address (ADR-0007): the passing case can then send exactly
@@ -15173,6 +15337,7 @@ stop_serve() {
 start_peer() {
   local config="$1" data="$2" listen="$3"
   ensure_preview_listen "$config"
+  ensure_projects_root "$config" "$data"
   peer_err="$WORK/serve-peer.err"
   "$artifact" serve --config "$config" --port "$listen" --data-dir "$data" \
     --admin-dir "$WORK/run/peer/holosmith" \

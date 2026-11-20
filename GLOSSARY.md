@@ -1037,6 +1037,17 @@ app's Vite config ever executes. It carries no `holosmith` of its own: the two p
 binary, and this one builds it.
 _Avoid_: Build container, build image, toolchain image, CI image
 
+**Session toolchain**:
+What a session's container carries of the compiler its tree is written in, as part of the **fixed** set: rustc, cargo,
+rustfmt and clippy at the version the agent recipe's `FROM rust:` line names, both musl targets, and both musl.cc cross
+linkers. It is not an `agent_toolchains` entry — that key names Debian packages *beyond* the fixed set — so no config
+key removes it and none moves its version. The analogue of the **pinned pi version** for rust is those `FROM` lines in
+`agent.Dockerfile` and `builder.Dockerfile`, which a test asserts are one identical string; there is no `pins/rust.txt`
+because a Dockerfile cannot `include` anything. A session can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
+and `npm test` (ADR-0105); what it does not have is a Docker daemon, so `scripts/verify.sh` and the container-shaped
+integration binaries stay a host's work.
+_Avoid_: Agent toolchain, build toolchain, dev container, rust image (there is no variant image)
+
 **Release build**:
 `holosmith build [--target <triple>] [--out DIR]`: compiles one static musl artifact **inside the builder image** and
 places `<out>/holosmith` with `<out>/holosmith.sha256` beside it, `--out` defaulting to `releases/<tag>/`. The host

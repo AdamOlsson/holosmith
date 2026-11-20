@@ -197,6 +197,33 @@ pub fn version() -> String {
     VersionInfo::current().version
 }
 
+/// `kill -<signal> <pid>` to a child, through a **shell**, and the exit code that followed.
+///
+/// `kill` is a shell builtin in a session's container, and `/bin/kill` is `procps`, which the agent image's
+/// `node:24-bookworm-slim` base does not carry — a session sends `kill -TERM …` as a command line and dash answers
+/// it itself. `std::process::Command::new("kill")` needs a *file* on `PATH`, so that spelling was a test-shaped
+/// assumption about the host rather than a fact about the product; a test binary runs inside that same image
+/// (`scripts/verify.sh`'s toolchain case), where it would find nothing to exec.
+///
+/// A signal that cannot be sent panics with a sentence, and the call **waits** for the child: an ignored status
+/// followed by a `wait()` with no deadline is a test that hangs instead of failing, which is how this was found.
+pub fn signal(child: &mut std::process::Child, signal: &str) -> i32 {
+    let status = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -{signal} {}", child.id())])
+        .status()
+        .expect("a shell is on PATH to send a signal with");
+    assert!(
+        status.success(),
+        "`kill -{signal} {}` failed, so nothing was signalled and the child would never stop",
+        child.id()
+    );
+    child
+        .wait()
+        .expect("the child is waitable")
+        .code()
+        .expect("the child exited normally")
+}
+
 /// A running app, the handle that stops it, and where it listens.
 pub struct Served {
     pub addr: SocketAddr,

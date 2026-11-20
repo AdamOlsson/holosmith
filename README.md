@@ -30,7 +30,8 @@ No `sudo` is needed for the install itself: it belongs to your own account, and 
 
 ## Next steps
 
-- [The agent cannot reach the Internet](docs/egress.md) — off by default, so `cargo` and `npm` fail.
+- [The agent cannot reach the Internet](docs/egress.md) — off by default, so `cargo build` and `npm install` fail
+  even though the toolchain is installed.
 - [Use it from your phone](docs/remote-access.md) — the LAN, the tailnet, and where TLS comes from.
 - [Drive several machines from one page](docs/hub.md) — a hub and its host registry.
 - [Rotate a tool key](docs/keys.md) — store a new one and prove the host accepts it.

@@ -161,7 +161,9 @@ cd web && npm ci && npm test && npm run build
 no visible reason is usually one of them missing:
 
 - **rustc 1.99.1** from `~/.pi/toolchains/env.sh`. There is no `rust-toolchain.toml`: the build fetches nothing
-  beyond its declared dependencies.
+  beyond its declared dependencies. The same toolchain in the same version is also inside the **agent image**, so a
+  session can run `cargo fmt`, `cargo clippy`, `cargo test` and `npm test`; full verification is still the host's,
+  because a session carries no Docker daemon (ADR-0105).
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** for the shipped targets. SQLite is compiled from
   source (`rusqlite`'s `bundled`), so the C toolchain crosses too.
 - **node and npm** for `scripts/build-web.sh`: Vite 7 needs node 20.19+, and `npm test` — node's own runner over

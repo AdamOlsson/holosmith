@@ -1316,18 +1316,21 @@ mod tests {
     ///
     /// A drift here is the defect the P1 and ADR-0080's `COPY --from` both were: an image built from a base
     /// nobody pinned, which nothing in a green gate would notice.
+    ///
+    /// The agent recipe's **final** `FROM` is the image; its first is the rust stage whose toolchain it copies. So
+    /// the comparison reads the last `FROM` line, not the first — with one stage each, that is the only stage.
     #[test]
     fn the_smoke_recipe_names_the_agent_images_base() {
-        let line = |recipe: &str| -> String {
+        let last_base = |recipe: &str| -> String {
             recipe
                 .lines()
-                .find(|line| line.starts_with("FROM "))
+                .rfind(|line| line.starts_with("FROM "))
                 .unwrap_or_default()
                 .to_string()
         };
         assert_eq!(
-            line(images::SMOKE_DOCKERFILE),
-            line(images::AGENT_DOCKERFILE),
+            last_base(images::SMOKE_DOCKERFILE),
+            last_base(images::AGENT_DOCKERFILE),
             "the smoke image's base is not the agent image's"
         );
         // And it installs nothing on it: the fake replays records and needs no git, no CA bundle and no openssl.

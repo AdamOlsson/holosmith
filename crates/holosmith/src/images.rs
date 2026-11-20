@@ -71,13 +71,16 @@ pub const LABEL_TOOLCHAINS: &str = "org.holosmith.toolchains";
 /// running it. The acceptance's word is "the binary", so the read measures the binary.
 pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 
-/// One image build's bound: a first build installs pi over the network.
+/// One image build's bound: a first build installs pi and both musl.cc toolchains over the network.
 ///
-/// Twenty minutes rather than the proxies' minute, because the agent image's `npm install` fetches pi and the
-/// toolchains' packages from two package managers on a machine whose images are cold. It is a **bound** and not
+/// Forty minutes rather than the proxies' minute, because the agent image's `npm install` fetches pi from one
+/// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks two cross
+/// toolchains of its own. **Measured at 10 min 30 s with both base images already on the machine** — `rust` is
+/// 2.2 GB and `node` 333 MB, so a cold one also pulls ~2.5 GB that this bound has to cover — and the rust stage
+/// is copied rather than installed, which is why the number is minutes and not an hour. It is a **bound** and not
 /// a timeout to fail by: `Ok(None)` from the build is "the build did not finish", which stops the step with a
 /// sentence rather than hanging a deploy nobody is watching.
-pub const BUILD_TIMEOUT: Duration = Duration::from_secs(1200);
+pub const BUILD_TIMEOUT: Duration = Duration::from_secs(2400);
 
 /// `holosmith-proxy:<version>`: the image the machine's three proxies run, named from this binary.
 ///
@@ -498,8 +501,9 @@ impl Images for Docker {
         match Docker::build_bounded(self, args, archive, BUILD_TIMEOUT) {
             Ok(Some(log)) => Ok(log),
             Ok(None) => Err(format!(
-                "the build of {tag} did not finish within {}s and was killed: a first build installs pi over \
-                 the network, so this is a machine that could not reach it rather than a Dockerfile that is wrong",
+                "the build of {tag} did not finish within {}s and was killed: a first build installs pi, pulls \
+                 both bases and the two cross toolchains over the network, so this is a machine that could not \
+                 reach it rather than a Dockerfile that is wrong",
                 BUILD_TIMEOUT.as_secs()
             )),
             Err(error) => Err(error.to_string()),

@@ -326,10 +326,9 @@ fn two_processes_starting_at_once_end_at_one_schema() {
         start_serve(&dir, "second", &data_root),
     ];
     for (mut child, said) in started {
-        let _ = Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
-            .status();
-        let _ = child.wait();
+        // A shell's `kill`, not `/bin/kill`: see `support::signal` — the agent image has no procps, and a session's
+        // command line reaches dash's builtin all the same.
+        support::signal(&mut child, "TERM");
         // Both printed the database they opened and the schema they recorded.
         let line = said
             .lines()
@@ -438,10 +437,7 @@ fn an_older_binary_on_a_newer_database_warns_and_continues() {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status();
-    let _ = child.wait();
+    support::signal(&mut child, "TERM");
 
     // The message and the sentence beside it: made one function own the words, so the boot names both
     // numbers and the command that *would* refuse — `doctor`, which is the half that fails a start rather than a
