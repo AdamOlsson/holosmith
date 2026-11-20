@@ -1044,9 +1044,28 @@ linkers. It is not an `agent_toolchains` entry — that key names Debian package
 key removes it and none moves its version. The analogue of the **pinned pi version** for rust is those `FROM` lines in
 `agent.Dockerfile` and `builder.Dockerfile`, which a test asserts are one identical string; there is no `pins/rust.txt`
 because a Dockerfile cannot `include` anything. A session can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
-and `npm test` (ADR-0105); what it does not have is a Docker daemon, so `scripts/verify.sh` and the container-shaped
-integration binaries stay a host's work.
+and `npm test` (ADR-0105) out of the **Vendored crate set** it carries too; what it does not have is a Docker daemon,
+so `scripts/verify.sh` and the container-shaped integration binaries stay a host's work.
 _Avoid_: Agent toolchain, build toolchain, dev container, rust image (there is no variant image)
+
+**Vendored crate set**:
+The crates this tree's `Cargo.lock` names, unpacked by `cargo vendor --locked` into `/opt/cargo-vendor` **inside the
+agent image**, with `/.cargo/config.toml` replacing crates-io with that directory and `net.offline = true`. It is what
+makes a session's `cargo build --locked` work with no flag and no network: it ships, nothing mounts it, and nothing is
+fetched. `/opt/cargo-vendor/.holosmith-cargo-lock` is the digest of the lock it came from, which is how an image's crate
+set is compared with a tree's. It is the lock's set and nothing else, so a session cannot add a crate — a new dependency
+is a lock edit and a rebuild of the image (ADR-0106). Its npm half is the **Npm cache**: `/opt/npm-cache`, filled from
+`web/package-lock.json`, read by `npm ci` because `npm_config_cache` and `npm_config_offline` say so.
+_Avoid_: Vendor directory (the path, not the idea), registry cache, warm registry (a host's `$CARGO_HOME` mounted
+into a test, which is what this replaced), offline bundle
+
+**Npm cache**:
+`/opt/npm-cache` in the agent image: the tarballs a session's `npm ci` installs from, filled at image-build time out of
+`web/package-lock.json` and read with no flag because `npm_config_cache` and `npm_config_offline` name it. It is root's
+and read-only for a session, which is why `npm_config_logs_dir=/tmp/npm-logs` is set: npm's default is `<cache>/_logs`,
+and a cache a session cannot write is an npm that fails before it installs anything. It is the **Vendored crate set**'s
+other half (ADR-0106).
+_Avoid_: npm store, package cache
 
 **Release build**:
 `holosmith build [--target <triple>] [--out DIR]`: compiles one static musl artifact **inside the builder image** and

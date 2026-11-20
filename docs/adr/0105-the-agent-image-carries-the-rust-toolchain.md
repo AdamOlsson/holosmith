@@ -68,9 +68,11 @@ that happens as root before `USER node`. The builder sets neither, because it ru
 `$HOME` its entry script creates — the two recipes differ here because the two containers' users differ, and the
 comment in each says which.
 
-The gate case mounts a **warm registry** over `/tmp/cargo` (`$CARGO_HOME`'s `registry/`, 138 MB here): a session's
-container has no network, so `Cargo.lock`'s crates have to come from somewhere, and `--offline` makes that a claim
-rather than a hope.
+The gate case used to mount a **warm registry** over `/tmp/cargo` (`$CARGO_HOME`'s `registry/`, 138 MB here): a
+session's container has no network, so `Cargo.lock`'s crates have to come from somewhere, and `--offline` made that a
+claim rather than a hope. **Amended by ADR-0106:** the crates now come from the image — the recipe vendors the lock's
+crate set into `/opt/cargo-vendor` and writes `/.cargo/config.toml` — so a session's build needs no mount and no flag,
+and the case measured the developer's registry rather than the product's container for one release too many.
 
 ## D5 — the currency rule is unchanged, and that is the trap
 
@@ -100,12 +102,13 @@ has none.
 
 ## Consequences
 
-- `case_agent_toolchain` (in `scripts/verify.sh`, after `case_server_images`) runs the three commands in a container
-  shaped like a session's — `--network none`, the invoking uid, `--cpus 2 --memory 4096m`, the tree copied under
-  `target/` and a warm registry at `/tmp/cargo` — and reads the pinned version out of the recipe rather than
-  restating it. Measured: fmt 1 s, clippy ~50 s, `cargo test --no-run` ~153 s, and one session's `target/` measured
-  **8.9 GB** against `session_disk_soft_gb`'s default of 10, so a Rust project has little headroom and a second
-  build's `target/` exceeds it.
+- `case_agent_toolchain` (in `scripts/verify.sh`, after `case_server_images`) runs the commands in a container
+  shaped like a session's — `--network none`, the invoking uid, `--cpus 2 --memory 4096m` and the tree copied under
+  `target/` — and reads the pinned version out of the recipe rather than restating it. Measured: fmt 1 s, clippy
+  ~50 s, `cargo test --no-run` ~153 s, and one session's `target/` measured **8.9 GB** against
+  `session_disk_soft_gb`'s default of 10, so a Rust project has little headroom and a second build's `target/`
+  exceeds it. **Amended by ADR-0106:** the registry mount is gone, `cargo build --locked` and `npm ci` are measured
+  with no flag at all, and the crates and the npm packages are the image's own.
 - `src/egress.rs`'s loopback assertion accepts either `127.0.0.1` or `::1`: the refusal names the address the
   resolver returned, and inside a container `localhost` resolves `::1` first. The test was host-shaped and failed two
   runs out of two in the image; the other three assertions in it are unchanged.
@@ -115,10 +118,13 @@ has none.
   `support::signal`, which runs it through a shell and **waits with the kill's own status asserted**, so the same
   breakage is a failure with a sentence rather than a hang. The image gains no `procps`: the fixed set is a
   documented contract, and a session that needs process tools is its own decision.
-- The agent image grows to ~3.4 GB on every machine, and `scripts/build.sh` is not a gate case: `npm ci` needs the
-  network and `--network none` is the point. Measured by hand with the network on, in a session-shaped container:
+- The agent image grows to ~3.4 GB on every machine (3.53 GB with the crate set and the npm cache in it, ADR-0106),
+  and `scripts/build.sh` is not a gate case: the gate's in-image cases run `--network none`, and this was measured by
+  hand with the network on. Its `npm ci` no longer needs that network either (ADR-0106 fills a cache), but what the
+  script writes is `check-static.sh`'s business and that step is the host's. Measured by hand, in a session-shaped
+  container:
   `scripts/build.sh` builds the web app and both artifacts (`dist/x86_64-unknown-linux-musl/holosmith`, 8 230 600
   bytes, and `dist/aarch64-unknown-linux-musl/holosmith`, 7 407 832 bytes), so a session can produce a release
-  artifact. Its last step, `scripts/check-static.sh`, answers `file: command not found` — `file` is not in the base —
-  so a session can *produce* the artifact but cannot run that script's own check, and the static-link proof stays the
-  gate's.
+  artifact. Its last step, `scripts/check-static.sh`, answered `file: command not found` — `file` was not in the
+  base — so a session could *produce* the artifact and not run that script's own check; ADR-0106 puts `file` in the
+  apt line, and the check's two machine-local prerequisites (`bwrap`, `qemu-aarch64-static`) stay `SKIP`s.

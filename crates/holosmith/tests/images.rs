@@ -112,6 +112,207 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
     assert_ne!(images::PROXY_DOCKERFILE, images::AGENT_DOCKERFILE);
 }
 
+// ---- the agent recipe's shape, asserted without a daemon --------------------------------------
+
+/// The Dockerfile's instructions, each as one line with its continuation and argument lines joined by single spaces.
+///
+/// Just enough of the syntax for the assertions below: a line that begins at column zero with an uppercase
+/// instruction word starts one, and the lines continued with `\` and the indented ones belong to it. A whole-line
+/// comment or a blank line belongs to none of them, which is the parser's own rule — and this is what lets a test ask
+/// *which* instruction writes a path, and whether it does so before another.
+fn instructions(recipe: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    for line in recipe.lines() {
+        let word = line.split_once(' ').map_or("", |(word, _)| word);
+        if !line.starts_with([' ', '\t', '#'])
+            && !word.is_empty()
+            && word.chars().all(|letter| letter.is_ascii_uppercase())
+        {
+            blocks.push(line.trim_end_matches('\\').trim().to_string());
+        } else if line.starts_with([' ', '\t'])
+            && let Some(current) = blocks.last_mut()
+        {
+            current.push(' ');
+            current.push_str(line.trim_end_matches('\\').trim());
+        }
+    }
+    blocks
+}
+
+/// The first instruction containing `needle`, with its position: order is what half of the assertions are about.
+fn instruction<'a>(blocks: &'a [String], needle: &str) -> (usize, &'a str) {
+    let at = blocks
+        .iter()
+        .position(|block| block.contains(needle))
+        .unwrap_or_else(|| panic!("the agent recipe has no instruction containing {needle:?}"));
+    (at, blocks[at].as_str())
+}
+
+/// The word after `prefix` in `text`: how `CARGO_HOME=/tmp/cargo` and `--cache /opt/npm-cache` are read.
+fn word_after<'a>(text: &'a str, prefix: &str) -> &'a str {
+    text.split(prefix)
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("nothing follows {prefix} in {text}"))
+}
+
+/// Every word after `prefix` in `text`: one instruction can name a variable twice, and both are words to look at.
+fn words_after<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
+    text.split(prefix)
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect()
+}
+
+/// The TOML value written as `key = "value"`.
+fn quoted<'a>(text: &'a str, key: &str) -> &'a str {
+    let opener = format!("{key} = \"");
+    let start = text
+        .find(&opener)
+        .unwrap_or_else(|| panic!("no `{opener}…` in {text}"))
+        + opener.len();
+    let rest = &text[start..];
+    &rest[..rest
+        .find('"')
+        .unwrap_or_else(|| panic!("the value after `{opener}` is never closed in {text}"))]
+}
+
+#[test]
+fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
+    // A Dockerfile-shaped claim, so it is asserted here and not in a case that needs a daemon: the order of two
+    // instructions and the agreement between a path written in one and the path another one names are exactly what a
+    // mis-edit breaks, and what the gate's `case_agent_toolchain` would report as a network failure five minutes in.
+    let blocks = instructions(images::AGENT_DOCKERFILE);
+
+    // The context and the recipe name the same files, in **both** directions: a context path no `COPY` names is a file
+    // the image silently never gets, and a `COPY` of a path the context does not carry is the daemon's "not found" —
+    // the direction that fails a build.
+    let copies: Vec<&str> = blocks
+        .iter()
+        .filter(|block| block.starts_with("COPY "))
+        .map(String::as_str)
+        .collect();
+    for (path, _) in Kind::Agent.context() {
+        assert!(
+            copies
+                .iter()
+                .any(|copy| copy.split_whitespace().any(|word| word == *path)),
+            "the agent recipe never copies {path} out of the context it is handed"
+        );
+    }
+    let context: Vec<&str> = Kind::Agent
+        .context()
+        .iter()
+        .map(|(path, _)| *path)
+        .collect();
+    for copy in &copies {
+        // `COPY --from=<stage>` reads another stage rather than the context.
+        if copy.contains("--from=") {
+            continue;
+        }
+        let words: Vec<&str> = copy.split_whitespace().skip(1).collect();
+        let (_, sources) = words
+            .split_last()
+            .unwrap_or_else(|| panic!("a `COPY` names no destination: {copy}"));
+        // `holosmith` is the one word that is not a `Kind::Agent.context()` entry: the binary the build places there.
+        for source in sources {
+            assert!(
+                *source == "holosmith" || context.contains(source),
+                "the agent recipe copies {source}, which the context it is handed does not carry: {copy}"
+            );
+        }
+    }
+
+    // `file` is what `scripts/check-static.sh` asks about an artifact first (`file -b`), and `scripts/build.sh` ends
+    // with that script: an image without it builds a tree and then fails the build's own last step.
+    let (_, apt) = instruction(&blocks, "apt-get install");
+    assert!(
+        apt.split_whitespace().any(|word| word == "file"),
+        "the apt line installs no `file`: {apt}"
+    );
+
+    // The vendor step, and the directory it writes, which the config below has to agree with.
+    let (vendored_at, vendor) = instruction(&blocks, "cargo vendor --locked");
+    let vendored = word_after(vendor, "--locked");
+    assert!(
+        vendored.starts_with('/'),
+        "`cargo vendor --locked` writes to {vendored}, which is not an absolute path"
+    );
+    // The scratch `CARGO_HOME` is this step's own and is removed inside the same instruction: the layer must not
+    // carry the 108 MB of `.crate` archives beside the 108 MB of unpacked crates. Twice, because a path mentioned
+    // once is a path still in the image.
+    let scratch = word_after(vendor, "CARGO_HOME=");
+    assert_ne!(
+        scratch, "/tmp/cargo",
+        "the vendor step writes its archives into the session's CARGO_HOME"
+    );
+    assert_eq!(
+        vendor.matches(scratch).count(),
+        2,
+        "the vendor step sets {scratch} and does not remove it in the same instruction: {vendor}"
+    );
+    // The digest of the lock the crates came from, written beside them: what says a vendor directory is this tree's.
+    assert!(
+        vendor.contains(&format!("{vendored}/.holosmith-cargo-lock")),
+        "the vendor step records no lock digest in {vendored}: {vendor}"
+    );
+
+    // **The order is load-bearing**: the replacement is written after the directory it names exists, because a
+    // `directory` source pointing nowhere fails with a message about the configuration rather than about the vendor
+    // step that has not run.
+    let (config_at, config) = instruction(&blocks, "> /.cargo/config.toml");
+    assert!(
+        config_at > vendored_at,
+        "the crate source replacement is written before the directory it points at"
+    );
+    assert_eq!(
+        quoted(config, "directory"),
+        vendored,
+        "the written config's `directory` is not the directory the vendor step writes"
+    );
+    assert_eq!(quoted(config, "replace-with"), "vendored-sources");
+    assert!(
+        config.contains("[net]") && config.contains("offline = true"),
+        "the written config does not make `net.offline` true: {config}"
+    );
+
+    // A session's own `CARGO_HOME` is still the writable `/tmp/cargo`, and exactly one instruction names it: the vendor
+    // step's scratch home shares the prefix, so this counts words and not instructions, and a second word that is
+    // exactly `/tmp/cargo` is a second place a session's cargo is pointed at.
+    let homes = blocks
+        .iter()
+        .filter(|block| words_after(block, "CARGO_HOME=").contains(&"/tmp/cargo"))
+        .count();
+    assert_eq!(
+        homes, 1,
+        "the session's CARGO_HOME is named by {homes} instructions"
+    );
+
+    // The npm half: the cache the fill writes is the one the `ENV` names, so `npm ci` in a session reads it with no
+    // flag — and the fill comes after the `npm cache clean --force` that would otherwise leave it empty.
+    let (filled_at, fill) = instruction(&blocks, "npm ci --cache");
+    let cache = word_after(fill, "--cache");
+    let (cleaned_at, _) = instruction(&blocks, "npm cache clean --force");
+    assert!(
+        filled_at > cleaned_at,
+        "the npm cache is filled before the `npm cache clean --force` that empties it"
+    );
+    let (_, npm_env) = instruction(&blocks, "npm_config_cache=");
+    assert_eq!(
+        word_after(npm_env, "npm_config_cache="),
+        cache,
+        "the `npm_config_cache` a session reads is not the cache the fill writes"
+    );
+    assert!(
+        npm_env.contains("npm_config_offline=true"),
+        "the image does not make npm's `offline` true: {npm_env}"
+    );
+    assert!(
+        npm_env.contains("npm_config_logs_dir=/tmp/npm-logs"),
+        "npm's logs directory is the read-only cache: {npm_env}"
+    );
+}
+
 #[test]
 fn the_image_names_carry_this_binarys_version() {
     // One spelling of each name: this function is what `agent_image`'s default and every proxy's `image` field
