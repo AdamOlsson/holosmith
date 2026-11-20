@@ -8,7 +8,9 @@
 //! Three things about a build are load-bearing and each has its own doc comment below:
 //!
 //! - **The daemon is handed a tar on stdin**, not a directory: `docker build -` reads a context from an
-//!   archive, which is the only way to build without a directory on disk that holds a copy of this binary.
+//!   archive, which is the only way to build without a directory on disk that holds a copy of this binary. What
+//!   travels in it besides the Dockerfile and the binary is [`Kind::context`]'s answer — the agent image's crate
+//!   set, and nothing for the proxy.
 //! - **The image's labels are the read.** `server deploy`'s second run must be honestly `satisfied`, and the
 //!   five `org.holosmith.*` labels are what says an image was built by *this* binary — not a tag, which any
 //!   `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of them is a
@@ -43,6 +45,44 @@ pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 /// a *candidate binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`, never by
 /// `server deploy` — it is not what a promotion ships, and the ADR says so.
 pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
+
+/// The entries a build context carries, each written under the path it is named by, with the text the daemon reads
+/// there.
+///
+/// The path is the file's real relative path in this repository, so a context's names are the tree's names and a
+/// slice of these is a list of files rather than of labels for them.
+pub type Context = [(&'static str, &'static str)];
+
+/// The crate set the **agent** image's build context carries, so a build of it can vendor this tree's dependencies.
+///
+/// Six files, embedded at the path each one has in the repository, and every one of them is load-bearing:
+///
+/// - the workspace `Cargo.toml` and the member's, because `cargo vendor` resolves a workspace from the root manifest
+///   and a package from its own;
+/// - the member's real `src/lib.rs`, because a target is a source file and not a manifest entry: the three manifests
+///   alone answer `no targets specified in the manifest`, and measured, these six produce the crate set a vendor over
+///   the whole tree does. That is why the file travels rather than a generated stub;
+/// - `Cargo.lock`, because a vendored directory that is not the lock's is a build with other crates in it;
+/// - the web pair, for the app this binary embeds: `npm ci`'s two files.
+///
+/// The lock is also an input of *this binary* — it is embedded here — so an edited lock changes the artifact's bytes
+/// and with them [`LABEL_BINARY`]: a deploy rebuilds the image with no other label of its own having moved.
+///
+/// The proxy image has none of it: it is the artifact on alpine, and its recipe runs no Rust.
+const AGENT_CONTEXT: [(&str, &str); 6] = [
+    ("Cargo.toml", include_str!("../../../Cargo.toml")),
+    ("Cargo.lock", include_str!("../../../Cargo.lock")),
+    ("crates/holosmith/Cargo.toml", include_str!("../Cargo.toml")),
+    ("crates/holosmith/src/lib.rs", include_str!("lib.rs")),
+    (
+        "web/package.json",
+        include_str!("../../../web/package.json"),
+    ),
+    (
+        "web/package-lock.json",
+        include_str!("../../../web/package-lock.json"),
+    ),
+];
 
 /// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke`.
 pub fn smoke_image() -> String {
@@ -108,6 +148,18 @@ impl Kind {
         match self {
             Self::Proxy => PROXY_DOCKERFILE,
             Self::Agent => AGENT_DOCKERFILE,
+        }
+    }
+
+    /// The extra entries this image's build context carries after its Dockerfile and its binary.
+    ///
+    /// The agent image's are `AGENT_CONTEXT`, the crate set a build can vendor from; the proxy's are none, because
+    /// its recipe installs no Rust for a crate set to reach. An empty slice rather than an `Option`, so "this context
+    /// has no extra entries" is a list of length zero at every place one is read.
+    pub fn context(self) -> &'static Context {
+        match self {
+            Self::Proxy => &[],
+            Self::Agent => &AGENT_CONTEXT,
         }
     }
 
@@ -522,17 +574,22 @@ fn parse_labels(text: &str) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// The ustar archive the daemon reads as a build context: `Dockerfile` (0644) and `holosmith` (0755).
+/// The ustar archive the daemon reads as a build context: `Dockerfile` (0644), `holosmith` (0755), then each of
+/// `context`'s entries (0644).
 ///
 /// Written by hand rather than through a `tar` crate, because this is the whole of what the daemon needs and a
-/// dependency for two files is not worth one. **`uid`, `gid` and `mtime` are zero**, so the same Dockerfile and
-/// the same binary bytes always produce the same archive: a build that depended on when it ran would make every
-/// rebuild a different context for the daemon's cache.
+/// dependency for eight entries is not worth one. **`uid`, `gid` and `mtime` are zero**, so the same Dockerfile,
+/// the same binary bytes and the same context always produce the same archive: a build that depended on when it ran
+/// would make every rebuild a different context for the daemon's cache.
+///
+/// The order is this signature's — the Dockerfile, the binary, then the context in its own order — and every entry
+/// is a regular file named by its path. A context is a list and not a directory walk, so two builds of one tree hand
+/// the daemon the same bytes in the same order.
 ///
 /// The binary is read here, so a path that is not a file fails with a sentence before the daemon is asked
 /// anything: a build from an archive with a missing entry would report a `COPY` failure inside the image, which
 /// names the wrong thing.
-pub fn archive(dockerfile: &str, binary: &Path) -> Result<Vec<u8>, String> {
+pub fn archive(dockerfile: &str, context: &Context, binary: &Path) -> Result<Vec<u8>, String> {
     let program = std::fs::read(binary).map_err(|error| {
         format!(
             "the binary at {} could not be read ({error}): the build context is an archive holding the \
@@ -540,17 +597,20 @@ pub fn archive(dockerfile: &str, binary: &Path) -> Result<Vec<u8>, String> {
             binary.display()
         )
     })?;
-    Ok(archive_bytes(dockerfile, &program))
+    Ok(archive_bytes(dockerfile, context, &program))
 }
 
 /// The same archive from bytes the caller already holds.
 ///
 /// The smoke run's half: it has read, hashed and ELF-checked the candidate before it builds anything, so a
 /// second read could be a second file — and a promotion's image is supposed to be built from the bytes it measured.
-pub fn archive_bytes(dockerfile: &str, program: &[u8]) -> Vec<u8> {
+pub fn archive_bytes(dockerfile: &str, context: &Context, program: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     push_entry(&mut out, "Dockerfile", 0o644, dockerfile.as_bytes());
     push_entry(&mut out, "holosmith", 0o755, program);
+    for &(path, contents) in context {
+        push_entry(&mut out, path, 0o644, contents.as_bytes());
+    }
     // Two zero blocks end a tar archive: without them the daemon reads a truncated context.
     out.resize(out.len() + 1024, 0);
     out
@@ -561,9 +621,16 @@ pub fn archive_bytes(dockerfile: &str, program: &[u8]) -> Vec<u8> {
 /// `pub(crate)`, whose builder archive is a second caller: the daemon reads a context it is handed, and
 /// one ustar writer for the three images is one place the header can be wrong.
 pub(crate) fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
-    let mut header = [0_u8; 512];
-    // The name is 100 bytes with a NUL; every name here is far shorter, and a longer one would be a `panic`
+    // The name is 100 bytes with a NUL, and every name here is far shorter — the context's
+    // `crates/holosmith/src/lib.rs` and `crates/holosmith/Cargo.toml` are both 27 — so a longer one is a mistake
     // rather than an archive the daemon misreads.
+    assert!(
+        name.len() <= 100,
+        "an entry name of {} bytes does not fit the header's 100-byte name field: writing it would overwrite the \
+         mode, uid, gid and size fields behind it",
+        name.len()
+    );
+    let mut header = [0_u8; 512];
     header[..name.len()].copy_from_slice(name.as_bytes());
     write_octal(&mut header[100..108], u64::from(mode));
     // uid, gid and mtime stay zero: see [`archive`] on why the same bytes must give the same archive.
@@ -816,10 +883,10 @@ pub fn ensure(
     for (kind, _) in pending {
         let expectation = Expectation::of_release(*kind, config, release, digest);
         let tag = expectation.tag();
-        let context = archive(kind.dockerfile(), binary)?;
+        let archive = archive(kind.dockerfile(), kind.context(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
         progress.note(label, &format!("building {tag}"));
-        let built = images.build(&tag, &context, &arguments);
+        let built = images.build(&tag, &archive, &arguments);
         // A daemon that could not run the build at all did not build the image either.
         let success = built.as_ref().is_ok_and(|log| log.success);
         progress.note(

@@ -571,12 +571,16 @@ fn ensure_image(docker: &Docker, binary: &[u8], image: &str) -> Result<(), Strin
     }
 }
 
-/// The build context: `images::archive`'s ustar, with the **candidate's** bytes under `holosmith`.
+/// The build context: `images::archive`'s ustar, with the **candidate's** bytes under `holosmith` and no context
+/// entries after them.
 ///
 /// Its own function rather than a call to [`images::archive`] because that one reads the path it is given, and this
 /// run already holds the bytes it hashed and judged — a second read could be a second file.
+///
+/// An empty context because this image is the candidate on the agent image's base with nothing installed: its recipe
+/// runs no Rust, so a crate set would be bytes every build sent and no instruction read.
 fn archive_with(binary: &[u8]) -> Vec<u8> {
-    images::archive_bytes(images::SMOKE_DOCKERFILE, binary)
+    images::archive_bytes(images::SMOKE_DOCKERFILE, &[], binary)
 }
 
 /// Start the candidate as this machine's server, with its own log file and no inherited stdio.

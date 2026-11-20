@@ -101,7 +101,7 @@ pub fn recipe() -> String {
 /// The ustar context the daemon reads: the recipe under the two names the context has.
 ///
 /// `images::archive`'s shape and its reason — the daemon may not share this process's filesystem, so a *path* is
-/// not a context. It carries no binary, which is the one way this archive differs from the two product images':
+/// not a context. It carries no binary, which is one of the ways this archive differs from the two product images':
 /// those are built *from* this program, and this one builds it.
 pub fn archive() -> Vec<u8> {
     let mut out = Vec::new();

@@ -310,6 +310,27 @@ fn octal(field: &[u8]) -> u64 {
         .unwrap_or_else(|error| panic!("{field:?} is not an octal field: {error}"))
 }
 
+/// `tar`'s answer for one archive this test wrote, listed with `flag`.
+///
+/// The second reader, and it is not decoration: a header this crate writes and nothing else can parse would be an
+/// archive the daemon also cannot read. `tar` verifies the checksum, which is the one field computed by hand.
+fn tar_lists(dir: &TempDir, name: &str, bytes: &[u8], flag: &str) -> String {
+    let archive = dir.file(name);
+    std::fs::write(&archive, bytes).expect("the archive is writable");
+    let listed = Command::new("tar")
+        .arg(flag)
+        .arg(&archive)
+        .output()
+        .expect("tar is on every machine this repository builds on");
+    assert!(
+        listed.status.success(),
+        "tar refused {}: {}",
+        archive.display(),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    String::from_utf8_lossy(&listed.stdout).into_owned()
+}
+
 #[test]
 fn the_archive_is_a_ustar_the_tar_program_reads() {
     let dir = TempDir::new("images-archive");
@@ -318,7 +339,18 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     let program = vec![b'h'; 700];
     std::fs::write(&binary, &program).expect("the scratch binary is writable");
 
-    let bytes = images::archive(images::PROXY_DOCKERFILE, &binary).expect("the archive is written");
+    // The agent image, because it is the one whose context carries the crate set: eight entries — its Dockerfile,
+    // its binary, and the six the crate set is.
+    let context = Kind::Agent.context();
+    let bytes = images::archive(images::AGENT_DOCKERFILE, context, &binary)
+        .expect("the archive is written");
+    // Three identical inputs, one archive: uid, gid and mtime stay zero and nothing reads a clock, or every
+    // rebuild would be a new context for the daemon's cache.
+    assert_eq!(
+        bytes,
+        images::archive(images::AGENT_DOCKERFILE, context, &binary)
+            .expect("the archive is written")
+    );
 
     // 512-byte blocks, and the archive ends with two zero blocks: without them the daemon reads a truncated
     // context and fails with a sentence about a Dockerfile rather than about a missing end.
@@ -334,20 +366,20 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
         "Dockerfile"
     );
     assert_eq!(octal(&header[100..108]), 0o644);
-    // uid, gid and mtime zero: the same Dockerfile and the same binary bytes have to be the same archive, or
-    // every rebuild is a different context for the daemon's cache.
+    // uid, gid and mtime zero: the same Dockerfile, the same binary bytes and the same context have to be the
+    // same archive, or every rebuild is a different context for the daemon's cache.
     assert_eq!(octal(&header[108..116]), 0);
     assert_eq!(octal(&header[116..124]), 0);
     assert_eq!(octal(&header[136..148]), 0);
     assert_eq!(
         octal(&header[124..136]),
-        images::PROXY_DOCKERFILE.len() as u64
+        images::AGENT_DOCKERFILE.len() as u64
     );
     assert_eq!(header[156], b'0', "the entry is a regular file");
     assert_eq!(&header[257..263], b"ustar\0");
     assert_eq!(&header[263..265], b"00");
 
-    let dockerfile_block = images::PROXY_DOCKERFILE.len().div_ceil(512) * 512;
+    let dockerfile_block = images::AGENT_DOCKERFILE.len().div_ceil(512) * 512;
     let second = 512 + dockerfile_block;
     assert_eq!(
         std::str::from_utf8(&bytes[second..second + 9]).expect("a name is UTF-8"),
@@ -360,34 +392,113 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     let data = second + 512;
     assert_eq!(&bytes[data..data + 700], &program[..]);
     assert!(bytes[data + 700..data + 1024].iter().all(|byte| *byte == 0));
+
+    // Then the context's entries, in the order [`Kind::context`] gives them: each under its real relative path,
+    // a 0644 regular file whose data is that file's text. This is the crate set a build can vendor from, so a
+    // lock that never reached the context is a failure here as well as on disk.
+    let mut at = data + 1024;
+    for &(path, contents) in context {
+        let header = &bytes[at..at + 512];
+        assert_eq!(
+            std::str::from_utf8(&header[..path.len()]).expect("a name is UTF-8"),
+            path
+        );
+        assert_eq!(octal(&header[100..108]), 0o644);
+        assert_eq!(octal(&header[108..116]), 0);
+        assert_eq!(octal(&header[116..124]), 0);
+        assert_eq!(octal(&header[136..148]), 0);
+        assert_eq!(octal(&header[124..136]), contents.len() as u64);
+        assert_eq!(header[156], b'0', "{path} is not a regular file");
+        let data = at + 512;
+        assert_eq!(&bytes[data..data + contents.len()], contents.as_bytes());
+        let block = contents.len().div_ceil(512) * 512;
+        assert!(
+            bytes[data + contents.len()..data + block]
+                .iter()
+                .all(|byte| *byte == 0),
+            "the padding after {path} is not zero"
+        );
+        at = data + block;
+    }
     assert_eq!(
-        data + 1024 + 1024,
+        at + 1024,
         bytes.len(),
-        "the archive is the two entries and the two zero blocks, and nothing else"
+        "the archive is the Dockerfile, the binary, the context's {} entries and the two zero blocks, and \
+         nothing else",
+        context.len()
     );
 
-    // The `tar` program is the second reader: a header this crate writes and nothing else can parse would be an
-    // archive the daemon also cannot read. `tar` verifies the checksum, which is the one field computed by hand.
-    let archive = dir.file("context.tar");
-    std::fs::write(&archive, &bytes).expect("the archive is writable");
-    let listed = Command::new("tar")
-        .arg("-tvf")
-        .arg(&archive)
-        .output()
-        .expect("tar is on every machine this repository builds on");
-    assert!(
-        listed.status.success(),
-        "tar refused the archive: {}",
-        String::from_utf8_lossy(&listed.stderr)
+    // `tar` reads the same eight entries, in the same order, and sees the binary's own 700 bytes rather than a
+    // block.
+    let names: Vec<String> = tar_lists(&dir, "agent-context.tar", &bytes, "-tf")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let wanted: Vec<String> = std::iter::once("Dockerfile")
+        .chain(std::iter::once("holosmith"))
+        .chain(context.iter().map(|(path, _)| *path))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        names, wanted,
+        "tar does not list the agent image's eight entries in the archive's order"
     );
-    let listing = String::from_utf8_lossy(&listed.stdout);
-    assert!(
-        listing.contains("Dockerfile") && listing.contains("holosmith"),
-        "tar does not list both entries: {listing}"
-    );
+    let listing = tar_lists(&dir, "agent-context.tar", &bytes, "-tvf");
     assert!(
         listing.contains(" 700 "),
         "tar does not see the binary's 700 bytes: {listing}"
+    );
+
+    // The proxy image's context is the two entries alone: its recipe installs no Rust, so there is no crate set
+    // for it to read.
+    let proxy = images::archive(images::PROXY_DOCKERFILE, Kind::Proxy.context(), &binary)
+        .expect("the archive is written");
+    let names: Vec<String> = tar_lists(&dir, "proxy-context.tar", &proxy, "-tf")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        ["Dockerfile", "holosmith"],
+        "the proxy image's context is not the two entries"
+    );
+}
+
+#[test]
+fn the_agent_context_is_the_crate_set_the_tree_has_on_disk() {
+    // A lock or manifest edit that does not reach the image would be a build vendoring another tree's crates, so
+    // every embedded entry is compared with the file at the path it is written under: the archive's copy and this
+    // repository's are one text. The list is asserted first, because a renamed path would otherwise only move what
+    // the comparison reads.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let context = Kind::Agent.context();
+    let paths: Vec<&str> = context.iter().map(|(path, _)| *path).collect();
+    assert_eq!(
+        paths,
+        [
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/holosmith/Cargo.toml",
+            "crates/holosmith/src/lib.rs",
+            "web/package.json",
+            "web/package-lock.json",
+        ],
+        "the agent image's context is not the crate set a build can vendor from"
+    );
+    for &(path, embedded) in context {
+        let on_disk = std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| {
+            panic!("{path} is not readable under {}: {error}", root.display())
+        });
+        assert_eq!(
+            embedded,
+            on_disk.as_str(),
+            "{path} in the binary is not the file on disk, so an edit did not reach the image"
+        );
+    }
+    // The proxy image builds no Rust, so its context has no second entry to send.
+    assert!(
+        Kind::Proxy.context().is_empty(),
+        "the proxy image's context carries entries its recipe cannot read"
     );
 }
 
@@ -396,7 +507,7 @@ fn an_archive_of_a_missing_binary_is_a_sentence_before_the_daemon_is_asked() {
     // A build context with no holosmith in it would fail inside the image as a `COPY`, which names the wrong
     // thing; the read fails first, in the words of what is actually wrong.
     let missing = Path::new("/nonexistent/holosmith-not-here");
-    let sentence = images::archive(images::PROXY_DOCKERFILE, missing)
+    let sentence = images::archive(images::PROXY_DOCKERFILE, &[], missing)
         .expect_err("a path that is not a file has no bytes to archive");
     assert!(
         sentence.contains(&missing.display().to_string()),
@@ -751,7 +862,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     let _ = docker(&["image", "rm", "-f", BROKEN]);
 
     let context =
-        images::archive(images::PROXY_DOCKERFILE, &binary).expect("the context is written");
+        images::archive(images::PROXY_DOCKERFILE, &[], &binary).expect("the context is written");
     let arguments = images::build_arguments(TAG, &expectation);
     let built = <Docker as images::Images>::build(&daemon, TAG, &context, &arguments)
         .expect("the daemon was asked");
@@ -803,7 +914,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
         .find(|line| line.starts_with("FROM "))
         .expect("the proxy Dockerfile starts from a pinned base");
     let broken = format!("{base}\nCOPY missing-file /x\n");
-    let context = images::archive(&broken, &binary).expect("the context is written");
+    let context = images::archive(&broken, &[], &binary).expect("the context is written");
     let arguments = images::build_arguments(BROKEN, &expectation);
     let failed = <Docker as images::Images>::build(&daemon, BROKEN, &context, &arguments)
         .expect("the daemon was asked");
