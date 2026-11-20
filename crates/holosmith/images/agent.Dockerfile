@@ -9,6 +9,26 @@
 # it still does not carry is a Docker daemon, so the container-shaped integration binaries and `scripts/verify.sh`
 # stay a host's work; a session measures the tree, not the machine.
 #
+# **The crate set and the npm packages ship in the image too, as files.** A session's container has no network — the
+# only thing it can reach is the egress proxy — so `cargo build` and `npm ci` have to be answered from the image and
+# not from a registry: `cargo vendor --locked` writes this tree's `Cargo.lock` dependencies into `/opt/cargo-vendor`
+# (105 crates, 108 MB) and `npm ci` fills `/opt/npm-cache` (12 MB) from `web/package-lock.json`. Both steps read the
+# crate set the build context carries (`images::AGENT_CONTEXT`, six files at their real paths), which is why this
+# recipe names files a bare `docker build .` of this repository also has. The point of them is a flag that is no
+# longer needed: `cargo build --locked` and `npm ci` work bare, in a container with no network and an empty
+# `CARGO_HOME`.
+#
+# **`/.cargo/config.toml` sits at the filesystem root, and that is what makes one file enough.** Cargo reads
+# `.cargo/config.toml` from the working directory up through its parents, so a file at `/` is an ancestor of every
+# `/work` a session gets, while the tree's own `.cargo/config.toml` — the two musl linkers and their
+# `relocation-model=static` — is deeper and still wins on the keys it sets. It is written **after** the vendor step,
+# and that order is load-bearing: a `directory` source pointing at a directory that does not exist yet fails with a
+# message about the configuration rather than about the step that has not run.
+#
+# What a session still **cannot** do is add a crate. The vendored crate set is the lock's and nothing else,
+# and there is no network to fetch a crate that is not in it. A new dependency is a lock edit and a rebuild of this
+# image — a host's `cargo fetch`, not something a session can decide offline.
+#
 # The base is node because pi is a node CLI — measured, `/usr/local/bin/pi` is a symlink into the npm global
 # tree — and it is pinned by its **manifest-list digest**, so one Dockerfile resolves to the machine's own
 # architecture.
@@ -42,8 +62,9 @@ COPY --from=rust /usr/local/cargo /usr/local/cargo
 # nothing.** The builder runs as the operator's uid with a `$HOME` its entry script creates, so cargo's own default
 # is writable. A session's container runs as the **data root's owner** — `--user <uid>`, not necessarily the image's
 # `node`, and with no passwd entry at all, so `$HOME` is not a place anything can be put. `/tmp` is writable by any
-# uid, so the registry is per-container and thrown away with it; a gate case mounts a warm `registry/` over this
-# path instead, because a build with no network cannot fetch its crates.
+# uid, so whatever cargo writes there is per-container and thrown away with it. It starts **empty**: the crates a
+# build needs are vendored into `/opt/cargo-vendor` below, and `/.cargo/config.toml` is what points cargo at them,
+# so nothing has to be fetched and no mount has to be made.
 #
 # Never `RUSTFLAGS` (ADR-0005): it would disable `.cargo/config.toml`'s per-target `relocation-model=static` and
 # silently ship a static-PIE binary — one container out, the same trap.
@@ -65,9 +86,11 @@ ARG HOLOSMITH_BINARY_SHA256
 ARG HOLOSMITH_TOOLCHAINS
 
 # `build-essential` is the `cc` the `cc` crate needs for bundled SQLite — a session that runs `cargo test` compiles
-# it from source — and `curl` is what fetches the two musl.cc tarballs below, at image-build time.
+# it from source — `curl` is what fetches the two musl.cc tarballs below, at image-build time, and `file` is what
+# `scripts/check-static.sh` reads an artifact's link state with (`file -b`), so `scripts/build.sh` — whose last step
+# that script is — cannot finish in a session without it. The `readelf` it also runs arrives with `build-essential`.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates curl git openssl \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates curl file git openssl \
       ${HOLOSMITH_TOOLCHAINS} \
  && rm -rf /var/lib/apt/lists/*
 
@@ -97,6 +120,65 @@ RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/aarch64-linux-musl-cross.tgz \
 
 RUN npm install -g --omit=dev "@earendil-works/pi-coding-agent@${HOLOSMITH_PI_VERSION}" \
  && npm cache clean --force
+
+# The crate set and the web pair, in the context at their real paths. **The two `Cargo.toml` files share a
+# basename**, and `COPY` keeps a source's name when the destination is a directory, so they cannot travel in one
+# instruction: the workspace's becomes the scratch root's `Cargo.toml` and the member's goes to
+# `crates/holosmith/Cargo.toml`, which is the layout `cargo vendor` resolves a workspace from. The `RUN` below reads
+# the scratch root and removes it, so the image keeps the two directories that are the point and nothing else.
+COPY Cargo.toml Cargo.lock /tmp/vendor-src/
+COPY crates/holosmith/Cargo.toml /tmp/vendor-src/crates/holosmith/Cargo.toml
+COPY crates/holosmith/src/lib.rs /tmp/vendor-src/crates/holosmith/src/lib.rs
+COPY web/package.json web/package-lock.json /tmp/web/
+
+# `cargo vendor --locked`: the lock's crates and only those, because a vendored crate set that is not the lock's is a
+# build with other crates in it. **The scratch `CARGO_HOME` is this step's own and is removed in the same `RUN`**,
+# so the layer keeps the 108 MB of unpacked crates and not a second copy of the same bytes as `.crate` archives.
+# The session's `CARGO_HOME` stays `/tmp/cargo`, empty of crates: it is where cargo writes, not where it reads.
+#
+# The lock's own digest is written beside the crates. It is the one value that says whether a vendor directory is
+# *this* tree's crate set, and `scripts/verify.sh`'s `case_agent_toolchain` compares it with the tree's `Cargo.lock`
+# rather than trusting that two versions of a file agree. `a+rX` because a session runs as the data root's owner,
+# which is neither root nor the image's `node` (ADR-0087), and reading these files is all it may do with them.
+RUN cd /tmp/vendor-src \
+ && CARGO_HOME=/tmp/cargo-vendor-home cargo vendor --locked /opt/cargo-vendor \
+ && sha256sum Cargo.lock | cut -d' ' -f1 > /opt/cargo-vendor/.holosmith-cargo-lock \
+ && rm -rf /tmp/vendor-src /tmp/cargo-vendor-home \
+ && chmod -R a+rX /opt/cargo-vendor
+
+# The replacement that directory needs, in the one file every `/work` sees (the header says why `/` and why after).
+# `net.offline = true` is the second half: a build that asks for something the directory does not hold gets the
+# `--offline` sentence, which names the missing dependency, instead of waiting on a network that is not there.
+RUN mkdir -p /.cargo \
+ && printf '%s\n' \
+      '[source.crates-io]' \
+      'replace-with = "vendored-sources"' \
+      '' \
+      '[source.vendored-sources]' \
+      'directory = "/opt/cargo-vendor"' \
+      '' \
+      '[net]' \
+      'offline = true' \
+      > /.cargo/config.toml
+
+# The npm half: `npm ci` against the web lock fills the cache with the tarballs a session's `npm ci` reads, and the
+# `node_modules` it installs leaves with the scratch tree. `/opt/npm-cache` is named explicitly here because the
+# `ENV` block below is not in effect yet — and must not be, since this step needs the network and that block says
+# `offline`. The fill comes **after** the `npm cache clean --force` above for the reason it is a separate step at
+# all: a clean of a cache that already held these packages is a cache with nothing in it.
+RUN cd /tmp/web \
+ && npm ci --cache /opt/npm-cache \
+ && rm -rf /tmp/web \
+ && chmod -R a+rX /opt/npm-cache
+
+# The npm counterparts of `CARGO_HOME`, set after the steps they would have broken: `offline=true` is what makes a
+# session's `npm ci` read `/opt/npm-cache` instead of asking a registry, and it is here rather than with the
+# toolchain's `ENV` because the pi install and the cache fill above need the network. `npm_config_logs_dir` is the
+# one path npm writes that is not the cache — its default is `<cache>/_logs`, and the cache is read-only for a
+# session, which is a uid the image never created.
+ENV npm_config_cache=/opt/npm-cache \
+    npm_config_offline=true \
+    npm_config_logs_dir=/tmp/npm-logs
 
 COPY holosmith /usr/local/bin/holosmith
 

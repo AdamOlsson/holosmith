@@ -4,9 +4,10 @@ Read this when an agent cannot install packages, or before you widen what sessio
 [Back to README](../README.md).
 
 **A session has no Internet by default.** `[egress] allow = []` means the agent reaches its provider through the key
-proxy and nothing else, so `cargo build` or `npm install` fails — the toolchain is in the image (rustc, cargo,
-rustfmt, clippy and both musl cross linkers are part of the fixed set), so what a session lacks with this list empty
-is the **network**, not a compiler. Add the hosts a project needs in
+proxy and nothing else. It does not mean a build fails: the toolchain is in the image (rustc, cargo, rustfmt, clippy and
+both musl cross linkers are part of the fixed set) and so are the crates `Cargo.lock` names and the web app's packages,
+so `cargo build --locked` and `npm ci` need no flag and no network. What an empty list blocks is a crate or a package
+the image does not carry — a new dependency, or another project's. Add the hosts a project needs in
 `holosmith config edit`, then restart:
 
 ```toml
@@ -20,7 +21,7 @@ systemctl --user restart holosmith
 
 - **A session can also be opened with Internet access for one turn of work**: the new-session form's Internet access
   toggle starts from `network_default`, which is `false` by default, and ticking it is enough for a session that needs
-  cargo or npm.
+  a crate or a package the image does not carry.
 - **Provider traffic does not use this list.** It goes through the key proxy, which is why no provider host belongs in
   `allow`. A tool's host (`mcp.linear.app`) needs no entry either: the MCP proxy reaches it over its own TLS
   connection, and joins a session's network only while the checkbox is on (ADR-0099).

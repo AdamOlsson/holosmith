@@ -11713,34 +11713,37 @@ case_server_images() {
 }
 
 # The agent image can run this tree's own gate: rustc, cargo, rustfmt, clippy and both musl cross linkers, at the
-# version the recipe pins (ADR-0105).
+# version the recipe pins, and the crates and npm packages the tree builds from inside the image itself (ADR-0105,
+# ADR-0106).
 #
 # The case's whole reason is that a **host cannot answer an image question**. `cargo fmt` on the gate's machine says
-# nothing about what a session's container holds, and the image is what a session runs: so the three commands a
-# worker runs are the three measured here, in a container shaped exactly like a session's — `--network none`, the
+# nothing about what a session's container holds, and the image is what a session runs: so the commands a worker
+# runs are the commands measured here, in a container shaped exactly like a session's — `--network none`, the
 # invoking uid (`--user "$(id -u):$(id -g)"`, because `container.rs` passes the data root's owner, which is *not*
 # the image's `node`), and a session's limits (`--cpus 2 --memory 4096m`) so what is measured is the product's shape
 # rather than a generous one.
 #
-# The numbers, measured on this host, are why the shape is what it is: the image is ~3.4 GB (725 MB before the
-# toolchain), `cargo fmt --check` answers in 1 s, `cargo clippy --all-targets` in ~50 s, `cargo test --no-run` in
-# ~153 s, and one full `cargo test` writes **8.9 GB** of `target/`. So the tree is **copied** into this case's own
-# directory under `$repo_root/target/` rather than mounted writable (`$WORK` is a `mktemp -d` on a tmpfs the daemon
-# may not see, ADR-0035's rule), and nothing is left behind but the image.
+# The numbers, measured on this host, are why the shape is what it is: the image is ~3.5 GB (725 MB before the
+# toolchain and the crate set), `cargo fmt --check` answers in 1 s, `cargo clippy --all-targets` in ~38 s, `cargo
+# test --no-run` in ~2 min, and one full `cargo test` writes **8.9 GB** of `target/`. So the tree is **copied** into
+# this case's own directory under `$repo_root/target/` rather than mounted writable (`$WORK` is a `mktemp -d` on a
+# tmpfs the daemon may not see, ADR-0035's rule), and nothing is left behind but the image.
 #
-# `--network none` is the point — a session's container reaches only the proxies — so cargo cannot fetch and
-# `Cargo.lock`'s crates have to come from somewhere: a **warm registry** is copied out of `$CARGO_HOME` and mounted
-# at `/tmp/cargo`, which is the image's `CARGO_HOME`. `--offline` says so out loud rather than letting a machine with
-# a proxy allow-list quietly succeed.
+# `--network none` is the point — a session's container reaches only the proxies — so nothing can be fetched. Nothing
+# has to be: the image carries the crate set (`/opt/cargo-vendor`, written by the recipe's own `cargo vendor --locked`)
+# and the npm cache (`/opt/npm-cache`), and `/.cargo/config.toml` plus the `npm_config_*` environment are what point a
+# bare `cargo build --locked` and a bare `npm ci` at them (ADR-0106). **Nothing is mounted over `CARGO_HOME` and no
+# command below passes `--offline`**: both are the fact this case measures, because they are what a worker relies on
+# and the two things a warm registry mount used to hide.
 #
 # The image itself is `agent-image:$version`, which `case_server_images` builds and leaves in place: it removes both
 # tags at its start, so the tag this case reads is one built from **this** tree, and the ordering in `serve_cases` is
 # what makes that true. A machine where it is absent skips with the reason rather than measuring an older image.
 case_agent_toolchain() {
   local name=case_agent_toolchain root="$repo_root/target/verify-toolchain-$$"
-  local agent version pinned answer code tree cargo status
+  local agent version pinned answer code tree status
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-    printf 'SKIP %s: no Docker daemon answers (no test can cover this: the three commands need the image, which case_server_images builds)\n' "$name"
+    printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
     return 0
   fi
   version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
@@ -11760,7 +11763,7 @@ case_agent_toolchain() {
   esac
 
   rm -rf "$root"
-  mkdir -p "$root/cargo"
+  mkdir -p "$root"
   # The session's runtime, as a session mounts it: a copy, so a `--network none` run has the source and not the
   # operator's tree, and the copy — not `target/` — is what gets built. The copy is **`git ls-files`**: the tracked
   # tree, byte for byte as it stands (a dirty tree is what a worker's tree is), so what runs in the container is what
@@ -11773,25 +11776,16 @@ case_agent_toolchain() {
   git -C "$repo_root" ls-files -z | tar -C "$repo_root" --null -T - -cf - | tar -C "$tree" -xf - ||
     fail "$name/copy" "could not copy the tracked tree into $tree"
   assertions=$((assertions + 1))
-  cargo="${CARGO_HOME:-$HOME/.cargo}"
-  if [ ! -d "$cargo/registry" ]; then
-    printf 'SKIP %s: no cargo registry at %s/registry to mount, so an offline build cannot fetch its crates\n' \
-      "$name" "$cargo"
-    rm -rf "$root"
-    return 0
-  fi
-  cp -a "$cargo/registry" "$root/cargo/registry" ||
-    fail "$name/registry" "could not copy $cargo/registry into the case's tree"
 
-  # One shape for all five runs, because the point is that it is a session's and not a convenient one: no network,
-  # the invoking uid, the session's limits, the copied tree writable at `/src`, and the warm registry at the image's
-  # own `CARGO_HOME`.
+  # One shape for every run, because the point is that it is a session's and not a convenient one: no network,
+  # the invoking uid, the session's limits, and the copied tree writable at `/src`. Nothing is mounted over
+  # `CARGO_HOME=/tmp/cargo` — it starts empty, as it does for a session, and the crates come from the image.
   in_image() {
     local entrypoint="$1"
     shift
     docker run --rm --network none \
       --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-      -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+      -v "$tree:/src" -w /src \
       --entrypoint "$entrypoint" "$agent" "$@" 2>&1
   }
 
@@ -11800,8 +11794,8 @@ case_agent_toolchain() {
   check "$name/cargo/version" "cargo $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
   answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in the agent image: $answer"
   check "$name/rustc/version" "rustc $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
-  # Both cross linkers, by name: `.cargo/config.toml` names them for the two musl targets, and a session that cannot
-  # find one gets a linker-not-found that reads like a code error.
+  # Both cross linkers, by name: the tree's own `.cargo/config.toml` names them for the two musl targets, and a
+  # session that cannot find one gets a linker-not-found that reads like a code error.
   for linker in x86_64-linux-musl-gcc aarch64-linux-musl-gcc; do
     answer="$(in_image "$linker" --version)" ||
       fail "$name/$linker" "$linker does not run in the agent image: $answer"
@@ -11811,29 +11805,43 @@ case_agent_toolchain() {
     esac
   done
 
-  # The three commands a worker runs, in that order and from the copied tree. `cargo test` is the one that needs the
-  # registry and the one whose failure mode is a hang, so it is named and removed rather than left to `--rm` when a
-  # `timeout` kills the CLI (a killed `docker` does not stop its container).
+  # The vendored crate set is **this** tree's: the recipe records the digest of the `Cargo.lock` it vendored with, and
+  # the copy at `/src` is the tree this commit would make. A lock that reached one and not the other is a build against
+  # another tree's crates, which is the failure the digest exists for.
+  answer="$(in_image cat /opt/cargo-vendor/.holosmith-cargo-lock | tr -d '\n')"
+  check "$name/vendor/lock" "$(sha256sum "$tree/Cargo.lock" | cut -d' ' -f1)" "$answer"
+
+  # The commands a worker runs, in that order and from the copied tree. `cargo build --locked` is the acceptance's own
+  # fact — no flag beyond the lock, so a build that wanted the network would fail here rather than on a machine that
+  # happens to have a proxy allow-list. `cargo test` is the one whose failure mode is a hang, so it is named and
+  # removed rather than left to `--rm` when a `timeout` kills the CLI (a killed `docker` does not stop its container).
+  code=0
+  timeout 900 docker run --rm --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src \
+    --entrypoint cargo "$agent" build --locked >"$WORK/$name.build.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] || fail "$name/build" "cargo build --locked exited $code: $(tail -20 "$WORK/$name.build.out")"
+  assertions=$((assertions + 1))
   code=0
   timeout 300 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
+    -v "$tree:/src" -w /src \
     --entrypoint cargo "$agent" fmt --check >"$WORK/$name.fmt.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/fmt" "cargo fmt --check exited $code: $(tail -20 "$WORK/$name.fmt.out")"
   assertions=$((assertions + 1))
   code=0
   timeout 900 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
-    --entrypoint cargo "$agent" clippy --offline --all-targets -- -D warnings \
+    -v "$tree:/src" -w /src \
+    --entrypoint cargo "$agent" clippy --all-targets -- -D warnings \
     >"$WORK/$name.clippy.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/clippy" "cargo clippy exited $code: $(tail -20 "$WORK/$name.clippy.out")"
   assertions=$((assertions + 1))
   status=0
   timeout 1200 docker run --rm --name "hs_toolchain_test_$$" --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src -v "$root/cargo:/tmp/cargo" \
-    --entrypoint cargo "$agent" test --offline --no-fail-fast -- --nocapture \
+    -v "$tree:/src" -w /src \
+    --entrypoint cargo "$agent" test --no-fail-fast -- --nocapture \
     >"$WORK/$name.test.out" 2>&1 || status=$?
   timeout 60 docker rm -f "hs_toolchain_test_$$" >/dev/null 2>&1 || true
   [ "$status" -eq 0 ] ||
@@ -11847,8 +11855,18 @@ case_agent_toolchain() {
       "no SKIP line in the container's cargo test names a missing daemon, so --nocapture did not carry it: $(grep -c SKIP "$WORK/$name.test.out" || true) SKIP lines"
   assertions=$((assertions + 1))
 
-  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy, the
-  # registry and the outputs are this case's own and go.
+  # The web app's own install, with no flag: `npm_config_offline=true` and `npm_config_cache` are the image's, and
+  # `npm_config_logs_dir` is why a cache this uid cannot write is still enough for npm to work out of.
+  code=0
+  timeout 300 docker run --rm --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src/web \
+    --entrypoint npm "$agent" ci >"$WORK/$name.npm.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] || fail "$name/npm" "npm ci exited $code: $(tail -20 "$WORK/$name.npm.out")"
+  assertions=$((assertions + 1))
+
+  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy and the
+  # outputs are this case's own and go.
   rm -rf "$root"
 }
 

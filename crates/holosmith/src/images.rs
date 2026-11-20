@@ -62,7 +62,7 @@ pub type Context = [(&'static str, &'static str)];
 /// - the member's real `src/lib.rs`, because a target is a source file and not a manifest entry: the three manifests
 ///   alone answer `no targets specified in the manifest`, and measured, these six produce the crate set a vendor over
 ///   the whole tree does. That is why the file travels rather than a generated stub;
-/// - `Cargo.lock`, because a vendored directory that is not the lock's is a build with other crates in it;
+/// - `Cargo.lock`, because a vendored crate set that is not the lock's is a build with other crates in it;
 /// - the web pair, for the app this binary embeds: `npm ci`'s two files.
 ///
 /// The lock is also an input of *this binary* — it is embedded here — so an edited lock changes the artifact's bytes
@@ -117,9 +117,12 @@ pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 /// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks two cross
 /// toolchains of its own. **Measured at 10 min 30 s with both base images already on the machine** — `rust` is
 /// 2.2 GB and `node` 333 MB, so a cold one also pulls ~2.5 GB that this bound has to cover — and the rust stage
-/// is copied rather than installed, which is why the number is minutes and not an hour. It is a **bound** and not
-/// a timeout to fail by: `Ok(None)` from the build is "the build did not finish", which stops the step with a
-/// sentence rather than hanging a deploy nobody is watching.
+/// is copied rather than installed, which is why the number is minutes and not an hour. That figure predates the
+/// vendor and npm steps (ADR-0106), which run **inside** the same bound: their own cost is unmeasured, so the forty
+/// minutes is the ceiling a `cargo vendor --locked` of the lock's 105 crates and one `npm ci` of the web app have to
+/// fit in, not a number that includes them. It is a **bound** and not a timeout to fail by: `Ok(None)` from the build
+/// is "the build did not finish", which stops the step with a sentence rather than hanging a deploy nobody is
+/// watching.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(2400);
 
 /// `holosmith-proxy:<version>`: the image the machine's three proxies run, named from this binary.
@@ -554,8 +557,8 @@ impl Images for Docker {
             Ok(Some(log)) => Ok(log),
             Ok(None) => Err(format!(
                 "the build of {tag} did not finish within {}s and was killed: a first build installs pi, pulls \
-                 both bases and the two cross toolchains over the network, so this is a machine that could not \
-                 reach it rather than a Dockerfile that is wrong",
+                 both bases, vendors the crate set and fetches the two cross toolchains over the network, so this is a \
+                 machine that could not reach it rather than a Dockerfile that is wrong",
                 BUILD_TIMEOUT.as_secs()
             )),
             Err(error) => Err(error.to_string()),
