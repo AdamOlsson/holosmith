@@ -57,11 +57,11 @@ One command proves the tree:
 . ~/.pi/toolchains/env.sh && scripts/verify.sh
 ```
 
-It takes about half an hour on this host (~5 min 20 s of it the session offline build case), and
-green is its last line: `verify: <n> assertions, ok`. A `FAIL case_x/assertion` line above it names
-the case and the assertion; a case that cannot measure its fact prints `SKIP` with the reason instead
-of passing quietly. The count moves as cases are added, so read the shape of that line, not its
-number. It wants a working Docker daemon for the container cases.
+It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
+(~5 min 20 s of it the session offline build case). Green is its last line: `verify: <n> assertions, ok`.
+A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure its
+fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added, so read
+the shape of that line, not its number. It wants a working Docker daemon for the container cases.
 
 The same gate is three commands of its own, cheapest first, when one of them is all you need:
 
@@ -75,9 +75,9 @@ A worker runs none of that block. `scripts/gate-quick.sh <test-binary>...` runs 
 `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, and only the integration binaries you
 name; `--list` prints their names. Name every binary whose module you touched, and if your change names
 none, run `--lib-only` and say so in your report. The footer counts the binaries that did not run —
-`2 of 65 test binaries run` — so an under-named change is visible in the run's own last line. Relinking
-all 65 test binaries costs about a minute and running them about two and a half, which is where a
-worker's turn goes when it re-runs `cargo test` two or three times. `cargo test` and `scripts/verify.sh`
+`<n> of <total> test binaries run` — so an under-named change is visible in the run's own last line.
+Relinking every test binary costs about a minute and running them about two and a half, which is where
+a worker's turn goes when it re-runs `cargo test` two or three times. `cargo test` and `scripts/verify.sh`
 belong to the parent: its run is the proof, and a green quick gate says on its last line that the tree
 is not proven. The two tiers are therefore recorded here and not in an ADR — ADR-0003 still reads as if
 there is one gate, which is the cost of keeping the rule where an agent will read it.
@@ -101,6 +101,12 @@ only place a failed run's evidence lives, while every scratch tree a *case* make
 `target/verify-<case>-$$` and carries the run's pid. So a run that is killed leaves its scratch behind
 under a pid that is gone, and `target/verify.log` from it stays where a poller would read it: check the
 file's mtime against the run you started before trusting a sentinel.
+
+**A case that binds a unix socket must keep its path short.** `AF_UNIX` caps one at 107 bytes; the deepest
+here is `verify-doctor-tool-key`'s, `<repo_root>/target/verify-doctor-tool-key-<pid>/docker.sock`, already
+107–108 at this repository's own root. A case whose scratch directory is longer does not fit, and its
+failure names a missing socket rather than the depth. The cases that need one anyway put it under `$WORK`,
+a `mktemp -d`, as the docker stand-ins do.
 
 And never `pgrep -f` a pattern that also appears in the command line you are running: the match is your
 own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing

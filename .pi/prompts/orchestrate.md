@@ -28,11 +28,14 @@ Then, in this order:
    resets it — a `git reset --hard origin/master` throws those commits away. Then
    `git fetch origin && git worktree add <path> -b <TICKET>-<slug> master`.
 
-   **The directory name has a length budget.** A gate case binds a unix socket under the worktree, and `AF_UNIX`
-   caps the path at 107 bytes, so a three-to-five-word slug under `~/.local/share/holosmith/worktrees/` can push
-   it over and fail that case at the end of a run — the message names a missing socket, not the depth. When the
-   slug would not fit, use a short `<TICKET>` directory and keep the full name on the branch; say which you did
-   on the ticket. Everything below happens in that worktree unless a step says `master` or the main repository.
+   **The directory name has a length budget, and the rule is "shorter than the main repository's own path".** A
+   gate case binds a unix socket under the worktree at `<repo_root>/target/verify-doctor-tool-key-<pid>/`, and
+   `AF_UNIX` caps the path at 107 bytes; at the main repository's own root that socket already reaches 107–108, so
+   the repository is the deepest tree the gate is known to pass at, and a longer worktree risks a failure whose
+   message names a missing socket and not the depth. The path must therefore be **shorter** than
+   `git rev-parse --show-toplevel`'s, not merely short. When the slug would push it past that, use a short
+   `<TICKET>` directory and keep the full name on the branch; say which you did on the ticket. Everything below
+   happens in that worktree unless a step says `master` or the main repository.
 
 3. **Launch the worker subagent** for the implementation. Give it the ticket's intent and acceptance criteria
    verbatim, the seams you found, and these rules:
@@ -54,8 +57,10 @@ Then, in this order:
    line names the failure, and the `work dir kept:` line under it names the tree holding that case's evidence).
    Check the log's mtime against the run you started before trusting the sentinel. **Spend ten seconds on the
    preconditions first** — the ones AGENTS.md's prerequisite list names, and each cheaper than the run it saves:
-   a daemon that answers, no `agent-image:<version>` tag yet (which costs a ten-minute rebuild), free disk, and
-   a worktree path the gate's sockets fit. If the diff touches `web/`, also run its own gate:
+   a daemon that answers, free disk (a run is about ten gigabytes of `target/`, and the three product images'
+   build cache is what keeps the rebuild near six minutes), and a worktree path the gate's sockets fit. An
+   existing `agent-image:<version>` saves nothing: `case_server_images` untags both product images and asserts
+   they are gone before it rebuilds them. If the diff touches `web/`, also run its own gate:
    `cd web && npm ci && npm test && npm run build`. A red gate goes back to the worker with the failing case or
    assertion named — not to the reviewer.
 
@@ -93,9 +98,10 @@ Throughout:
 - **Keep the ticket current.** In Progress when the work starts; a comment when the gate goes red and again when
   it goes green; the review verdict and the fix round; Done only once the merge commit exists and the worktree is
   gone. Never Done on a red gate, an unmerged branch, or a `BLOCK` verdict.
-- **Stop and report instead of improvising**: no ticket, a ticket outside Holosmith, a red gate after two fix
-  rounds, a conflict on master, a failed subagent launch, a `BLOCK` verdict after the fix pass. Leave the worktree
-  and branch where they are, say exactly what state they are in, and say the same on the ticket.
+- **Stop and report instead of improvising**: no ticket, a ticket already `Done` whose work is in `master` (check
+  before cutting a worktree: an id is not an instruction to redo merged work), a ticket outside Holosmith, a red
+  gate after two fix rounds, a conflict on master, a failed subagent launch, a `BLOCK` verdict after the fix pass.
+  Leave the worktree and branch where they are, say exactly what state they are in, and say the same on the ticket.
 - One `scripts/verify.sh` at a time, and never `pgrep -f` a pattern that appears in your own command line.
 - Nothing in this flow adds an issue identifier to code, comments, help text, docs or commit messages.
 

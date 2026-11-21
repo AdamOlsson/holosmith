@@ -177,7 +177,7 @@ phase() {
 phase fmt "${GATE_FMT[*]}" "${GATE_FMT[@]}"
 phase clippy "${GATE_CLIPPY[*]}" "${GATE_CLIPPY[@]}"
 # The lib tests are the crate's own unit tests, and they are the one place a quick gate can be broad for free:
-# 649 of them run in five seconds, so nothing about them is why the full suite is expensive.
+# several hundred of them run in seconds, so nothing about them is why the full suite is expensive.
 if gate_web_present; then
   phase lib 'cargo test --lib (HOLOSMITH_REQUIRE_WEB=1)' env HOLOSMITH_REQUIRE_WEB=1 cargo test --lib
 else
