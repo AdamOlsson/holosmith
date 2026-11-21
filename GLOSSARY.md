@@ -409,7 +409,7 @@ _Avoid_: Disk quota, storage limit, free-space check (a **disk floor** is the ma
 is one session's)
 
 **Session disk cap**:
-`session_disk_soft_gb` (default 10, and `0` means **off**): how large one session's worktree may grow before
+`session_disk_soft_gb` (default 20, and `0` means **off**): how large one session's worktree may grow before
 the machine stops it, so one bad build cannot starve the others. A **watchdog** (`quota::Quota`, spawned by
 `serve` beside the **sweeper**) measures every `running` and `idle` session's worktree with `du -sk` on a
 five-minute tick — the interval is a constant, because it *is* the policy — and when the size is over the cap
@@ -419,7 +419,10 @@ it ends the turn (the **abort ladder**'s second rung, with the reason `disk_quot
 deleted, and the operator raises the cap for a large Rust project rather than fighting it, because `target/`
 and `node_modules/` are inside the worktree and therefore counted. Caches are per session (decision D2, spec
 item 14): nothing a session mounts is shared except the project's `.git`, so a first build is slow and nothing
-else pays. Its machine names are `quota::{Quota, DISK_QUOTA, watchable, measure, over}`, the trigger
+else pays. **Amended by ADR-0107:** one Rust session's full test run and both musl release builds measured 9.6 GB
+of `target/`, so the shipped default is 20 — and a cap that exempted a build tree would not be the watchdog it
+exists to be.
+Its machine names are `quota::{Quota, DISK_QUOTA, watchable, measure, over}`, the trigger
 `Trigger::DiskQuota`, the event kind `events::ERROR` and the reason `DISK_QUOTA`.
 _Avoid_: Disk quota (the code's word, not the concept), storage limit, per-session filesystem, hard cap
 

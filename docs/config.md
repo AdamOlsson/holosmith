@@ -124,7 +124,7 @@ may reach is the row's, and what it is configured with is the key's (ADR-0100).
 | `max_session_tokens` | integer | unset | A token ceiling across a session's whole life; reaching it stops the session. Unset means unlimited; `0` is refused — unset is how you say "no ceiling" (ADR-0027). |
 | `stopped_ttl_days` | integer | `7` | Days a `stopped` session is kept before the expiry sweep deletes it and its worktree. At least 1 (ADR-0070). |
 | `min_free_gb` | integer | `20` | Free space, in whole GB, this machine must have on the data root. It is a **preflight** floor — `serve` refuses to boot below it and `doctor` reports it — and the create and the resume answer `507 disk_floor`. `0` disables the floor. |
-| `session_disk_soft_gb` | integer | `10` | A per-session soft cap on the worktree's size. Past it the session is stopped with reason `disk_quota`. **`0` is the off switch** (no watchdog). The worktree's size includes `target/` and `node_modules/`, so a large project should raise this rather than rebuild on every resume (ADR-0069). A Rust project that builds its test binaries once measured **8.9 GB** of `target/` against this default of 10, so a Rust project has little headroom and a second build's `target/` exceeds it. |
+| `session_disk_soft_gb` | integer | `20` | A per-session soft cap on the worktree's size. Past it the session is stopped with reason `disk_quota`. **`0` is the off switch** (no watchdog). The worktree's size includes `target/` and `node_modules/`, so a large project should raise this rather than rebuild on every resume (ADR-0069). The default is 20 because offline builds made a session's full command set normal: one Rust session's `target/` measured **9.2 GB** after `cargo build --locked`, `cargo clippy --all-targets` and `cargo test --no-run`, and **9.6 GB** after both musl release builds. Against the 10 this key used to default to, that is 0.4 GB of headroom — less than the checkout the same worktree holds outside `target/` — so the next configuration or the next build crosses it (ADR-0107). |
 | `project_backup` | boolean | `false` | Take one verified backup bundle of the project per day (ADR-0034). |
 | `history_window` | integer | `50` | How many messages a client that opens an event stream with no `Last-Event-ID` is replayed, plus a `history.truncated` frame saying where the replay started. At least 1: a client replayed nothing cannot tell an empty session from a cut one. Older history is paged. |
 
@@ -186,15 +186,26 @@ allowed_hosts = ["holosmith.example.net", "preview.example.net"]
 owner = "adamolsson"
 data_root = "/home/you/.local/share/holosmith/data"
 projects_root = "/home/you/.local/share/holosmith/projects"
-min_free_gb = 10
-session_disk_soft_gb = 5
+min_free_gb = 60
+session_disk_soft_gb = 20
 
 [egress]
-allow = ["crates.io", "index.crates.io", "static.crates.io", "registry.npmjs.org", "github.com"]
+allow = ["github.com"]
 
 [linear]
 mcp = "readonly"
 ```
+
+The two disk numbers are different guards, and the arithmetic between them is the reason both are written out.
+`session_disk_soft_gb` is one session's own ceiling — 20 is the default, and it is what a Rust session's build
+needs, because a full test run followed by both musl release builds measured 9.6 GB of `target/` (ADR-0107) — while
+`min_free_gb` is a whole-disk floor that refuses a create or a resume below it. The cap is per session and
+`max_live_sessions` defaults to 3, so three Rust projects building at once hold up to 60 GB of worktrees, `target/`
+and `node_modules/` between them: a host that lets them is the host that sets the floor near that sum, as this one
+does, and a host whose disk is smaller is a host that lowers `max_live_sessions` rather than either number here. The
+allow-list carries no registry host because the crates and the web app's packages are in the agent image and a build
+needs no network (ADR-0106); a project that adds a dependency adds `crates.io`, `index.crates.io`, `static.crates.io`
+and `registry.npmjs.org` back (see `docs/egress.md`).
 
 A pair: an always-on hub and one server behind it. The hub's registry names the server; the server trusts the hub by
 node name.

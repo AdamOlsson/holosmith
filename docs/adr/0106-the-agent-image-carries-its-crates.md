@@ -204,6 +204,12 @@ measured on a project that builds rather than inferred from an image's size, and
 cap means for `min_free_gb` and for several sessions on one disk. Deferred here, deliberately: this ADR decided what an
 image carries, not how much a session may write.
 
+**Amended by ADR-0107:** that decision has been taken, and the cap is **20**, not 10. The number it wanted measured on a
+project that builds is 9.2 GB of `target/` after the build, clippy and `cargo test --no-run`, and 9.6 GB after both
+musl release builds, and what a larger cap means for `min_free_gb` (still 20) and for several sessions on one disk
+(`max_live_sessions`' 3 × 20 = 60 GB of worktrees) is that ADR's D3. Exempting a build directory from the `du` was
+refused there too, so ADR-0069's everything-counts rule stands as it was written.
+
 ## Consequences
 
 - `scripts/verify.sh`'s `case_agent_toolchain` measures the new fact instead of the old one: no registry mount, no
@@ -228,7 +234,9 @@ image carries, not how much a session may write.
   cache the fill writes after the `npm cache clean --force`. Those are the edits a mis-edit breaks five minutes into a
   gate case.
 - The first image build on a machine fetches ~120 MB more, and a session's `target/` is unchanged — still the 8.9 GB
-  ADR-0105 measured against `session_disk_soft_gb`'s default of 10, which D8 leaves where it is.
+  ADR-0105 measured against `session_disk_soft_gb`'s default of 10, which D8 leaves where it is. **Amended by
+  ADR-0107:** the default is 20, so the tree that measured 9.2 GB after the build, clippy and `cargo test --no-run`,
+  and 9.6 GB after both musl release builds, now fits the shipped cap.
 - `scripts/check-crate-set.sh` is D7's mechanism and has its own three arms in the gate: absent, stale and matching,
   each run through the real script with `HOLOSMITH_CRATE_SET` pointing at a written marker, plus one more in which
   `scripts/gate-quick.sh` itself refuses with **3**. The matching arm is the one worth pinning — it is what every

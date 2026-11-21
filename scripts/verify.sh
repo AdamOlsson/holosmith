@@ -11328,9 +11328,10 @@ case_disk_quota() {
   } >"$root/bin/du" || fail "$name/stand_in" "could not write the du stand-in"
   chmod 0755 "$root/bin/du"
 
-  # `session_disk_soft_gb` at its default (10) rather than a case-specific number: the story's own number, and one
-  # the shim's 15 GiB is over. `min_free_gb = 1` because the gate's `/tmp` is small and this case is not about the
-  # floor.
+  # `session_disk_soft_gb` at the spec's own number (10, ADR-0069), and one the shim's 15 GiB is over, rather than a
+  # case-specific one. It is deliberately *below* the shipped default of 20, because a cap above the stand-in's
+  # answer would name a session that never crossed it (ADR-0107). `min_free_gb = 1` because
+  # the gate's `/tmp` is small and this case is not about the floor.
   printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\nturn_timeout_min = 0\nsession_disk_soft_gb = 10\n' \
     "$owner" "$root/projects" "$data" "$image" >"$WORK/config-disk-quota.toml"
 
