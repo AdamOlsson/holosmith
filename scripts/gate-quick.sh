@@ -17,7 +17,7 @@
 # cargo that is not the pinned 1.99 line is refused with the sentence that fixes it (AGENTS.md).
 # GATE_QUICK_ALLOW_TOOLCHAIN=1 runs anyway, and repeats the mismatch in the footer so it cannot be missed.
 #
-# The crate set is the image's and not this tree's: under the image's source replacement a crate the vendored set
+# The crate set is the image's and not this tree's: under the image's source replacement a crate the crate set
 # does not hold fails as "could not be found in registry index", which reads as a broken registry, so
 # `scripts/check-crate-set.sh` runs before the phases and refuses an image vendored from another `Cargo.lock` with
 # its own sentence — the tree is fine and the image is stale.

@@ -13,7 +13,7 @@
 # only thing it can reach is the egress proxy — so `cargo build` and `npm ci` have to be answered from the image and
 # not from a registry: `cargo vendor --locked` writes this tree's `Cargo.lock` dependencies into `/opt/cargo-vendor`
 # (105 crates, 108 MB) and `npm ci` fills `/opt/npm-cache` (12 MB) from `web/package-lock.json`. Both steps read the
-# crate set the build context carries (`images::AGENT_CONTEXT`, six files at their real paths), which is why this
+# files the build context carries (`images::AGENT_CONTEXT`, six files at their real paths), which is why this
 # recipe names files a bare `docker build .` of this repository also has. The point of them is a flag that is no
 # longer needed: `cargo build --locked` and `npm ci` work bare, in a container with no network and an empty
 # `CARGO_HOME`.

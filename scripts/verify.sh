@@ -11812,7 +11812,7 @@ case_agent_toolchain() {
   answer="$(in_image cat /opt/cargo-vendor/.holosmith-cargo-lock | tr -d '\n')"
   check "$name/vendor/lock" "$(sha256sum "$tree/Cargo.lock" | cut -d' ' -f1)" "$answer"
 
-  # The vendored set is only half of a source replacement; the other half is the image's `/.cargo/config.toml` at the
+  # The crate set is only half of a source replacement; the other half is the image's `/.cargo/config.toml` at the
   # filesystem root. Cargo reads `.cargo/config.toml` from the working directory upward, so a `[source…]` table in
   # **this** tree's file — at `/src/.cargo`, nearer than the root — would shadow the image's replacement instead of
   # merging with it, and the symptom a session would report is an empty vendor directory, not a config conflict. So
@@ -13066,7 +13066,7 @@ SHIM
 # gone, so nothing here can be what makes this pass. `--network none` is the whole barrier between the build and a
 # registry, and the two things that carry it across are the image's `/.cargo/config.toml` — the source replacement and
 # `net.offline` — and its `npm_config_*` environment (ADR-0106). A failure here therefore names something a session
-# feels: a lock the vendor set does not hold, an image without the crates, or an npm cache whose logs directory a
+# feels: a lock the crate set does not hold, an image without the crates, or an npm cache whose logs directory a
 # session's uid cannot write.
 #
 # Its own case rather than an arm of `case_agent_toolchain`, because of what it costs and because a failure should name

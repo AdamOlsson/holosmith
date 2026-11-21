@@ -1052,12 +1052,16 @@ _Avoid_: Agent toolchain, build toolchain, dev container, rust image (there is n
 The crates this tree's `Cargo.lock` names, unpacked by `cargo vendor --locked` into `/opt/cargo-vendor` **inside the
 agent image**, with `/.cargo/config.toml` replacing crates-io with that directory and `net.offline = true`. It is what
 makes a session's `cargo build --locked` work with no flag and no network: it ships, nothing mounts it, and nothing is
-fetched. `/opt/cargo-vendor/.holosmith-cargo-lock` is the digest of the lock it came from, which is how an image's crate
-set is compared with a tree's. It is the lock's set and nothing else, so a session cannot add a crate — a new dependency
-is a lock edit and a rebuild of the image (ADR-0106). Its npm half is the **Npm cache**: `/opt/npm-cache`, filled from
-`web/package-lock.json`, read by `npm ci` because `npm_config_cache` and `npm_config_offline` say so.
-_Avoid_: Vendor directory (the path, not the idea), registry cache, warm registry (a host's `$CARGO_HOME` mounted
-into a test, which is what this replaced), offline bundle
+fetched. `/opt/cargo-vendor/.holosmith-cargo-lock` is the digest of the lock it came from, which is how an image's
+vendored crate set is compared with a tree's. It is the lock's set and nothing else, so a session cannot add a crate —
+a new dependency is a lock edit and a rebuild of the image (ADR-0106). Its npm half is the **Npm cache**:
+`/opt/npm-cache`, filled from `web/package-lock.json`, read by `npm ci` because `npm_config_cache` and
+`npm_config_offline` say so.
+_Avoid_: Vendor directory (the path, not the idea), vendor set (the same idea under a third word: say the
+**Vendored crate set**, or `crate set` as its short form, which is what `HOLOSMITH_CRATE_SET` and
+`scripts/check-crate-set.sh` are named for, while the six files a build context carries **to produce** that set are the
+**build context** and not a crate set), registry cache, warm registry (a host's `$CARGO_HOME` mounted into a test,
+which is what this replaced), offline bundle
 
 **Npm cache**:
 `/opt/npm-cache` in the agent image: the tarballs a session's `npm ci` installs from, filled at image-build time out of

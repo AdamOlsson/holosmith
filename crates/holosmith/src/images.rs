@@ -53,7 +53,7 @@ pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
 /// slice of these is a list of files rather than of labels for them.
 pub type Context = [(&'static str, &'static str)];
 
-/// The crate set the **agent** image's build context carries, so a build of it can vendor this tree's dependencies.
+/// The build context entries the **agent** image carries, so a build of it can vendor this tree's dependencies.
 ///
 /// Six files, embedded at the path each one has in the repository, and every one of them is load-bearing:
 ///
@@ -156,8 +156,9 @@ impl Kind {
 
     /// The extra entries this image's build context carries after its Dockerfile and its binary.
     ///
-    /// The agent image's are `AGENT_CONTEXT`, the crate set a build can vendor from; the proxy's are none, because
-    /// its recipe installs no Rust for a crate set to reach. An empty slice rather than an `Option`, so "this context
+    /// The agent image's are `AGENT_CONTEXT`, the six files a build vendors this tree's crates from; the proxy's are
+    /// none, because its recipe installs no Rust for a build context to reach. An empty slice rather than an
+    /// `Option`, so "this context
     /// has no extra entries" is a list of length zero at every place one is read.
     pub fn context(self) -> &'static Context {
         match self {

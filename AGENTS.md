@@ -213,6 +213,32 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
   `docker run` — that is host root by another name (anything reaching the socket can mount `/`), so it is
   granted deliberately and only when the socket exists.
 
+## The offline workflow: what a session can run
+
+The image carries the crate set and the npm cache (ADR-0106), so a session's container — no network, nothing mounted,
+`CARGO_HOME` empty — runs the commands the `rustc 1.99.1` bullet above lists, with no flag. `scripts/build.sh` too,
+and the gate is what proves it — `case_agent_offline_build` runs it under `--network none` and reads `file -b` on both
+musl artifacts inside the container. `--locked` is the flag to keep; anything that would move the lock is a host's work.
+
+**`bash -c`, never `bash -lc`.** Measured in `agent-image:0.1.0`: `bash -c 'command -v cargo'` answers
+`/usr/local/cargo/bin/cargo`, and `bash -lc` answers nothing, as this host's uid and as a uid the image has no passwd
+entry for. `-l` makes bash a login shell, Debian's `/etc/profile` re-sets `PATH` to its own literal list, and the
+three prefixes the recipe's `ENV` adds — cargo, both musl.cc cross linkers — are gone with it; an arbitrary uid's
+`HOME` is `/` and holds no profile, so that reset is the whole of what `-l` buys a session.
+
+**A new crate is a host act, in three parts.** The vendored crate set is the lock's and nothing else, and measured
+under `--network none`, `cargo add rand` answers ``error: the crate `rand` could not be found in registry index.`` — a
+sentence about the image, not about a broken registry. A crate the lock *does* name resolves, which is how the two are
+told apart. So a dependency the lock has never seen is a manifest and lock edit that a host makes (with its own
+`cargo fetch --locked`) plus a rebuild of `agent-image`; `scripts/check-crate-set.sh` is what refuses the old image
+with its own sentence instead of letting every phase report the same symptom (the exit-3 rule is in "Build and gates").
+
+**A `SKIP` measures nothing.** In a container `cargo test` prints a `SKIP` for each integration binary that wants a
+Docker daemon, and `scripts/build.sh`'s last step prints one for `git_tag` (the case builds in a `git ls-files` copy, so
+there is no `.git` to `git describe`), one for the x86_64 empty-root run (`bwrap`) and one for the aarch64 execution
+(`qemu-aarch64-static`): a green suite there says the tree compiles and its daemon-free half passes, and the proof is
+`scripts/verify.sh` on a host (see "Build and gates").
+
 ## Running it by hand, and the traps in it
 
 `serve` refuses a machine that cannot run its backend: the preflight checks the daemon, git and the disk before
