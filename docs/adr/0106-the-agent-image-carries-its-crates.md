@@ -75,6 +75,11 @@ rather than like a missing instruction. `net.offline = true` goes into the same 
 that asks for something the directory does not hold gets `--offline`'s sentence naming the missing dependency, instead
 of waiting on a network that is not there and will not answer.
 
+The tracked file staying source-free is therefore a rule and not an accident of what it happens to hold: a
+`[source…]` table added under `/src/.cargo` would win over the root's and the symptom would be an empty vendor
+directory rather than a config conflict. `scripts/verify.sh`'s `case_agent_toolchain` asserts it, on the tracked
+file's own bytes.
+
 The vendor step's own `CARGO_HOME` is a scratch directory removed **inside the same `RUN`**. Without that the layer
 would carry the 108 MB of unpacked crates and a second copy of the same bytes as `.crate` archives; the session's
 `CARGO_HOME` stays `/tmp/cargo` (ADR-0105's D4), where cargo writes its own scratch and nothing is fetched.
@@ -131,7 +136,16 @@ a recording.
   `--offline`, `CARGO_HOME` left empty, `cargo build --locked` with no flag, `cargo clippy --all-targets`, the full
   `cargo test`, and `npm ci` in `web/` — all in `--network none` as the invoking uid with a session's
   `--cpus 2 --memory 4096m`. It also compares `/opt/cargo-vendor/.holosmith-cargo-lock` with the tree's own
-  `Cargo.lock`, so a vendor set from another tree is a failure rather than a build that happens to work.
+  `Cargo.lock`, so a vendor set from another tree is a failure rather than a build that happens to work. It also
+  asserts that the **tracked** `.cargo/config.toml` carries no `[source…]` table, for D2's reason: a nearer one shadows
+  the image's replacement, and the failure reads as an empty vendor directory.
+- `scripts/verify.sh`'s `case_agent_offline_build` measures the product's path rather than the toolchain's: a
+  `git ls-files` copy of this tree at `/src`, `--network none`, the invoking uid, an empty `CARGO_HOME` and a session's
+  `--cpus 2 --memory 4096m`, running `scripts/build-web.sh` and then `scripts/build.sh` and asserting that both
+  `dist/<triple>/holosmith` files exist **inside the container** and that `file -b` calls each statically linked. No
+  mount and no `--offline` is what makes it about the image. It is its own case rather than an arm of the toolchain one
+  because a failure should name the release build: ~7 s for the web half and ~5 min 20 s for the two release musl
+  targets, in ~550 MB of scratch, measured on this host.
 - `tests/images.rs` asserts the recipe's shape without a daemon: that every file in `AGENT_CONTEXT` is the source of a
   `COPY` and every `COPY` source is either in `AGENT_CONTEXT` or the binary, that `file` is in the apt line, that the
   vendor `RUN` precedes the instruction writing `/.cargo/config.toml`, that the config's `directory` is the directory

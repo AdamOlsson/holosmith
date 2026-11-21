@@ -623,6 +623,7 @@ serve_cases=(
   case_server_images
   case_agent_toolchain
   case_build
+  case_agent_offline_build
   case_smoke
   case_upgrade
   case_rollback
@@ -11741,7 +11742,7 @@ case_server_images() {
 # what makes that true. A machine where it is absent skips with the reason rather than measuring an older image.
 case_agent_toolchain() {
   local name=case_agent_toolchain root="$repo_root/target/verify-toolchain-$$"
-  local agent version pinned answer code tree status
+  local agent version pinned answer code tree status headers dotted
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
     return 0
@@ -11810,6 +11811,31 @@ case_agent_toolchain() {
   # another tree's crates, which is the failure the digest exists for.
   answer="$(in_image cat /opt/cargo-vendor/.holosmith-cargo-lock | tr -d '\n')"
   check "$name/vendor/lock" "$(sha256sum "$tree/Cargo.lock" | cut -d' ' -f1)" "$answer"
+
+  # The vendored set is only half of a source replacement; the other half is the image's `/.cargo/config.toml` at the
+  # filesystem root. Cargo reads `.cargo/config.toml` from the working directory upward, so a `[source…]` table in
+  # **this** tree's file — at `/src/.cargo`, nearer than the root — would shadow the image's replacement instead of
+  # merging with it, and the symptom a session would report is an empty vendor directory, not a config conflict. So
+  # the file the copy at `/src` builds with is asserted positively — its own bytes, every table header in it one of
+  # the `[target.…]` ones it is known for (the linkers and `relocation-model`) — which is total for the rule and also
+  # catches a header nobody anticipated. Two greps, because TOML spells one table twice: a header may have whitespace
+  # before its `[`, so `^[[:space:]]*\[` is read and then filtered down to what is not a `[target` one; and the
+  # dotted top-level form (`source.crates-io.replace-with = "…"`) has no bracket at all while shadowing the
+  # replacement just the same, so a line whose key starts `source` gets its own grep. An absent file is a failure and
+  # not a pass, because the copy is the tracked tree: if it is gone here, it went missing on the way.
+  [ -f "$tree/.cargo/config.toml" ] ||
+    fail "$name/config/file" \
+      "the tracked .cargo/config.toml did not reach the copy at $tree, so the linkers a musl build reads are not there to assert"
+  headers="$(grep -En '^[[:space:]]*\[' "$tree/.cargo/config.toml" | grep -vE ':[[:space:]]*\[target')"
+  [ -z "$headers" ] ||
+    fail "$name/config/table" \
+      ".cargo/config.toml carries a table that is not a [target…] one, and a [source] table would shadow the image's replacement at /.cargo/config.toml: $headers"
+  assertions=$((assertions + 1))
+  dotted="$(grep -En '^[[:space:]]*source' "$tree/.cargo/config.toml")"
+  [ -z "$dotted" ] ||
+    fail "$name/config/source" \
+      ".cargo/config.toml carries a dotted source key, which shadows the image's replacement at /.cargo/config.toml as surely as a [source] table does: $dotted"
+  assertions=$((assertions + 1))
 
   # The commands a worker runs, in that order and from the copied tree. `cargo build --locked` is the acceptance's own
   # fact — no flag beyond the lock, so a build that wanted the network would fail here rather than on a machine that
@@ -13028,6 +13054,113 @@ SHIM
   esac
   check "$name/real" "$(sha256sum "$real/holosmith" | cut -d' ' -f1)" \
     "$(cut -d' ' -f1 "$real/holosmith.sha256")"
+  rm -rf "$root"
+}
+
+# A session builds this tree's release artifacts: `scripts/build-web.sh` and then `scripts/build.sh` in a session's own
+# shape, with both `dist/<triple>/holosmith` files statically linked and no network anywhere.
+#
+# The case exists because this is the product's path and not a flag's. `scripts/build.sh` is what a worker runs to
+# prove a tree, and until the image carried its crates and its npm cache that command needed the network; the warm
+# registry `case_agent_toolchain` used to copy out of the host's `$CARGO_HOME` and the `--offline` that went with it are
+# gone, so nothing here can be what makes this pass. `--network none` is the whole barrier between the build and a
+# registry, and the two things that carry it across are the image's `/.cargo/config.toml` — the source replacement and
+# `net.offline` — and its `npm_config_*` environment (ADR-0106). A failure here therefore names something a session
+# feels: a lock the vendor set does not hold, an image without the crates, or an npm cache whose logs directory a
+# session's uid cannot write.
+#
+# Its own case rather than an arm of `case_agent_toolchain`, because of what it costs and because a failure should name
+# the release build rather than the toolchain; it sits beside `case_build` in `serve_cases` for the same reason.
+# Measured on this host in this shape — 2 cpus, the invoking uid, a `git ls-files` copy writable at `/src` — the web
+# half answers in ~7 s (its `npm ci` reads `/opt/npm-cache`) and the two release musl targets in ~5 min 20 s, and the
+# copy grows to ~550 MB, almost all of it its `target/`. That is why the copy is under `$repo_root/target/` and not in
+# `$WORK`: a `mktemp -d` on a tmpfs is a path the daemon may not see (ADR-0035).
+#
+# The `SKIP` lines in the captured output are all `check-static.sh`'s, and none of them is about the crates:
+# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against), the x86_64 empty-root run (the
+# image installs no `bwrap`) and the aarch64 execution (no emulator in the image). `build.sh` calls `build-web.sh`
+# itself, so the explicit run is the npm half measured on its own and the second, inside `build.sh`, is the fast path
+# with `node_modules` already there.
+#
+# The image is `agent-image:$version`, which `case_server_images` builds and leaves in place, so the tag read here is
+# one built from **this** tree; a machine without it skips with the reason rather than measuring an older image.
+case_agent_offline_build() {
+  local name=case_agent_offline_build root="$repo_root/target/verify-offline-build-$$"
+  local agent version tree code answer triple
+  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
+    return 0
+  fi
+  version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
+  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
+  agent="agent-image:$version"
+  if ! docker image inspect "$agent" >/dev/null 2>&1; then
+    printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
+      "$name" "$agent"
+    return 0
+  fi
+
+  rm -rf "$root"
+  tree="$root/src"
+  mkdir -p "$tree"
+  # The tracked tree as this commit would make it, `git ls-files` for `case_agent_toolchain`'s reason: no `.git`, no
+  # `target/`, no `web/dist`, no `node_modules`, so the build below starts where a session's checkout starts.
+  git -C "$repo_root" ls-files -z | tar -C "$repo_root" --null -T - -cf - | tar -C "$tree" -xf - ||
+    fail "$name/copy" "could not copy the tracked tree into $tree"
+  assertions=$((assertions + 1))
+
+  # One shape for both commands, because the point is that it is a session's and not a convenient one: no network, the
+  # invoking uid, the session's limits, and nothing mounted over `CARGO_HOME=/tmp/cargo` — it starts empty, and the
+  # crates and packages come from the image, exactly as they do for a session.
+  in_image() {
+    local entrypoint="$1"
+    shift
+    docker run --rm --network none \
+      --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+      -v "$tree:/src" -w /src \
+      --entrypoint "$entrypoint" "$agent" "$@" 2>&1
+  }
+
+  # The app first, on its own: `npm ci` with `npm_config_offline=true` against `/opt/npm-cache`, then the app's own
+  # rules and its two vite builds, and `build-web.sh` itself refuses a build that left no `web/dist/index.html`. Named
+  # and removed after the fact, because a `timeout` that kills the CLI does not stop the container it started.
+  code=0
+  timeout 600 docker run --rm --name "hs_offline_build_web_$$" --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src \
+    --entrypoint /src/scripts/build-web.sh "$agent" >"$WORK/$name.web.out" 2>&1 || code=$?
+  timeout 60 docker rm -f "hs_offline_build_web_$$" >/dev/null 2>&1 || true
+  [ "$code" -eq 0 ] ||
+    fail "$name/web" "scripts/build-web.sh exited $code in the agent image: $(tail -20 "$WORK/$name.web.out")"
+  assertions=$((assertions + 1))
+
+  # Then both release musl targets, which is `cargo build --release --locked` twice with no flag beyond the lock. The
+  # tree's own `scripts/check-static.sh` is `build.sh`'s last step, so a placeholder page, a dynamic artifact or a
+  # missing embedded file fails here as a build failure — the assertions below are about where the files came from.
+  code=0
+  timeout 1800 docker run --rm --name "hs_offline_build_release_$$" --network none \
+    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
+    -v "$tree:/src" -w /src \
+    --entrypoint /src/scripts/build.sh "$agent" >"$WORK/$name.build.out" 2>&1 || code=$?
+  timeout 60 docker rm -f "hs_offline_build_release_$$" >/dev/null 2>&1 || true
+  [ "$code" -eq 0 ] ||
+    fail "$name/build" "scripts/build.sh exited $code in the agent image: $(tail -40 "$WORK/$name.build.out")"
+  assertions=$((assertions + 1))
+
+  # The artifacts are read **inside the image**, over the same mount the build wrote: `build.sh` returning 0 is the
+  # claim that they were produced, and `file` is the image's own. `file` on the host would be reading a file nothing
+  # proves came from the image's toolchain, while one container that never entered it could have written one.
+  for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    answer="$(in_image sh -c "test -f dist/$triple/holosmith && file -b dist/$triple/holosmith")" ||
+      fail "$name/$triple" "scripts/build.sh left no dist/$triple/holosmith in the image: $answer"
+    case "$answer" in
+      *"statically linked"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/$triple" "dist/$triple/holosmith is not statically linked: $answer" ;;
+    esac
+  done
+
+  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy and the
+  # build output inside it are this case's own and go.
   rm -rf "$root"
 }
 
@@ -15403,7 +15536,7 @@ stop_peer() {
 # so a renamed or added test binary lands here instead of drifting past.
 #
 # The middle arms are answered by a `cargo` stand-in on `PATH`: the toolchain refusal and the `--lib-only` footer
-# must not cost two more real builds inside a fifteen-minute gate, and neither arm is about what cargo does. The
+# must not cost two more real builds inside a half-hour gate, and neither arm is about what cargo does. The
 # last arm is a real run, because the script's whole claim is that it runs the gate's own commands.
 case_gate_quick() {
   local name=case_gate_quick root="$repo_root/target/verify-gate-quick-$$"
