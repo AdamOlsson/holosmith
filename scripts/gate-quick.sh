@@ -17,8 +17,15 @@
 # cargo that is not the pinned 1.99 line is refused with the sentence that fixes it (AGENTS.md).
 # GATE_QUICK_ALLOW_TOOLCHAIN=1 runs anyway, and repeats the mismatch in the footer so it cannot be missed.
 #
+# The crate set is the image's and not this tree's: under the image's source replacement a crate the vendored set
+# does not hold fails as "could not be found in registry index", which reads as a broken registry, so
+# `scripts/check-crate-set.sh` runs before the phases and refuses an image vendored from another `Cargo.lock` with
+# its own sentence — the tree is fine and the image is stale.
+#
 # Exit 0 green, 1 a phase failed (its last line names the phase, and the binary when it was one), 2 misuse: no
-# name, an unknown name, cargo absent or the wrong version, `--lib-only` or `--list` combined with names.
+# name, an unknown name, cargo absent or the wrong version, `--lib-only` or `--list` combined with names, 3 the
+# image's crate set is a different `Cargo.lock`'s than this tree's: a stale agent image, which an image rebuild
+# fixes and no code change does.
 # There is no `--all` and no `--full` on purpose: `cargo test` is that, and a second spelling of the whole suite
 # is the thing this script exists to stop a worker from reaching for.
 
@@ -126,6 +133,18 @@ case "$cargo_version" in
     toolchain_note="cargo ${cargo_version:-unknown} is not 1.99 (GATE_QUICK_ALLOW_TOOLCHAIN=1), "
     ;;
 esac
+
+# The crate set, before the lock and after the toolchain. After it, because a session whose image has no toolchain
+# at all hits that sentence first and it names the same rebuild; before the lock, because a stale image fails all
+# four phases with the same unreadable message and the reason belongs in the worker's first lines rather than at
+# the end of a cargo trace. The check's own endings are 0 and 3, and every status reaches the caller unchanged, so
+# the only two this step produces are pass and a stale image — never 2 (this invocation was wrong) or 1 (the tree
+# is not proven). It prints its own sentence, and nothing here repeats it.
+crate_set_rc=0
+"$repo_root/scripts/check-crate-set.sh" || crate_set_rc=$?
+if [ "$crate_set_rc" -ne 0 ]; then
+  exit "$crate_set_rc"
+fi
 
 # Two runs in one worktree queue here rather than interleave: cargo's own lock covers the build, but the test
 # binaries bind real ports and write real fixtures, so the lock is the whole run's, not the compiler's.

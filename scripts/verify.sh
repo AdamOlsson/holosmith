@@ -15530,14 +15530,17 @@ stop_peer() {
 }
 
 # The worker gate's own contract (`scripts/gate-quick.sh`): the names it accepts, the invocations it refuses, the
-# toolchain it demands, and — in one real run — the footer. That footer is the whole contract with a worker: it
-# counts the test binaries that did **not** run, so an under-named change is visible in the run's own last line
-# instead of hidden behind a green. `--list` is compared against the directory rather than against a literal list,
-# so a renamed or added test binary lands here instead of drifting past.
+# toolchain it demands, the crate set it refuses to run a stale image against, and — in one real run — the footer.
+# That footer is the whole contract with a worker: it counts the test binaries that did **not** run, so an
+# under-named change is visible in the run's own last line instead of hidden behind a green. `--list` is compared
+# against the directory rather than against a literal list, so a renamed or added test binary lands here instead of
+# drifting past.
 #
 # The middle arms are answered by a `cargo` stand-in on `PATH`: the toolchain refusal and the `--lib-only` footer
-# must not cost two more real builds inside a half-hour gate, and neither arm is about what cargo does. The
-# last arm is a real run, because the script's whole claim is that it runs the gate's own commands.
+# must not cost two more real builds inside a half-hour gate, and neither arm is about what cargo does. The crate
+# set's arms move the marker with `HOLOSMITH_CRATE_SET` for the same reason — `/opt` is not writable and a case
+# cannot build an image — and they cost nothing, because the check runs before the first phase. The last arm is a
+# real run, because the script's whole claim is that it runs the gate's own commands.
 case_gate_quick() {
   local name=case_gate_quick root="$repo_root/target/verify-gate-quick-$$"
   local bin="$root/bin" out="$root/out" err="$root/err" rc expected total footer label file
@@ -15620,6 +15623,36 @@ SHIM
     *) fail "$name/real/footer" "the last line was: $footer" ;;
   esac
   assertions=$((assertions + 1))
+
+  # 7. The crate-set preflight, all three shapes. A host has no marker, which is not a session and so not a failure;
+  # a marker naming another lock is a stale image and exits **3**, a code neither of this script's other endings can
+  # produce (1 not proven, 2 misuse); a marker naming *this* tree's lock is the answer every correctly imaged session
+  # gets on every run, and it is the one worth pinning because a regression that inverted the comparison would leave
+  # the absent and stale arms green while every session's gate-quick refused with the stale-image sentence. The
+  # marker's path moves through `HOLOSMITH_CRATE_SET`, because /opt is not writable here and the gate cannot build
+  # the image inside a case. The real toolchain is on PATH for the gate-quick arm: its toolchain check comes first,
+  # and this must be the refusal that answers.
+  rc=0
+  HOLOSMITH_CRATE_SET="$root/no-marker" "$repo_root/scripts/check-crate-set.sh" >"$out" 2>"$err" || rc=$?
+  check "$name/crateset/absent/exit" 0 "$rc"
+  check "$name/crateset/absent/silent" "" "$(cat "$out" "$err")"
+  printf '0000000000000000000000000000000000000000000000000000000000000000\n' >"$root/stale-marker"
+  rc=0
+  HOLOSMITH_CRATE_SET="$root/stale-marker" "$repo_root/scripts/check-crate-set.sh" >"$out" 2>"$err" || rc=$?
+  check "$name/crateset/stale/exit" 3 "$rc"
+  present 'names a different Cargo.lock' "$err" "$name/crateset/stale/cause"
+  present 'rebuild agent-image on this host' "$err" "$name/crateset/stale/fix"
+  # The digest is taken from `$repo_root/Cargo.lock` and not from this case's working directory: the script hashes
+  # its own repository root's lock, and the two must be the same file for a match to mean anything.
+  printf '%s\n' "$(sha256sum "$repo_root/Cargo.lock" | cut -d' ' -f1)" >"$root/matching-marker"
+  rc=0
+  HOLOSMITH_CRATE_SET="$root/matching-marker" "$repo_root/scripts/check-crate-set.sh" >"$out" 2>"$err" || rc=$?
+  check "$name/crateset/matching/exit" 0 "$rc"
+  check "$name/crateset/matching/silent" "" "$(cat "$out" "$err")"
+  rc=0
+  HOLOSMITH_CRATE_SET="$root/stale-marker" "$repo_root/scripts/gate-quick.sh" --lib-only >"$out" 2>"$err" || rc=$?
+  check "$name/crateset/preflight/exit" 3 "$rc"
+  present 'rebuild agent-image on this host' "$err" "$name/crateset/preflight/sentence"
 }
 
 # The gate's own hygiene (`scripts/gate-cleanup.sh`): the record a run claims, the pass that kills only what a
