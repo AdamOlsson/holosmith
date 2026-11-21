@@ -108,7 +108,9 @@ has none.
   ~50 s, `cargo test --no-run` ~153 s, and one session's `target/` measured **8.9 GB** against
   `session_disk_soft_gb`'s default of 10, so a Rust project has little headroom and a second build's `target/`
   exceeds it. **Amended by ADR-0106:** the registry mount is gone, `cargo build --locked` and `npm ci` are measured
-  with no flag at all, and the crates and the npm packages are the image's own.
+  with no flag at all, and the crates and the npm packages are the image's own. **Amended by ADR-0107:** the default is
+  **20**, not 10 — the same tree's `target/` measured 9.2 GB after the build, clippy and `cargo test --no-run`, and
+  9.6 GB after both musl release builds — so the shipped cap covers a build tree rather than one compile of it.
 - `src/egress.rs`'s loopback assertion accepts either `127.0.0.1` or `::1`: the refusal names the address the
   resolver returned, and inside a container `localhost` resolves `::1` first. The test was host-shaped and failed two
   runs out of two in the image; the other three assertions in it are unchanged.

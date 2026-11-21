@@ -28,7 +28,7 @@ idle_stop_min = 30
 # max_session_tokens unset
 abort_grace = "10s"
 min_free_gb = 20
-session_disk_soft_gb = 10
+session_disk_soft_gb = 20
 stopped_ttl_days = 7
 history_window = 50
 keep_releases = 5

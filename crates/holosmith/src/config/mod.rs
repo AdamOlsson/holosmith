@@ -451,6 +451,14 @@ pub struct Config {
     /// size includes everything under it — `target/` and `node_modules/` as much as `src/` — so a large Rust
     /// project should raise it rather than rebuild from scratch on every resume; caches are per session by
     /// design (D2), which is why one session's build tree is its own to answer for.
+    ///
+    /// The default is 20 rather than the spec's 10 because the offline image made a build tree the normal case
+    /// (ADR-0105, ADR-0106): one Rust session's `target/` measured 9.2 GB after `cargo build --locked`,
+    /// `cargo clippy --all-targets` and `cargo test --no-run`, and 9.6 GB after both musl release builds. Ten
+    /// would leave 0.4 GB of headroom over that — less than the checkout the same worktree holds outside
+    /// `target/` — so a cap at the measurement leaves no room for a second configuration, and the next build
+    /// crosses it. Stopping the sessions that build rather than the one that hoards is not the watchdog this key
+    /// exists to be (ADR-0107).
     pub session_disk_soft_gb: u64,
     pub stopped_ttl_days: u64,
     /// How many messages a client that opens a stream with no `Last-Event-ID` is replayed.
@@ -508,7 +516,7 @@ impl Default for Config {
             max_session_tokens: None,
             abort_grace: Duration::from_millis(10_000),
             min_free_gb: 20,
-            session_disk_soft_gb: 10,
+            session_disk_soft_gb: 20,
             stopped_ttl_days: 7,
             history_window: 50,
             keep_releases: 5,

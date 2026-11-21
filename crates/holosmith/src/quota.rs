@@ -3,7 +3,11 @@
 //!
 //! Item 14's second sentence is a policy, not an endpoint: "`session_disk_soft_gb` (default 10): a watchdog
 //! runs `du` on each live session's worktree every 5 minutes. Over the limit it emits an `error` event with
-//! code `disk_quota`, aborts the turn and stops the session (resumable after cleanup)." This module is the
+//! code `disk_quota`, aborts the turn and stops the session (resumable after cleanup)." The default this build
+//! **ships** is 20, not the quote's 10 — the quote is item 14's sentence, kept as it was written, and
+//! `Config::session_disk_soft_gb` is the number the code reads; it was raised because one Rust session's `target/`
+//! measured 9.6 GB once offline builds made a full test run and both release builds the normal command set
+//! (ADR-0105, ADR-0106, ADR-0107). This module is the
 //! watchdog, and it is the third of the build's periodic policies — after the idle stop and
 //! compaction — with one thing the other two do not have: it has to **end a turn**, not only move a
 //! row.
