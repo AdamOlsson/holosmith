@@ -540,8 +540,8 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     let program = vec![b'h'; 700];
     std::fs::write(&binary, &program).expect("the scratch binary is writable");
 
-    // The agent image, because it is the one whose context carries the crate set: eight entries — its Dockerfile,
-    // its binary, and the six the crate set is.
+    // The agent image, because it is the one whose context carries the six files: eight entries — its Dockerfile,
+    // its binary, and those six.
     let context = Kind::Agent.context();
     let bytes = images::archive(images::AGENT_DOCKERFILE, context, &binary)
         .expect("the archive is written");
@@ -595,7 +595,7 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     assert!(bytes[data + 700..data + 1024].iter().all(|byte| *byte == 0));
 
     // Then the context's entries, in the order [`Kind::context`] gives them: each under its real relative path,
-    // a 0644 regular file whose data is that file's text. This is the crate set a build can vendor from, so a
+    // a 0644 regular file whose data is that file's text. This is where a build vendors the crate set from, so a
     // lock that never reached the context is a failure here as well as on disk.
     let mut at = data + 1024;
     for &(path, contents) in context {
@@ -666,7 +666,7 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
 }
 
 #[test]
-fn the_agent_context_is_the_crate_set_the_tree_has_on_disk() {
+fn the_agent_context_is_the_six_files_the_tree_has_on_disk() {
     // A lock or manifest edit that does not reach the image would be a build vendoring another tree's crates, so
     // every embedded entry is compared with the file at the path it is written under: the archive's copy and this
     // repository's are one text. The list is asserted first, because a renamed path would otherwise only move what
@@ -684,7 +684,7 @@ fn the_agent_context_is_the_crate_set_the_tree_has_on_disk() {
             "web/package.json",
             "web/package-lock.json",
         ],
-        "the agent image's context is not the crate set a build can vendor from"
+        "the agent image's build context is not the six files a build can vendor from"
     );
     for &(path, embedded) in context {
         let on_disk = std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| {

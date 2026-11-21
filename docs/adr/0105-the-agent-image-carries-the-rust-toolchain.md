@@ -118,13 +118,15 @@ has none.
   `support::signal`, which runs it through a shell and **waits with the kill's own status asserted**, so the same
   breakage is a failure with a sentence rather than a hang. The image gains no `procps`: the fixed set is a
   documented contract, and a session that needs process tools is its own decision.
-- The agent image grows to ~3.4 GB on every machine (3.53 GB with the crate set and the npm cache in it, ADR-0106),
-  and `scripts/build.sh` is not a gate case: the gate's in-image cases run `--network none`, and this was measured by
-  hand with the network on. Its `npm ci` no longer needs that network either (ADR-0106 fills a cache), but what the
-  script writes is `check-static.sh`'s business and that step is the host's. Measured by hand, in a session-shaped
-  container:
-  `scripts/build.sh` builds the web app and both artifacts (`dist/x86_64-unknown-linux-musl/holosmith`, 8 230 600
-  bytes, and `dist/aarch64-unknown-linux-musl/holosmith`, 7 407 832 bytes), so a session can produce a release
-  artifact. Its last step, `scripts/check-static.sh`, answered `file: command not found` — `file` was not in the
-  base — so a session could *produce* the artifact and not run that script's own check; ADR-0106 puts `file` in the
-  apt line, and the check's two machine-local prerequisites (`bwrap`, `qemu-aarch64-static`) stay `SKIP`s.
+- The agent image grows to ~3.4 GB on every machine (3.53 GB with the crate set and the npm cache in it, ADR-0106).
+  **Amended by ADR-0106:** `scripts/build.sh` **is** a gate case — `case_agent_offline_build` runs it, and the
+  `scripts/build-web.sh` before it, in `--network none` as the invoking uid with a session's
+  `--cpus 2 --memory 4096m`, and asserts that both `dist/<triple>/holosmith` files exist **inside the container** and
+  that `file -b` calls each statically linked. What this bullet recorded before that was the same command measured by
+  hand with the network on, because it needed one: `scripts/build.sh` built the web app and both artifacts
+  (`dist/x86_64-unknown-linux-musl/holosmith`, 8 230 600 bytes, and `dist/aarch64-unknown-linux-musl/holosmith`,
+  7 407 832 bytes), so a session can produce a release artifact — and its last step, `scripts/check-static.sh`,
+  answered `file: command not found`, so a session could *produce* the artifact and not run that script's own check.
+  `file` joins the apt line, so the check runs in the image now, and what stays a `SKIP` there is what is machine-local
+  and not the image's: `git_tag` (the case builds in a `git ls-files` copy, so there is no `.git` to `git describe`),
+  the x86_64 empty-root run (`bwrap`) and the aarch64 execution (`qemu-aarch64-static`).

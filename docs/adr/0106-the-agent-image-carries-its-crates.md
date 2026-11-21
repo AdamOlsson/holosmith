@@ -130,15 +130,89 @@ The **smoke** image is unaffected: it starts from the node base rather than this
 toolchain nor the vendor directory — and it needs neither, because its `pi` is `holosmith container fake-pi` replaying
 a recording.
 
+## D6 — the context is six files, and the archive is eight entries
+
+`images::AGENT_CONTEXT` is **six** files, embedded at the path each one has in the repository: the workspace
+`Cargo.toml`, the member's, `Cargo.lock`, the member's real `src/lib.rs`, and `web/package.json` with
+`web/package-lock.json`. The daemon's context is those six plus the `Dockerfile` and the binary, so the archive it
+reads is **eight entries** — `tests/images.rs` asserts the count, the order, and that each embedded text is the file on
+disk at its own path.
+
+Six and not the tree. A context is a tar handed to `docker build -` on stdin, so "the tree" would mean copying this
+repository into a build of this repository — `target/`, `web/dist`, `node_modules/` and all — where the six files are
+the vendor step's **input** and the 108 MB it writes is a layer of the image rather than something a context should
+carry. Six is also not a round number: it is exactly what `cargo vendor` needs to resolve this workspace, and the two
+manifests are two entries because `COPY` keeps a source's name, so a workspace root's `Cargo.toml` and a member's
+cannot travel in one instruction. The member's **real** `src/lib.rs` travels rather than a generated stub because a
+target is a source file and not a manifest entry: the three manifests alone answer `no targets specified in the
+manifest`, and these six produce, measured, the vendored crate set a vendor over the whole tree does (the entry's own
+doc comment carries that measurement). The web pair rides in the same context rather than in a second build path, for
+D1's reason: one image, one label comparison, one rebuild rule.
+
+What travels is the entries' **text**, not their paths — each is `include_str!`ed — so editing any of the six changes
+the artifact's bytes, and with them `org.holosmith.binary-sha256` and D5's rebuild. A context that read the files where
+the deploy runs would need them present there, which is the thing `include_str!` exists to avoid.
+
+## D7 — a stale crate set names itself, in the gate and before a worker's first phase
+
+Under D2's replacement a crate the vendored crate set does not hold fails like this, measured in the image with
+`--network none`:
+
+```text
+$ cargo add rand
+error: the crate `rand` could not be found in registry index.
+```
+
+That sentence names the registry and not the image, and `cargo update` after it exits 0 having changed nothing. The
+fact that settles it is already in the layer: the recipe writes the digest of the `Cargo.lock` it vendored with to
+`/opt/cargo-vendor/.holosmith-cargo-lock`, beside the crates. `scripts/check-crate-set.sh` compares that with this
+tree's lock and has three endings, of which only one is not silent: no marker at all — a host fetches its crates and is
+not a session — and a matching digest are **exit 0**; a different digest is **exit 3** with one sentence naming the
+stale image and the rebuild, in place of the registry-index error.
+
+Two readers, because the question is asked in two places. `scripts/gate-quick.sh` runs the check after the toolchain
+check and before the first phase, which is the earliest a worker's first line can carry the answer: a stale image
+fails every phase with the same unreadable message, so the reason belongs before them rather than at the end of a cargo
+trace. `scripts/verify.sh` measures it twice — `case_agent_toolchain`'s `vendor/lock` assertion reads the marker out of
+the image it built and compares it with the tree it copied, and `case_gate_quick`'s seventh arm pins all three shapes
+plus the refusal through `gate-quick.sh` itself, because a case that pinned only the failures would stay green while
+every correctly imaged session's gate refused.
+
+The exit code and the variable are decisions, not conveniences. 3 is a code neither of that script's other endings can
+produce (1 the tree is not proven, 2 the invocation was wrong), so "rebuild the image" is distinguishable from "your
+change broke something" without reading the sentence. `HOLOSMITH_CRATE_SET` moves the marker's **path** and nothing
+else, because `/opt` is not writable on a host and the gate cannot build an image inside a case — so the mismatch is
+measurable with no root and no image, and the sentence is the same wherever the two files are. The path is a literal
+with three readers — this script, `scripts/verify.sh`'s `case_agent_toolchain` arm, and `tests/images.rs`'s assertion
+that the name is written beside the crates — and its one writer is the recipe's `sha256sum Cargo.lock` line; it is
+spelled in each rather than shared through `scripts/gates.sh`, because the Dockerfile's `RUN` would have to carry the
+shared definition too.
+
+## D8 — the disk cap is a separate decision, and this one did not move it
+
+`session_disk_soft_gb` is still **10** (ADR-0069), and `docs/config.md`'s row for it is unchanged, because nothing here
+changes what a session's worktree holds: the 108 MB of crates and the 12 MB of npm cache are on the daemon's disk, in
+the image, shared by every session that runs from it. A session's `target/` is what it was before the crates were
+local, and ADR-0105's **8.9 GB** measurement of one Rust project's build stands.
+
+That is a decision and not an omission, because the two facts are now adjacent and easy to conflate: a Rust session
+that builds its test binaries once is 1.1 GB from the cap, and a second build's `target/` crosses it, at which point
+ADR-0069's watchdog stops the session with `disk_quota` — and no amount of vendoring changes that, because the crates
+are read from the image and compiled into the worktree. Moving the default, or exempting a build directory from the
+`du`, is its own decision: it is a config default and an amendment to ADR-0069's arithmetic, it wants a number
+measured on a project that builds rather than inferred from an image's size, and it has to say what a larger per-session
+cap means for `min_free_gb` and for several sessions on one disk. Deferred here, deliberately: this ADR decided what an
+image carries, not how much a session may write.
+
 ## Consequences
 
 - `scripts/verify.sh`'s `case_agent_toolchain` measures the new fact instead of the old one: no registry mount, no
   `--offline`, `CARGO_HOME` left empty, `cargo build --locked` with no flag, `cargo clippy --all-targets`, the full
   `cargo test`, and `npm ci` in `web/` — all in `--network none` as the invoking uid with a session's
   `--cpus 2 --memory 4096m`. It also compares `/opt/cargo-vendor/.holosmith-cargo-lock` with the tree's own
-  `Cargo.lock`, so a vendor set from another tree is a failure rather than a build that happens to work. It also
-  asserts that the **tracked** `.cargo/config.toml` carries no `[source…]` table, for D2's reason: a nearer one shadows
-  the image's replacement, and the failure reads as an empty vendor directory.
+  `Cargo.lock`, so a vendored crate set from another tree is a failure rather than a build that happens to work. It
+  also asserts that the **tracked** `.cargo/config.toml` carries no `[source…]` table, for D2's reason: a nearer one
+  shadows the image's replacement, and the failure reads as an empty vendor directory.
 - `scripts/verify.sh`'s `case_agent_offline_build` measures the product's path rather than the toolchain's: a
   `git ls-files` copy of this tree at `/src`, `--network none`, the invoking uid, an empty `CARGO_HOME` and a session's
   `--cpus 2 --memory 4096m`, running `scripts/build-web.sh` and then `scripts/build.sh` and asserting that both
@@ -154,7 +228,12 @@ a recording.
   cache the fill writes after the `npm cache clean --force`. Those are the edits a mis-edit breaks five minutes into a
   gate case.
 - The first image build on a machine fetches ~120 MB more, and a session's `target/` is unchanged — still the 8.9 GB
-  ADR-0105 measured against `session_disk_soft_gb`'s default of 10.
+  ADR-0105 measured against `session_disk_soft_gb`'s default of 10, which D8 leaves where it is.
+- `scripts/check-crate-set.sh` is D7's mechanism and has its own three arms in the gate: absent, stale and matching,
+  each run through the real script with `HOLOSMITH_CRATE_SET` pointing at a written marker, plus one more in which
+  `scripts/gate-quick.sh` itself refuses with **3**. The matching arm is the one worth pinning — it is what every
+  correctly imaged session gets on every run, and a regression that inverted the comparison would leave the other two
+  green while every session's gate refused.
 - `file` joins the apt line: `scripts/check-static.sh` reads an artifact's link state with `file -b`, and
   `scripts/build.sh` ends with that script, so an image without it builds the tree and then fails the build's own last
   step. The `readelf` the script also runs arrives with `build-essential`.

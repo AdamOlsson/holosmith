@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Is this tree's `Cargo.lock` the crate set the agent image vendored? The image replaces crates-io with
 # `/opt/cargo-vendor` and sets `[net] offline = true` (`crates/holosmith/images/agent.Dockerfile`), so a crate that
-# directory does not hold fails as "the crate 'rand' could not be found in registry index" — which reads as a broken
+# directory does not hold fails as "the crate `rand` could not be found in registry index." — which reads as a broken
 # registry — and `cargo update` then exits 0 having changed nothing. So a session whose marker names another lock is
 # a stale image, and saying so in one line is the difference between an image rebuild and a hunt for a code bug.
 #
-#   scripts/check-crate-set.sh    exit 0: this tree's lock is the vendored set, or there is no marker at all
+#   scripts/check-crate-set.sh    exit 0: this tree's lock is the crate set, or there is no marker at all
 #                                 exit 3: the marker is a different Cargo.lock's digest — the image is stale
 #
 # Absent means "not a session": a host carries no marker because it fetches its crates, so that is a pass and not an
