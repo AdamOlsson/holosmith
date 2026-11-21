@@ -57,11 +57,11 @@ One command proves the tree:
 . ~/.pi/toolchains/env.sh && scripts/verify.sh
 ```
 
-It takes about fifteen minutes on this host, and green is its last line: `verify: <n> assertions, ok`.
-A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure
-its fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added,
-so read the shape of that line, not its number. It wants a working Docker daemon for the container
-cases.
+It takes about half an hour on this host (~5 min 20 s of it the session offline build case), and
+green is its last line: `verify: <n> assertions, ok`. A `FAIL case_x/assertion` line above it names
+the case and the assertion; a case that cannot measure its fact prints `SKIP` with the reason instead
+of passing quietly. The count moves as cases are added, so read the shape of that line, not its
+number. It wants a working Docker daemon for the container cases.
 
 The same gate is three commands of its own, cheapest first, when one of them is all you need:
 
@@ -135,7 +135,7 @@ A cleanup problem warns and never fails the gate: a leftover listener on a pinne
 the case that wanted it.
 
 A worker's full gate is **one run, at the end of its turn**. A second run answers a question the first is
-still answering, and holding one `bash` call open for the whole fifteen minutes is the mistake this rule
+still answering, and holding one `bash` call open for the whole half hour is the mistake this rule
 exists to prevent: the call outlives the worker, and the run ends with nothing said. If the work is cut
 short, report the changed files, the gate state you last saw and what remains, rather than begin again.
 
