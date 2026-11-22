@@ -58,7 +58,9 @@ One command proves the tree:
 ```
 
 It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
-(~5 min 20 s of it the session offline build case). Green is its last line: `verify: <n> assertions, ok`.
+(~5 min 20 s of it the session offline build case). It is 34 to 43 minutes when the image cases rebuild
+`agent-image` (two such runs measured here: 34 and 43 minutes), because `case_server_images` removes both
+product tags at its start and the rebuild is what follows. Green is its last line: `verify: <n> assertions, ok`.
 A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure its
 fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added, so read
 the shape of that line, not its number. It wants a working Docker daemon for the container cases.
@@ -98,15 +100,31 @@ Run it detached with the output going to `target/verify.log`, and poll that file
 not block on the command's own stdout. That one fixed name is deliberate — the poller has to find the
 log — and the honesty about the rest of `target/` is worth stating: `$WORK` is a `mktemp -d` and is the
 only place a failed run's evidence lives, while every scratch tree a *case* makes is
-`target/verify-<case>-$$` and carries the run's pid. So a run that is killed leaves its scratch behind
-under a pid that is gone, and `target/verify.log` from it stays where a poller would read it: check the
-file's mtime against the run you started before trusting a sentinel.
+`target/verify-<case>-$$` and carries the run's pid — except the few that have to be short, the `$WORK` socket
+gardens and `case_rollback`'s data root, which a killed run leaves behind under `/tmp`, where the sweep does not
+look. So a run that is killed leaves its scratch behind under a pid that is gone, and `target/verify.log` from it
+stays where a poller would read it: check the file's mtime against the run you started before trusting a sentinel.
 
-**A case that binds a unix socket must keep its path short.** `AF_UNIX` caps one at 107 bytes; the deepest
-here is `verify-doctor-tool-key`'s, `<repo_root>/target/verify-doctor-tool-key-<pid>/docker.sock`, already
-107–108 at this repository's own root. A case whose scratch directory is longer does not fit, and its
-failure names a missing socket rather than the depth. The cases that need one anyway put it under `$WORK`,
-a `mktemp -d`, as the docker stand-ins do.
+A failed case says where its evidence is: the `work dir kept:` line under the `FAIL` names `$WORK`, the tree
+the case built its state in — its config, its responses, its shims, its log, and its socket. Read that tree
+before the next run's cleanup removes it.
+
+**A case that binds a unix socket must keep its path short.** `AF_UNIX` caps one at 107 bytes, and a name
+built under the checkout is `$repo_root` plus 38 to 56 bytes — `target/verify-<case>-<pid>/docker.sock`,
+`…/data/run/drain.sock` for a boot's admin socket, `…/data/smoke/admin/drain.sock` for a smoke run's,
+depending on the case's name and the pid's digits — so a case binding there would need `$repo_root` itself
+under 51 bytes (107 − 56), and the 83-byte worktree that made one fail built names of 122 to 139. No case
+binds a host-to-host socket there any more: every `fake_docker_ping` stand-in is in `$WORK`, a `mktemp -d` of
+about 20 bytes, as are the boots' `--admin-dir`s except `case_upgrade`'s, so no segment of those names is the
+checkout's. The exceptions are the sockets whose directory is also a container mount source, since a mount
+source has to be a path the daemon can see: `case_smoke`'s smoke root, and `case_upgrade`'s data root because
+`promote` puts the smoke root at `<data root>/smoke`. Those two roots stay under the checkout; `case_upgrade`
+audits its name with `scripts/verify.sh`'s `unix_socket_fits` — a checkout too deep for it is a `SKIP` naming
+the depth rather than a `FAIL` naming a missing socket — and `case_smoke`'s drain socket is the one binder a
+long path costs nothing, because `serve` warns rather than refusing and the case measures the turn, not the
+drain. Every socket a case binds for itself except that one is audited by the same helper, so a `TMPDIR` deep
+enough to overrun the cap is a `SKIP` naming the byte count and the cap: the bind raises in a python child whose
+stderr the gate discards, and a missing socket is also what a too-long path looks like.
 
 And never `pgrep -f` a pattern that also appears in the command line you are running: the match is your
 own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing

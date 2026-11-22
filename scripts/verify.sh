@@ -8823,6 +8823,28 @@ PY
   echo $!
 }
 
+# unix_socket_fits <case> <path>: the gate's one `AF_UNIX` length guard, printed as the case's SKIP when it does not
+# fit. The kernel caps a socket path at 107 bytes (`sun_path` is 108 and the terminating NUL takes one), and a bind past
+# that raises in whichever child binds it — `fake_docker_ping`'s python, whose stderr this gate discards, so its wait
+# loop sees no socket and fails with "the fake daemon socket never appeared"; or a `serve` the case boots, which exits
+# over a socket it could not bind. Either way the sentence blames a missing daemon when the fact is the depth of the
+# path. Every host-to-host stand-in audits its `$WORK` path here, so a `TMPDIR` deep enough to overrun the cap is this
+# SKIP rather than "the fake daemon socket never appeared" — and so does the one socket whose directory is a container
+# mount source, `case_upgrade`'s data root, since `promote` puts the smoke root inside it and a mount source has to be a
+# path the daemon can see: that root stays under the checkout, so its name is the checkout's and this guard is what
+# audits it. (`case_smoke`'s root is the same kind of path and is deliberately unguarded: its smoke run's drain socket
+# only warns when the name does not fit, and the case measures the turn.) A path that does not fit is a machine where
+# the case cannot measure its fact, so it SKIPs naming the depth rather than passing quietly or blaming the daemon.
+unix_socket_fits() {
+  local case_name="$1" path="$2"
+  if [ "${#path}" -le 107 ]; then
+    return 0
+  fi
+  printf 'SKIP %s: the socket path is %d bytes and AF_UNIX caps one at 107 (%s)\n' \
+    "$case_name" "${#path}" "$path"
+  return 1
+}
+
 # free_port: a TCP port the kernel just gave us on loopback, printed and released — the same bet `--port 0`
 # makes. Something could take it in between, which is why a case that uses one *asserts* the port's answer
 # (a `pass` naming it free) rather than assuming it.
@@ -8848,13 +8870,16 @@ PY
 case_worktree() {
   local name=case_worktree response body id base
   local projects="$WORK/projects" repo="$WORK/projects/holosmith"
-  # The guard comes first, before `stop_serve`: a case that skipped after stopping the run's server would
+  # The guards come first, before `stop_serve`: a case that skipped after stopping the run's server would
   # leave `phase_serve`'s own `stop_serve` with no pid to signal, and a blessed configuration (python3 is
-  # optional) would fail the gate at the last assertion with a message about SIGTERM.
+  # optional) would fail the gate at the last assertion with a message about SIGTERM. The second is the
+  # socket's length — the helper prints the SKIP naming the depth, where the wait below would otherwise fail
+  # as "the fake daemon socket never appeared".
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet || fail "$name/git" "git init did not work in $repo"
@@ -8958,6 +8983,7 @@ case_changes() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/changes.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-changes.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -9141,6 +9167,7 @@ case_changes_screen() {
     printf 'SKIP %s: no python3 to answer the docker preflight (web/test/transcript.test.ts covers the rules)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-screen.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -9291,6 +9318,7 @@ case_changes_diff() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/changes.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-diff.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -9488,6 +9516,7 @@ case_merge() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/merge.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-merge.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -9705,6 +9734,7 @@ case_merge_strategies() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/merge.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-strategies.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -9904,6 +9934,7 @@ case_merge_guards() {
     printf 'SKIP %s: no python3 for the `_ping` socket and the row write (tests/merge.rs covers both guards)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-guards.sock" || return 0
   stop_serve
   mkdir -p "$repo"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -10230,6 +10261,7 @@ case_publish() {
     printf 'SKIP %s: no python3 for the `_ping` socket (tests/publish.rs covers the push and every refusal)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-publish.sock" || return 0
   stop_serve
   mkdir -p "$repo" || fail "$name/mkdir" "$repo is not creatable"
   git -C "$repo" init --quiet -b main || fail "$name/git" "git init did not work in $repo"
@@ -10462,6 +10494,7 @@ case_worktree_refusal() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/worktree.rs covers this)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$WORK/docker-refusal.sock" || return 0
   stop_serve
 
   # 1. A `.git` that is a file: a linked worktree's or a submodule checkout's shape.
@@ -10835,12 +10868,18 @@ PY
 
 case_doctor_quick() {
   local name=case_doctor_quick root="$repo_root/target/verify-doctor-$$"
+  # The socket is `$WORK`'s and the tree is `target`'s: the stand-in and the `doctor` run under test are both host
+  # processes, so no mount source is involved, and `$WORK` is short enough for `AF_UNIX` however deep the checkout is.
+  local sock="$WORK/docker-doctor-quick.sock"
   local control preview status word line
   # The guard is first, and before anything else that could fail: python3 is optional on a hub-class machine.
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to pick ports and answer `_ping` (tests/doctor.rs covers every check)\n' "$name"
     return 0
   fi
+  # Second for the same reason, and before the tree is made: a path the kernel will not take is a SKIP here (the
+  # helper prints it, naming the depth), not a `FAIL socket` below.
+  unix_socket_fits "$name" "$sock" || return 0
   rm -rf "$root"
   # `install -d -m 0755` rather than `mkdir -p`: `doctor`'s `perms` compares the data root against 0755 because that
   # is what `server deploy` writes, and this shell's umask makes `mkdir -p` write 0775 — the fixture has to be the
@@ -10848,17 +10887,17 @@ case_doctor_quick() {
   install -d -m 0755 "$root/data" || fail "$name/mkdir" "could not create $root/data"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-  socket_pid="$(fake_docker_ping "$root/docker.sock")"
+  socket_pid="$(fake_docker_ping "$sock")"
   for _ in $(seq 1 100); do
-    [ -S "$root/docker.sock" ] && break
+    [ -S "$sock" ] && break
     sleep 0.05
   done
-  [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+  [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
 
   # `role = "server"` because that is who runs the Docker and git checks (item 10 §6 omits them for a hub),
   # and `backend = "stub"` so nothing in this case can start a container.
-  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\nprojects_root = "%s"\ndocker_host = "unix://%s/docker.sock"\nmin_free_gb = 1\n' \
-    "$owner" "$control" "$preview" "$root/data" "$root/projects" "$root" >"$WORK/config-doctor-quick.toml"
+  printf 'owner = "%s"\nrole = "server"\nbackend = "stub"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\ndata_root = "%s"\nprojects_root = "%s"\ndocker_host = "unix://%s"\nmin_free_gb = 1\n' \
+    "$owner" "$control" "$preview" "$root/data" "$root/projects" "$sock" >"$WORK/config-doctor-quick.toml"
   # `chmod` for the same reason `install -d -m 0755` made the data root: `perms` compares the config against the
   # 0644 `server deploy` writes, and this shell's umask leaves a redirect at 0664. The fixture has to be the machine
   # the deploy leaves. The file is the one `--config` names, so the check now really measures it — a config the deploy
@@ -11132,6 +11171,7 @@ case_disk_floor() {
     printf 'SKIP %s: no python3 to answer the docker preflight (tests/disk.rs covers both paths)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$root/docker.sock" || return 0
   stop_serve
   rm -rf "$root"
   mkdir -p "$root/bin" "$root/data" "$root/projects/holosmith"
@@ -11925,6 +11965,11 @@ case_smoke() {
   # A second statement, because `local a=$x b=$a/b` expands every word *before* it assigns anything: under `set -u`
   # that is `b: unbound variable`, which is how this case first failed.
   bin="$root/bin"
+  # The root is the checkout's, not `$WORK`'s, because the real run's is a **container mount source**: the smoke session
+  # mounts its worktree and its `pi-home` from under it, and a `mktemp -d` on `/tmp` is not a path the daemon can see
+  # (a sandbox can put `/tmp` on a tmpfs, and `-v` then makes an empty root-owned directory). Its drain socket,
+  # `<root>/real/admin/drain.sock`, is therefore the checkout's too — and that one costs nothing: `serve` warns rather
+  # than refusing when the name does not fit, and this case measures the turn, not the drain.
   rm -rf "$root"
   mkdir -p "$bin"
 
@@ -12070,6 +12115,11 @@ SHIM
 # names, and this comment is where that is disclosed.
 case_upgrade() {
   local name=case_upgrade root="$repo_root/target/verify-upgrade-$$"
+  # The whole tree stays under `target/`, data root included, because `promote` puts the smoke run's root at
+  # `<data root>/smoke` and a smoke run's root is a **container mount source** — the smoke session mounts its worktree
+  # and `pi-home` from under it — which has to be a path the daemon can see. The drain socket that follows from it is
+  # the checkout's too: `serve` binds `<data root>/run/drain.sock` and the promotion dials
+  # `admin_dir(&config.data_root)`, with no flag of its own to move it, so the length guard below is what audits that.
   local data="$root/data" projects="$root/projects" admin="$root/data/run" config="$root/config.toml"
   local bin="$root/bin" candidate="$root/candidate/holosmith" state="$root/state"
   local docker_log="$root/docker.argv" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
@@ -12147,6 +12197,13 @@ PY
   # spelled here as the listener is.
   if ! command -v docker >/dev/null 2>&1 || ! timeout 60 docker version >/dev/null 2>&1; then
     printf 'note %s: no Docker daemon answers, so the promotion and its rollback were not measured (the two refusals were)\n' "$name"
+    rm -rf "$root"
+    return 0
+  fi
+  # The length guard, here rather than at the top: the two refusals above dial nothing, so a path the kernel will not
+  # take costs only the arms from this one down. The helper prints the SKIP naming the depth, and the tree is cleaned up
+  # first, in the shape the no-daemon arm above uses, so a skip leaves nothing behind.
+  if ! unix_socket_fits "$name" "$admin/drain.sock"; then
     rm -rf "$root"
     return 0
   fi
@@ -12444,13 +12501,19 @@ SHIM
 # `current` at the previous release, restarts" becomes an order the artifact's own output and the tree prove.
 case_rollback() {
   local name=case_rollback root="$repo_root/target/verify-rollback-$$"
-  local data="$root/data" projects="$root/projects" admin="$root/data/run" config="$root/config.toml"
+  # The data root, not merely the admin directory, is `$WORK`'s: the socket is `<data root>/run/drain.sock` and the
+  # verb dials `admin_dir(&config.data_root)` with no flag of its own, so the two only agree when the data root moves.
+  # Nothing here is a mount source — the backend is `stub` and no container starts — so a `mktemp -d` of about 20 bytes
+  # is the right home for it, and the checkout's depth leaves the path; the release trees, the config, the stand-ins and
+  # the unit stay under `target/`.
+  local data="$WORK/$name/data" projects="$root/projects"
+  local admin="$data/run" config="$root/config.toml"
   local bin="$root/bin" systemctl_log="$root/systemctl.argv" serve_log="$root/serve.log"
   local pid_file="$root/serve.pid" restart_view="$root/restart.current"
   local releases="$root/releases" link="$root/current"
   local unit
   local version tag digest status answer port line first second session schema
-  rm -rf "$root"
+  rm -rf "$root" "$WORK/$name"
   mkdir -p "$bin" "$data" "$projects" "$admin"
   # The unit is the user manager's file beside `--config`, not a file under `--root` (ADR-0088).
   unit="$(unit_for "$config")"
@@ -12589,6 +12652,13 @@ PY
     printf 'note %s: no python3 to make a database from a newer release, so the schema refusal was not measured\n' "$name"
   fi
 
+  # The length guard, here rather than at the top: the three tree refusals above dial nothing, so a path the kernel will
+  # not take costs only the arms from here down. The helper prints the SKIP naming the depth, and the trees are cleaned
+  # up first, in the shape `case_upgrade`'s no-daemon arm uses, so a skip leaves nothing behind.
+  if ! unix_socket_fits "$name" "$admin/drain.sock"; then
+    rm -rf "$root" "$WORK/$name"
+    return 0
+  fi
   # Everything below needs a machine serving on the port the config names, so the origin is spelled to match it: a
   # config's port does not re-derive `control_origin` (`--port 0` does).
   port="$(free_port)"
@@ -12691,7 +12761,7 @@ PY
 
   kill "$extra_pid" 2>/dev/null || true
   extra_pid=""
-  rm -rf "$root"
+  rm -rf "$root" "$WORK/$name"
 }
 
 # what the release layout *means* once there is more than one release in it. No daemon, no database, no
@@ -13221,6 +13291,9 @@ PYASK
 
 case_server_deploy() {
   local name=case_server_deploy root="$repo_root/target/verify-deploy-$$"
+  # The `_ping` stand-in is a host process talking to a host process, so its socket lives in `$WORK` — a `mktemp -d`,
+  # short enough for `AF_UNIX` whatever the checkout's depth — and everything else stays where it was.
+  local sock="$WORK/docker-deploy.sock"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local control preview status line got entry n version unit
   local shims log state target count
@@ -13228,18 +13301,18 @@ case_server_deploy() {
   # ---- the offline half: step 1 against a `_ping` socket, and the two failures ----------------------
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s/offline: no python3 to answer `_ping` (tests/deploy.rs covers the words, the order and the sudo seam)\n' "$name"
-  else
+  elif unix_socket_fits "$name/offline" "$sock"; then
     rm -rf "$root"
     mkdir -p "$root"
     control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
     preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-    socket_pid="$(fake_docker_ping "$root/docker.sock")"
+    socket_pid="$(fake_docker_ping "$sock")"
     for _ in $(seq 1 100); do
-      [ -S "$root/docker.sock" ] && break
+      [ -S "$sock" ] && break
       sleep 0.05
     done
-    [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
-    deploy_config "$WORK/config-deploy-offline.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+    deploy_config "$WORK/config-deploy-offline.toml" "$control" "$preview" "unix://$sock" "$image"
     # A dry run reads step 6 (`tailscale serve status --json` is what the plan is made of), so the shim is on PATH
     # even for a run that installs nothing. Steps 5, 6 and 7 are this story's now, so nothing here is a skip.
     shims="$WORK/$name.shims"
@@ -13590,6 +13663,9 @@ AGAIN
 # socket, and a hub builds and starts nothing.
 case_deploy_ssh() {
   local name=case_deploy_ssh root="$repo_root/target/verify-ssh-$$"
+  # The `_ping` stand-in binds in `$WORK`, so the checkout's depth is not part of its budget: this case's own tree
+  # stays under `target/`, and the length guard below names the depth if even `$WORK` does not fit.
+  local sock="$WORK/docker-ssh.sock"
   # `socket_pid`/`holder_pid` are assigned up front on purpose: a `local` with no value is **unset** in bash, and
   # the EXIT trap that runs after a `fail` in this function still sees its locals — so an unset `holder_pid` here
   # turns any failure into `line N: holder_pid: unbound variable` and buries the sentence that mattered.
@@ -13600,16 +13676,17 @@ case_deploy_ssh() {
     printf 'SKIP %s: no python3 to pick the two ports, answer `_ping` and hold the control port (tests/remote.rs covers the four argvs and every refusal)\n' "$name"
     return 0
   fi
+  unix_socket_fits "$name" "$sock" || return 0
   rm -rf "$root"
   mkdir -p "$root"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-  socket_pid="$(fake_docker_ping "$root/docker.sock")"
+  socket_pid="$(fake_docker_ping "$sock")"
   for _ in $(seq 1 100); do
-    [ -S "$root/docker.sock" ] && break
+    [ -S "$sock" ] && break
     sleep 0.05
   done
-  [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+  [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
   hostarch="$(uname -m)"
   case "$hostarch" in
     x86_64|amd64) hostarch=x86_64; other="$repo_root/dist/aarch64-unknown-linux-musl/holosmith" ;;
@@ -13642,7 +13719,7 @@ case_deploy_ssh() {
   # can answer — and steps 2–6 plan. The six lines below are the **target's own**: they arrive through the fourth
   # child's inherited stdout, which is the acceptance's "streaming the output" and the demo's "lists steps
   # remotely" in one measurement.
-  deploy_config "$WORK/config-deploy-ssh.toml" "$control" "$preview" "unix://$root/docker.sock" "pi-agent:local"
+  deploy_config "$WORK/config-deploy-ssh.toml" "$control" "$preview" "unix://$sock" "pi-agent:local"
   status=0
   PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --dry-run --root "$root/tree" \
     --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
@@ -14478,13 +14555,16 @@ case_root_refusal() {
 # `AGENTS.md` is the by-hand procedure for the parts only a real host can show.
 case_server_service() {
   local name=case_server_service root="$repo_root/target/verify-service-$$"
+  # The `_ping` stand-in is a host process, and so is the `doctor`/`deploy` run it answers, so its socket is `$WORK`'s
+  # (short, whatever the checkout's depth) and the hand-built install tree stays under `target/`.
+  local sock="$WORK/docker-service.sock"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
   local control preview status line count absent shims log state target vapid unit serve_bg
 
   # ---- the offline half: `perms` on a hand-built tree, and the dry run's plan ----------------------
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s/offline: no python3 to pick ports and answer `_ping` (tests/doctor.rs owns the `perms` arms)\n' "$name"
-  else
+  elif unix_socket_fits "$name/offline" "$sock"; then
     rm -rf "$root"
     # The tree `server deploy` writes, made by hand. `perms` reads modes and owners; the two files' *contents* are
     # `vapid::is_pair`'s business — the deploy's read, not doctor's — so an empty keys.toml describes a deployed
@@ -14499,12 +14579,12 @@ case_server_service() {
       fail "$name/tree/vapid" "could not create vapid.toml"
     control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
     preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-    socket_pid="$(fake_docker_ping "$root/docker.sock")"
+    socket_pid="$(fake_docker_ping "$sock")"
     for _ in $(seq 1 100); do
-      [ -S "$root/docker.sock" ] && break
+      [ -S "$sock" ] && break
       sleep 0.05
     done
-    [ -S "$root/docker.sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+    [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
     # The shim first: `doctor`'s tailscale finding and the dry run's step 6 both ask through the name on PATH, and a
     # machine whose own `tailscale` is logged out would otherwise make the pass below a failure that is not this
     # case's subject.
@@ -14515,7 +14595,7 @@ case_server_service() {
     # `--root "$root"` is the tree this case made: `doctor`'s install paths are the root's (ADR-0088 D1), so a
     # run given only the file would answer about this machine's own tree. The config still carries `data_root`,
     # because `serve` and the dry run below read the file.
-    deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$sock" "$image"
     printf 'data_root = "%s"\n' "$root/data" >>"$WORK/config-service-doctor.toml"
 
     # 1. The modes the deploy writes: one `perms` line, and the two files this case made are not among the paths the
@@ -14564,7 +14644,7 @@ case_server_service() {
     # 4. The dry run's plan for the three steps this story made real. Step 6 is a **read**, so a plan asks it: the
     #    shim is on PATH even for a run that installs nothing. As in `case_server_deploy`, a plan's content is the
     #    step's block and not its first line alone (ADR-0085).
-    deploy_config "$WORK/config-service-dry.toml" "$control" "$preview" "unix://$root/docker.sock" "$image"
+    deploy_config "$WORK/config-service-dry.toml" "$control" "$preview" "unix://$sock" "$image"
     status=0
     PATH="$shims:$PATH" "$artifact" server deploy --verbose --dry-run --root "$root/install" \
       --config "$WORK/config-service-dry.toml" >"$WORK/$name.dry.out" 2>&1 || status=$?
