@@ -222,14 +222,16 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
   "not measured here", never as a defect in your change.**
 - **`$HOLOSMITH_TEST_IMAGE`** (default `pi-agent:local`): a Docker image with `sh`, `git` **and `node`** (the
   network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
-  and the two mount/reconcile cases. It is run as the config's `agent_image`, so a development machine may point
+  and the two mount/reconcile cases. The two install cases run the artifact in it too, as the machine the command hands
+  a home of its own (ADR-0108). It is run as the config's `agent_image`, so a development machine may point
   that key at an image it tagged by hand; the two product images are `holosmith-proxy:<version>` and
   `agent-image:<version>` (ADR-0057).
-- **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here, and **`bwrap`** for
-  the empty-root run. Both are machine-local and **no script in this repo downloads anything**.
+- **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here. It is machine-local and
+  **no script in this repo downloads anything**.
 - **A Docker daemon.** The development sandbox binds its socket because every story is a fact about a real
   `docker run` — that is host root by another name (anything reaching the socket can mount `/`), so it is
-  granted deliberately and only when the socket exists.
+  granted deliberately and only when the socket exists. The empty-root run `scripts/check-static.sh` makes is a
+  `FROM scratch` container on it (ADR-0108), so a machine without one prints a `SKIP` where it used to measure.
 
 ## The offline workflow: what a session can run
 
@@ -261,9 +263,9 @@ with its own sentence instead of letting every phase report the same symptom (th
 
 **A `SKIP` measures nothing.** In a container `cargo test` prints a `SKIP` for each integration binary that wants a
 Docker daemon, and `scripts/build.sh`'s last step prints one for `git_tag` (the case builds in a `git ls-files` copy, so
-there is no `.git` to `git describe`), one for the x86_64 empty-root run (`bwrap`) and one for the aarch64 execution
-(`qemu-aarch64-static`): a green suite there says the tree compiles and its daemon-free half passes, and the proof is
-`scripts/verify.sh` on a host (see "Build and gates").
+there is no `.git` to `git describe`), one for the x86_64 empty-root run (this container has no Docker daemon to make
+one with) and one for the aarch64 execution (`qemu-aarch64-static`): a green suite there says the tree compiles and its
+daemon-free half passes, and the proof is `scripts/verify.sh` on a host (see "Build and gates").
 
 ## Running it by hand, and the traps in it
 
@@ -442,11 +444,11 @@ next boot resumes them.
   tests — `tests/pin_single_source.rs` fails if it appears in a second tracked file.
 - The workspace root has one member, so a command from the root needs `-p holosmith`
   (`cargo run -p holosmith -- version`).
-- **The fetch-nothing proof**, once per target: `cargo fetch --locked`, then a `bwrap --unshare-net --offline`
-  release build; `scripts/check-static.sh` also rejects a `source = "git+…"` entry in `Cargo.lock`. It covers
-  cargo only: the binary embeds the web app, so a cargo-only build of a clone without `web/dist` still succeeds
-  and serves a placeholder — build the app first and with `HOLOSMITH_REQUIRE_WEB=1`, which `scripts/build.sh`
-  always does.
+- **The fetch-nothing proof**, once per target: `cargo fetch --locked`, then a release build under
+  `docker run --network none` (the shape `case_agent_offline_build` runs); `scripts/check-static.sh` also rejects a
+  `source = "git+…"` entry in `Cargo.lock`. It covers cargo only: the binary embeds the web app, so a cargo-only build
+  of a clone without `web/dist` still succeeds and serves a placeholder — build the app first and with
+  `HOLOSMITH_REQUIRE_WEB=1`, which `scripts/build.sh` always does.
 
 ## Invariants an agent must not break
 

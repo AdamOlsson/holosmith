@@ -7,9 +7,9 @@
 # whose output nobody can explain.
 #
 # The build itself is `scripts/build.sh`, unchanged: one recipe for the artifact, run in here instead of on the
-# host. `--no-check` because `scripts/check-static.sh` boots the artifact inside a bubblewrap sandbox and fetches
-# from loopback — a second namespace this container has no business needing; the two static assertions it makes are
-# `holosmith build`'s own (it reads the ELF header of the file that lands) and `case_build`'s.
+# host. `--no-check` because the empty-root check `scripts/check-static.sh` makes is a container of its own, and this
+# container has no Docker daemon to make one with; the two static assertions it makes are `holosmith build`'s own (it
+# reads the ELF header of the file that lands) and `case_build`'s.
 set -eu
 
 target="${1:?the target triple is the only argument}"
