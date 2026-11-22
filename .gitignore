@@ -4,6 +4,9 @@
 # Artifacts: scripts/build.sh writes dist/<target-triple>/holosmith
 /dist/
 
+# `holosmith build`'s default --out writes `releases/<tag>/` into the directory it runs from
+/releases/
+
 # Frontend build output; the app is embedded in the binary (ADR-0004)
 /web/dist/
 /node_modules/

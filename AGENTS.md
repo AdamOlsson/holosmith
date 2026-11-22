@@ -220,6 +220,14 @@ The image carries the crate set and the npm cache (ADR-0106), so a session's con
 and the gate is what proves it — `case_agent_offline_build` runs it under `--network none` and reads `file -b` on both
 musl artifacts inside the container. `--locked` is the flag to keep; anything that would move the lock is a host's work.
 
+**A session's build spends disk, and that number has a key.** Measured in a session's shape (`--network none`, the
+invoking uid, a session's `--cpus 2 --memory 4096m`): `cargo build --locked`, `cargo clippy --all-targets` and
+`cargo test --no-run` write **9.2 GB** of `target/`, and both musl release builds take it to **9.6 GB** (ADR-0107).
+Almost all of it is debug info — a linked test binary here is 111 MB and 18 MB once stripped, because each of the
+integration binaries links the whole crate and carries its own copy of its DWARF. `session_disk_soft_gb` measures the
+**whole worktree**, 20 by default, so a session that cleans up and builds again deletes `target/` between the two
+rather than meeting the watchdog mid-turn; a tree left behind is what a later session pays for.
+
 **`bash -c`, never `bash -lc`.** Measured in `agent-image:0.1.0`: `bash -c 'command -v cargo'` answers
 `/usr/local/cargo/bin/cargo`, and `bash -lc` answers nothing, as this host's uid and as a uid the image has no passwd
 entry for. `-l` makes bash a login shell, Debian's `/etc/profile` re-sets `PATH` to its own literal list, and the
