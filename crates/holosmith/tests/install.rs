@@ -25,7 +25,7 @@
 //! - **an install that does not answer fails** — `a_health_poll_that_never_answers_fails_and_names_the_journal`.
 //!
 //! So the glue no case here drives is `run`'s own three lines — print the report, print `resume` or the URL and the
-//! next step, return the code. `scripts/verify.sh`'s `case_install` runs the verb end to end under `bwrap` with a home
+//! next step, return the code. `scripts/verify.sh`'s `case_install` runs the verb end to end in a container with a home
 //! and a unit tree of its own, and that is where the report, the URL and next step, and the exit code are measured; a
 //! failing install's `install: resume:` line is still measured nowhere.
 //!

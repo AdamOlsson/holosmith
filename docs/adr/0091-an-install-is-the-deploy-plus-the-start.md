@@ -81,7 +81,7 @@ with `sudo loginctl enable-linger $USER` beside the two `systemctl --user` comma
 - **The gate drives `run`, and still has no manager and no daemon.** `tests/install.rs` drives a **hub's** install
   with the machine handed in, so the four container checks are `unknown` rather than measured; what a server's deploy
   does to a real daemon is `tests/deploy.rs` and `scripts/verify.sh`'s cases. `scripts/verify.sh`'s `case_install`
-  drives `install::run` for a hub under `bwrap`: a passwd entry names a home the case owns, so the unit `--config`
+  drives `install::run` for a hub in a container: a passwd entry names a home the case owns, so the unit `--config`
   composes is the one the account's "manager" resolves, and `systemctl`/`loginctl` are recording stand-ins on `PATH`.
   That is what measures the argv, the unit's bytes, the linger lines and a second run's silence — and what it still
   does not measure is a real user manager: no unit is loaded and no linger flag is set.

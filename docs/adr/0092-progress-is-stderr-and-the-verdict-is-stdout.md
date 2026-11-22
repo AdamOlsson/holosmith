@@ -102,7 +102,7 @@ lines are slow too.
 - `tests/install.rs` drives `install::execute` the same way: the six steps, then `unit`, `linger` and `health`, with
   the health phrase naming the address and the bound — and a plan handing its sink the same seven lines, because the
   silent sink is `install::run`'s choice and not `execute`'s.
-- `scripts/verify.sh`'s `case_install` and `case_install_terse` both run the shipped artifact under `bwrap` with the
+- `scripts/verify.sh`'s `case_install` and `case_install_terse` both run the shipped artifact in a container with the
   report on stdout and the progress on stderr, and both assert one `install: [<label>] ` line per step the run
   evaluated, no line for the two steps a hub skips, stdout holding not one progress line and stderr not one step line
   — and a `--dry-run` section that puts nothing on stderr at all.

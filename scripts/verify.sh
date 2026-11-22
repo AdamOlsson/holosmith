@@ -36,7 +36,7 @@
 # swept on a real daemon (a leftover container, an orphan network and worktree directory gone, a kept branch
 # and ref kept, the session's container replaced under the same name), a boot over a database from a newer
 # release (which continues and says who refuses), the one-command install in four cases after `case_server_deploy`
-# (`case_install`: a hub installed on a machine of its own under `bwrap` — the `--config`/`--root` tree, the deploy's
+# (`case_install`: a hub installed on a machine of its own in a container — the `--config`/`--root` tree, the deploy's
 # six steps, the `systemctl --user daemon-reload`/`enable --now` argv, the unit's bytes beside the config, the
 # `loginctl` linger reads and apply, and a second run whose every line is `satisfied` while neither apply command runs
 # again; `case_install_terse`: the same install in its **default** rendering, diffed byte for byte against a real run's
@@ -268,6 +268,12 @@ cleanup() {
     docker image rm -f "$root_refusal_image" >/dev/null 2>&1 || true
     root_refusal_image=""
   fi
+  # `case_install`'s and `case_install_terse`'s containers, named `hs_install_<this run's pid>_<case>`, so the sweep is
+  # this run's alone and a `fail` inside a run does not leave one for the next run of the case to fail on by name.
+  local install_container
+  for install_container in $(docker ps -aq --filter "name=hs_install_$$_" 2>/dev/null || true); do
+    docker rm --force "$install_container" >/dev/null 2>&1 || true
+  done
   # shellcheck disable=SC2086 # deliberate word splitting: each id is one word, and an empty list is no words.
   if [ "$status" -ne 0 ] || [ "$keep" -eq 1 ]; then
     printf 'work dir kept: %s\n' "$WORK" >&2
@@ -10673,6 +10679,15 @@ EOF
   chmod 0644 "$path"
 }
 
+# The search path an image hands its containers, so a case's own shims go ahead of the image's programs rather than
+# ahead of a spelling the case assumed — and a `HOLOSMITH_TEST_IMAGE` naming another image does not silently drop one of
+# them. The fallback is what Docker supplies to a container whose image names no `PATH`.
+image_container_path() {
+  local image="$1" path
+  path="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | sed -n 's/^PATH=//p')"
+  printf '%s\n' "${path:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+}
+
 # Every entry under a directory, sorted, each with its mode and size: what "the second run changed nothing" is
 # compared against. A listing rather than a hash so a failure names the entry that moved.
 deploy_listing() {
@@ -13148,10 +13163,10 @@ SHIM
 # `$WORK`: a `mktemp -d` on a tmpfs is a path the daemon may not see (ADR-0035).
 #
 # The `SKIP` lines in the captured output are all `check-static.sh`'s, and none of them is about the crates:
-# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against), the x86_64 empty-root run (the
-# image installs no `bwrap`) and the aarch64 execution (no emulator in the image). `build.sh` calls `build-web.sh`
-# itself, so the explicit run is the npm half measured on its own and the second, inside `build.sh`, is the fast path
-# with `node_modules` already there.
+# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against), the x86_64 empty-root run (this
+# container has no Docker daemon to run it in) and the aarch64 execution (no emulator in the image). `build.sh` calls
+# `build-web.sh` itself, so the explicit run is the npm half measured on its own and the second, inside `build.sh`, is
+# the fast path with `node_modules` already there.
 #
 # The image is `agent-image:$version`, which `case_server_images` builds and leaves in place, so the tag read here is
 # one built from **this** tree; a machine without it skips with the reason rather than measuring an older image.
@@ -13993,9 +14008,9 @@ CAT
 # **A tree that is not the manager's** (the spelling every other case here uses) commands nothing, and its two lines
 # are `needs` carrying the operator's own commands — that arm is `case_server_deploy`'s and `case_uninstall`'s.
 #
-# **The account's own tree** is what `bwrap` makes safe to measure without root: a `/etc/passwd` this case wrote names
-# the home it owns, so `identity::home` (the password entry of the uid, never `$HOME`) makes `--config`'s unit path
-# equal the manager's, and `systemctl`/`loginctl` are recording stand-ins on `PATH`. Nothing on this machine's real
+# **The account's own tree** is what a container makes safe to measure without root: a `/etc/passwd` this case wrote
+# names the home it owns, so `identity::home` (the password entry of the uid, never `$HOME`) makes `--config`'s unit
+# path equal the manager's, and `systemctl`/`loginctl` are recording stand-ins on `PATH`. Nothing on this machine's real
 # unit or linger flag is read or written, and no `sudo` is asked for. `--root` and `--config` are both passed
 # explicitly, as every case here does.
 #
@@ -14006,21 +14021,28 @@ CAT
 # `enable-linger` run again, and the config, unit and key pair byte-identical. That is the acceptance's "re-running
 # changes nothing" at the one verb whose whole promise is one command.
 #
-# A machine without `bwrap` or `python3` prints one SKIP line: the home, not the command, is what it cannot hand over,
-# and `tests/install.rs` drives the same lines through install's own seam.
+# A machine without a Docker daemon or the image prints one SKIP line: the home, not the command, is what it cannot
+# hand over, and `tests/install.rs` drives the same lines through install's own seam.
 case_install() {
   local name=case_install root="$repo_root/target/verify-install-$$"
   local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
   local passwd="$root/passwd" shims="$root/bin" logs="$root/logs"
-  local control preview status unit fake_uid log tag
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  # The name is this run's, so the EXIT trap's sweep cannot reach a gate run in another worktree.
+  local container="hs_install_$$_$name"
+  local control preview status unit run_uid run_gid log tag image_path
   # `holder_pid` is assigned up front on purpose: a `local` with no value is **unset** in bash, and the EXIT trap that
   # runs after a `fail` in this function still sees its locals — so an unset one turns any failure into
   # `line N: holder_pid: unbound variable` and buries the sentence that mattered (`case_deploy_ssh` says it in full).
   local holder_pid=""
-  # The guard is the harness, not the command: `bwrap` has to be able to make the namespace at all, and a machine
-  # that refuses it is a supported machine (AGENTS.md names it optional).
-  if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
-    printf 'SKIP %s: no bwrap to hand the binary a home of its own (tests/install.rs drives the same lines)\n' "$name"
+  # The guard is the harness, not the command: a machine with no daemon or no image is a supported machine (AGENTS.md
+  # names both optional).
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon to hand the binary a home of its own (tests/install.rs drives the same lines)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s to hand the binary a home of its own (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
@@ -14029,29 +14051,34 @@ case_install() {
   fi
   rm -rf "$root"
   mkdir -p "$home/.config" "$shims" "$logs"
+  # A container a killed run left under this name would make the first run fail on the name rather than on the
+  # command, so the sweep is here as well as in the trap.
+  docker rm --force "$container" >/dev/null 2>&1 || true
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-  # The uid the binary will read is procfs's, dereferenced: `identity::euid` stats `/proc/self`, which is the
-  # process's own entry and therefore the caller's uid — the same one outside the namespace. The passwd entry is keyed
-  # by that measured value rather than assumed, and a `0` here would mean the case had become the refusal rather than
-  # the install, which is the one answer it may not accept.
-  fake_uid="$(bwrap --dev-bind / / /bin/sh -c 'stat -L -c %u /proc/self')" ||
-    fail "$name/uid" "could not read the uid this namespace reports"
-  case "$fake_uid" in
-    '' | *[!0-9]*) fail "$name/uid" "the namespace's uid is not a number: $fake_uid" ;;
+  # The uid and gid the binary will read are procfs's, dereferenced: `identity::euid` stats `/proc/self`, which is the
+  # process's own entry and therefore the caller's — and `--user` makes the container's process the same account. The
+  # passwd entry is keyed by that measured value rather than assumed, and a `0` here would mean the case had become
+  # the refusal rather than the install, which is the one answer it may not accept.
+  run_uid="$(id -u)"
+  run_gid="$(id -g)"
+  case "$run_uid:$run_gid" in
+    '' | *[!0-9:]*) fail "$name/uid" "this account's uid and gid are not two numbers: $run_uid:$run_gid" ;;
   esac
-  [ "$fake_uid" != 0 ] ||
-    fail "$name/uid" "this namespace reports uid 0, which is the refusal and not the install"
-  # The account's own entry, and the overflow uid beside it: two spellings of the same home, so the lookup answers
-  # whichever entry the read lands on. The name the deploy reads is the `id` shim's, not this file's.
+  [ "$run_uid" != 0 ] ||
+    fail "$name/uid" "this account is uid 0, which is the refusal and not the install"
+  # The image's own `PATH` with this case's shims ahead of it.
+  image_path="$(image_container_path "$image")"
+  # The account's own entry: the home the deploy resolves is this file's, not `$HOME`'s. The name the deploy reads is
+  # the `id` shim's, not this file's.
   {
     printf 'root:x:0:0:root:/root:/bin/sh\n'
-    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$fake_uid" "$fake_uid" "$home"
-    printf 'nobody:x:65534:65534::%s:/bin/sh\n' "$home"
+    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$run_uid" "$run_gid" "$home"
   } >"$passwd"
   # The machine's own answers where the deploy asks for a program, so the two manager commands below are the only
-  # children whose argv this case asserts.
-  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
+  # children whose argv this case asserts. `agent_image` names `$image`, the image the runner starts, so the config and
+  # the container agree on a machine whose `HOLOSMITH_TEST_IMAGE` names an image that is not the default.
+  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "$image" "hub"
   log="$logs/tailscale.log"
   deploy_machine_shims "$shims" "$log" "$logs/tailscale.state"
   cat >"$shims/systemctl" <<'SHIM'
@@ -14091,18 +14118,23 @@ case "$*" in
 esac
 SHIM
   chmod 0755 "$shims/loginctl"
-  # One runner for both runs: the fake password database, the two recorders' paths, and this case's shims ahead of the
-  # machine's own programs (the deploy's `install`, `chmod`, `df` and `openssl` are the host's).
+  # One runner for both runs: the fake password database as the container's `/etc/passwd`, this case's shims ahead of
+  # the image's own programs (the deploy's `install`, `chmod`, `df` and `openssl` are the image's), and every path
+  # bound at the same absolute path on both sides — so the home the deploy writes and the unit it composes are the
+  # ones this case reads on the host. `--network host` because the responder answering `/api/health` is this case's own
+  # process on the loopback, `--entrypoint` because the image's is `pi`, and `--rm` so a run leaves no container behind.
   install_home() {
-    bwrap --dev-bind / / --die-with-parent --bind "$passwd" /etc/passwd \
-      --setenv PATH "$shims:$PATH" \
-      --setenv HS_SHIM_LOG "$logs/tailscale.log" \
-      --setenv HS_SHIM_STATE "$logs/tailscale.state" \
-      --setenv HS_SYSTEMCTL_LOG "$logs/systemctl.log" \
-      --setenv HS_UNIT_STATE "$logs/unit.state" \
-      --setenv HS_LOGINCTL_LOG "$logs/loginctl.log" \
-      --setenv HS_LINGER_STATE "$logs/linger.state" \
-      "$artifact" "$@"
+    docker run --rm --name "$container" --network host --user "$run_uid:$run_gid" \
+      --entrypoint "$artifact" \
+      --volume "$root:$root" --volume "$passwd:/etc/passwd:ro" --volume "$artifact:$artifact:ro" \
+      --env "PATH=$shims:$image_path" \
+      --env "HS_SHIM_LOG=$logs/tailscale.log" \
+      --env "HS_SHIM_STATE=$logs/tailscale.state" \
+      --env "HS_SYSTEMCTL_LOG=$logs/systemctl.log" \
+      --env "HS_UNIT_STATE=$logs/unit.state" \
+      --env "HS_LOGINCTL_LOG=$logs/loginctl.log" \
+      --env "HS_LINGER_STATE=$logs/linger.state" \
+      "$image" "$@"
   }
   # Step 6 waits for `/api/health`, and its `doctor --full` reads a held control port as the serving pass, so one
   # responder on the config's port is what makes "this machine is serving" a measurement rather than a wait.
@@ -14275,17 +14307,24 @@ SHIM
 # it is on stderr: one `install: [<label>] …` line per step it evaluates, `3/6 images` and `4/6 proxies` absent
 # because a hub has no work for them, and nothing at all for a plan (ADR-0092).
 #
-# The fixture is `case_install`'s, cut to what one run needs: `bwrap` hands the binary a home of its own so the unit
-# `--config` composes is the one the account's manager resolves (ADR-0091 D4), the two manager programs are recorders,
-# and one responder on the control port makes step 6 and the wait after `enable --now` answer. `tests/install.rs`
-# asserts the same shapes at the layer that builds them; this case is the shipped artifact saying it.
+# The fixture is `case_install`'s, cut to what one run needs: a container hands the binary a home of its own so the
+# unit `--config` composes is the one the account's manager resolves (ADR-0091 D4), the two manager programs are
+# recorders, and one responder on the control port makes step 6 and the wait after `enable --now` answer.
+# `tests/install.rs` asserts the same shapes at the layer that builds them; this case is the shipped artifact saying it.
 case_install_terse() {
   local name=case_install_terse root="$repo_root/target/verify-install-terse-$$"
   local home="$root/home" config="$root/home/.config/holosmith.toml" tree="$root/home/.local/share/holosmith"
   local passwd="$root/passwd" shims="$root/bin" logs="$root/logs" expected="$root/expected"
-  local control preview status fake_uid label holder_pid=""
-  if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --dev-bind / / true >/dev/null 2>&1; then
-    printf 'SKIP %s: no bwrap to hand the binary a home of its own (tests/install.rs renders the same bytes)\n' "$name"
+  local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  # The name is this run's, so the EXIT trap's sweep cannot reach a gate run in another worktree.
+  local container="hs_install_$$_$name"
+  local control preview status run_uid run_gid label image_path holder_pid=""
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon to hand the binary a home of its own (tests/install.rs renders the same bytes)\n' "$name"
+    return 0
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf 'SKIP %s: no image %s to hand the binary a home of its own (HOLOSMITH_TEST_IMAGE names another)\n' "$name" "$image"
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
@@ -14294,21 +14333,26 @@ case_install_terse() {
   fi
   rm -rf "$root"
   mkdir -p "$home/.config" "$shims" "$logs"
+  # A container a killed run left under this name would make the first run fail on the name rather than on the command.
+  docker rm --force "$container" >/dev/null 2>&1 || true
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-  fake_uid="$(bwrap --dev-bind / / /bin/sh -c 'stat -L -c %u /proc/self')" ||
-    fail "$name/uid" "could not read the uid this namespace reports"
-  case "$fake_uid" in
-    '' | *[!0-9]*) fail "$name/uid" "the namespace's uid is not a number: $fake_uid" ;;
+  # The uid and gid the binary will read, measured rather than assumed, and `--user` makes the container's process the
+  # same account (ADR-0090): a `0` here would mean the case had become the refusal.
+  run_uid="$(id -u)"
+  run_gid="$(id -g)"
+  case "$run_uid:$run_gid" in
+    '' | *[!0-9:]*) fail "$name/uid" "this account's uid and gid are not two numbers: $run_uid:$run_gid" ;;
   esac
-  [ "$fake_uid" != 0 ] || fail "$name/uid" "this namespace reports uid 0, which is the refusal"
+  [ "$run_uid" != 0 ] || fail "$name/uid" "this account is uid 0, which is the refusal"
+  image_path="$(image_container_path "$image")"
   {
     printf 'root:x:0:0:root:/root:/bin/sh\n'
-    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$fake_uid" "$fake_uid" "$home"
-    printf 'nobody:x:65534:65534::%s:/bin/sh\n' "$home"
+    printf 'operator:x:%s:%s::%s:/bin/sh\n' "$run_uid" "$run_gid" "$home"
   } >"$passwd"
-  # A hub: no image, no proxy, no daemon question — two skips and one line each for what it does do.
-  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "pi-agent:local" "hub"
+  # A hub: no image, no proxy, no daemon question — two skips and one line each for what it does do. Its config names
+  # `$image`, the image the runner starts, for the reason `case_install`'s does.
+  deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "$image" "hub"
   deploy_machine_shims "$shims" "$logs/tailscale.log" "$logs/tailscale.state"
   cat >"$shims/systemctl" <<'SHIM'
 #!/bin/sh
@@ -14345,16 +14389,19 @@ case "$*" in
 esac
 SHIM
   chmod 0755 "$shims/loginctl"
-  # One runner for both runs, with this case's shims ahead of the machine's own programs.
+  # One runner for both runs: the fake password database as the container's `/etc/passwd`, this case's shims ahead of
+  # the image's own programs, and every path bound at the same absolute path on both sides.
   terse_home() {
-    bwrap --dev-bind / / --die-with-parent --bind "$passwd" /etc/passwd \
-      --setenv PATH "$shims:$PATH" \
-      --setenv HS_SHIM_LOG "$logs/tailscale.log" \
-      --setenv HS_SHIM_STATE "$logs/tailscale.state" \
-      --setenv HS_SYSTEMCTL_LOG "$logs/systemctl.log" \
-      --setenv HS_UNIT_STATE "$logs/unit.state" \
-      --setenv HS_LOGINCTL_LOG "$logs/loginctl.log" \
-      "$artifact" "$@"
+    docker run --rm --name "$container" --network host --user "$run_uid:$run_gid" \
+      --entrypoint "$artifact" \
+      --volume "$root:$root" --volume "$passwd:/etc/passwd:ro" --volume "$artifact:$artifact:ro" \
+      --env "PATH=$shims:$image_path" \
+      --env "HS_SHIM_LOG=$logs/tailscale.log" \
+      --env "HS_SHIM_STATE=$logs/tailscale.state" \
+      --env "HS_SYSTEMCTL_LOG=$logs/systemctl.log" \
+      --env "HS_UNIT_STATE=$logs/unit.state" \
+      --env "HS_LOGINCTL_LOG=$logs/loginctl.log" \
+      "$image" "$@"
   }
   holder_pid="$(health_responder "$control")"
   for _ in $(seq 1 100); do

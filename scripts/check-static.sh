@@ -6,7 +6,8 @@
 # Usage: scripts/check-static.sh [--target <triple>]...
 # Reads the artifact's `version` and `serve` output, so run scripts/build.sh first. Downloads
 # nothing: qemu-aarch64-static is a machine-local tool (AGENTS.md) and its absence
-# prints one SKIP line instead of failing.
+# prints one SKIP line instead of failing. The empty-root run is a container, so a machine
+# with no Docker daemon prints one too.
 
 set -euo pipefail
 
@@ -48,6 +49,40 @@ fail() {
   printf 'FAIL %s\n' "$*" >&2
   exit 1
 }
+
+# What a `fail` — which exits the script, leaving the EXIT trap as the only hook — has to take back: the container a
+# serve run holds while it runs, the image the empty-root check built, and the directory that image was built from. The
+# last two are also removed where that check ends, so a run that passes leaves the machine as it found it (ADR-0108).
+empty_root_container="holosmith-check-static-serve-$$"
+empty_root_image=""
+empty_root_build=""
+
+# Both scratch directories live under target/, because a bind source has to be a path the daemon can see: a
+# `mktemp -d` under a tmpfs /tmp becomes an empty root-owned directory with no error anywhere (AGENTS.md). Made once
+# here, so each `mktemp` is made from a directory that exists.
+mkdir -p "$repo_root/target"
+cleanup() {
+  docker rm --force "$empty_root_container" >/dev/null 2>&1 || true
+  if [ -n "$empty_root_image" ]; then
+    docker image rm -f "$empty_root_image" >/dev/null 2>&1 || true
+    empty_root_image=""
+  fi
+  if [ -n "$empty_root_build" ]; then
+    rm -rf "$empty_root_build"
+    empty_root_build=""
+  fi
+  return 0
+}
+trap cleanup EXIT
+
+# The empty-root run is a container, so it needs the two things a container needs. One sentence per machine rather
+# than one per target: nothing below this point can measure that run without either.
+empty_root_skip=""
+if ! command -v docker >/dev/null 2>&1; then
+  empty_root_skip="no docker CLI (the empty-root run is a container)"
+elif ! docker info >/dev/null 2>&1; then
+  empty_root_skip="no Docker daemon answers (the empty-root run is a container)"
+fi
 
 # The marker build.rs writes into a placeholder page. Read from the source of truth
 # (crates/holosmith/build_support/web_embed.rs) rather than restated, so rewording the constant
@@ -100,39 +135,45 @@ fetch() {
   exec {fd}<&-
 }
 
-# check_serve_in_empty_root <label> <bwrap args...> -- <inner command...>
+# check_serve_in_empty_root <label> <image> <command...>
 #
 # Serves the app from the same empty root, fetches `/` and `/api/health` over loopback, and
 # requires the served page to be byte-for-byte this tree's web/dist/index.html: the artifact
 # ships the app, and the app is this tree's.
 check_serve_in_empty_root() {
-  local label="$1"
-  shift
-  local -a prefix=()
-  while [ "$1" != "--" ]; do
-    prefix+=("$1")
-    shift
-  done
-  shift
-  local -a inner=("$@")
+  local label="$1" image="$2"
+  shift 2
+  local -a inner=("$@") marker_args=()
   local dir addr port schema_version
-  dir="$(mktemp -d)"
+  dir="$(mktemp -d "$repo_root/target/check-static-empty-root-XXXXXX")"
   # shellcheck disable=SC2064
   trap "rm -rf '$dir'" RETURN
-  # The data dir is bound into the sandbox, so anything `serve` wrote there lands where this
-  # script can see it: the sandbox root is a writable tmpfs, so a check that looked at the host
+  # The data dir is bound into the container, so anything `serve` wrote there lands where this
+  # script can see it: the image's own root is a writable overlay, so a check that looked at that
   # copy without the bind could never fail.
   mkdir -p "$dir/data"
 
-  # --share-net puts the sandbox beside the host's loopback, which is the only way to fetch
-  # the port it bound; the filesystem is still empty. `--backend stub` because this run is about the
-  # artifact's own linking, not about a machine's choice: a Docker run checks the host first,
-  # and this sandbox has no daemon, no `git` and no `df` — which is the point of the empty root.
-  bwrap "${prefix[@]}" --bind "$dir/data" /data --share-net "${inner[@]}" \
+  # --network host puts the container's listener on the host's loopback, which is the only way
+  # `/dev/tcp` can fetch the port it bound; the filesystem is still empty. `--user` because the
+  # artifact refuses uid 0 before it parses a verb (ADR-0090) and a scratch image defaults to root.
+  # `--backend stub` because this run is about the artifact's own linking, not about a machine's
+  # choice: a Docker run checks the host first, and this image has no daemon, no `git` and no `df`
+  # — which is the point of the empty root.
+  #
+  # The gate's run marker goes into the container when the gate is what ran this script, because
+  # `--rm` fires only when the serve process ends: a run killed with SIGKILL runs no EXIT trap, so
+  # the run this script started would leave a container serving that nothing in this tree names. A
+  # container's process is a host process, so with the marker in its environ the sweep a killed
+  # run's next run makes (scripts/gate-cleanup.sh, ADR-0089) reaches it, kills it, and `--rm`
+  # removes the container. Only when it is set: scripts/build.sh runs this outside any gate.
+  if [ -n "${HOLOSMITH_GATE_RUN:-}" ]; then
+    marker_args=(--env "HOLOSMITH_GATE_RUN=$HOLOSMITH_GATE_RUN")
+  fi
+  docker run --rm --name "$empty_root_container" --network host \
+    --user "$(id -u):$(id -g)" "${marker_args[@]}" --volume "$dir/data:/data" "$image" "${inner[@]}" \
     serve --backend stub --port 0 --data-dir /data >"$dir/serve.log" 2>"$dir/serve.err" &
   local pid=$!
-  local i
-  for i in $(seq 1 200); do
+  for _ in $(seq 1 200); do
     grep -q '^control_listen ' "$dir/serve.err" 2>/dev/null && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.05
@@ -166,7 +207,7 @@ check_serve_in_empty_root() {
   # listeners), so the wait above has already covered it; the bound is here so a slow bind is a wait and not a
   # failure that names the wrong cause.
   local wanted running
-  for i in $(seq 1 200); do
+  for _ in $(seq 1 200); do
     [ -S "$dir/data/run/drain.sock" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.05
@@ -195,8 +236,9 @@ check_serve_in_empty_root() {
   local health
   health="$(sed '1,/^\r$/d' "$dir/health.response")"
   kill -TERM "$pid" 2>/dev/null || true
-  # bwrap exits with the signal's own status (143) instead of forwarding the child's, so that
-  # this proves the process stopped; the exit code 0 itself is proved by tests/serve_cli.rs.
+  # The client forwards the signal to the container's own process and then exits with its status, so
+  # this proves the process stopped and says nothing about how; the exit code 0 itself is proved by
+  # tests/serve_cli.rs.
   wait "$pid" 2>/dev/null || true
 
   local reported_version
@@ -209,9 +251,9 @@ check_serve_in_empty_root() {
   cmp -s "$dir/served.html" web/dist/index.html ||
     fail "$label in an empty root: / is not web/dist/index.html"
 
-  # After the stop the data root holds the database, at most its two WAL sidecars — because the sandbox reports
-  # the signal's own status instead of a clean exit — and the admin directory with the socket it bound. app.db is
-  # still the schema, and nothing outside the list above was written.
+  # After the stop the data root holds the database, at most its two WAL sidecars — a process cut off mid-write
+  # leaves them behind — and the admin directory with the socket it bound. app.db is still the schema, and nothing
+  # outside the list above was written.
   local left
   left="$(find "$dir/data" -mindepth 1 -maxdepth 2 -printf '%P %y\n' | sort)"
   printf '%s\n' "$left" | grep -qx 'app.db f' ||
@@ -306,25 +348,45 @@ for target in "${targets[@]}"; do
   check_version_output "$label" "$plain"
   check_git_tag "$label" "$plain"
 
-  if command -v bwrap >/dev/null 2>&1; then
-    # An empty root: no /lib, no /usr, nothing but the artifact (and the emulator).
-    bwrap_args=(--unshare-all --die-with-parent --tmpfs / --proc /proc
-      --ro-bind "$bin_abs" /holosmith)
+  if [ -n "$empty_root_skip" ]; then
+    printf 'SKIP %s empty-root run: %s\n' "$target" "$empty_root_skip"
+  else
+    # An empty root: no /lib, no /usr, nothing but the artifact (and the emulator). The build context is two lines
+    # and one copied file, so the image's filesystem *is* the artifact — which is what the probe below asserts
+    # rather than leaves implied.
+    empty_root_build="$(mktemp -d "$repo_root/target/check-static-image-XXXXXX")"
+    install -m 0755 "$bin_abs" "$empty_root_build/holosmith"
+    printf 'FROM scratch\nCOPY holosmith /holosmith\n' >"$empty_root_build/Dockerfile"
     inner=(/holosmith)
     if [ ${#runner[@]} -gt 0 ]; then
-      emulator_in_root="/$(basename "${runner[0]}")"
-      bwrap_args+=(--ro-bind "${runner[0]}" "$emulator_in_root")
-      inner=("$emulator_in_root" /holosmith)
+      install -m 0755 "${runner[0]}" "$empty_root_build/qemu"
+      printf 'COPY qemu /qemu\n' >>"$empty_root_build/Dockerfile"
+      inner=(/qemu /holosmith)
     fi
-    sandboxed="$(bwrap "${bwrap_args[@]}" "${inner[@]}" version)"
+    empty_root_image="holosmith-check-static-$target:$$"
+    docker build -q -t "$empty_root_image" "$empty_root_build" >"$empty_root_build/build.out" \
+      2>"$empty_root_build/build.err" ||
+      fail "$target: docker could not build the empty-root image: $(cat "$empty_root_build/build.err")"
+    # The empty-root claim is that the artifact ran **alone**. `FROM scratch` plus one `COPY` leaves the image no
+    # shell to run and no loader to find, so the only program it can execute is the artifact — and a run that asks
+    # for the shell a userspace dependency would need says so by failing, naming the file that is not there.
+    if docker run --rm --entrypoint /bin/sh "$empty_root_image" -c true \
+      >/dev/null 2>"$empty_root_build/shell.err"; then
+      fail "$label in an empty root: the image carries a shell, so what ran there is not the artifact alone"
+    fi
+    grep -q '/bin/sh' "$empty_root_build/shell.err" ||
+      fail "$label in an empty root: /bin/sh did not fail as a missing program: $(cat "$empty_root_build/shell.err")"
+    sandboxed="$(docker run --rm --user "$(id -u):$(id -g)" "$empty_root_image" "${inner[@]}" version)"
     check_version_output "$label in an empty root" "$sandboxed"
     check_git_tag "$label in an empty root" "$sandboxed"
     [ "$sandboxed" = "$plain" ] ||
       fail "$label: empty-root output differs from the plain run: $sandboxed"
-    check_serve_in_empty_root "$label" "${bwrap_args[@]}" -- "${inner[@]}"
+    check_serve_in_empty_root "$label" "$empty_root_image" "${inner[@]}"
     printf 'ok %s: runs with no loader and no userspace dependencies\n' "$target"
-  else
-    printf 'SKIP %s empty-root run: bwrap not found (see AGENTS.md)\n' "$target"
+    docker image rm -f "$empty_root_image" >/dev/null 2>&1 || true
+    empty_root_image=""
+    rm -rf "$empty_root_build"
+    empty_root_build=""
   fi
 
   printf '     %s: %s\n' "$bin" "$file_line"

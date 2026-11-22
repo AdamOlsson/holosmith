@@ -131,4 +131,5 @@ has none.
   answered `file: command not found`, so a session could *produce* the artifact and not run that script's own check.
   `file` joins the apt line, so the check runs in the image now, and what stays a `SKIP` there is what is machine-local
   and not the image's: `git_tag` (the case builds in a `git ls-files` copy, so there is no `.git` to `git describe`),
-  the x86_64 empty-root run (`bwrap`) and the aarch64 execution (`qemu-aarch64-static`).
+  the x86_64 empty-root run (the image's container has no Docker daemon to build another one on, ADR-0108) and the
+  aarch64 execution (`qemu-aarch64-static`).

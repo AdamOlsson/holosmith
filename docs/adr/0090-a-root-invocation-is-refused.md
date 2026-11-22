@@ -13,14 +13,15 @@ ever read.
 
 ## Measured before deciding
 
-- **A uid-0 process is readable as one, and the refusal is one line.** `bwrap --unshare-all --uid 0 --gid 0`
-  gives a process whose `/proc/self` reads `0`; this build there prints `this runs as you, drop the sudo: holosmith
-  …` on stderr, nothing on stdout, and exits 1 — for `status`, `server deploy --root /x`, `key set opencode-go`,
-  a bare invocation and `--help` alike.
+- **A uid-0 process is readable as one, and the refusal is one line.** `docker run` of an imported rootfs holding this
+  artifact — the shape `case_root_refusal` measures, which passes no `--user` and so takes the image's default uid 0 —
+  gives a process whose `/proc/self` reads `0`; this build there prints `this runs as you, drop the sudo: holosmith …`
+  on stderr, nothing on stdout, and exits 1 — for `status`, `server deploy --root /x`, `key set opencode-go`, a bare
+  invocation and `--help` alike.
 - **The proxy image's own user was root, and the egress proxy names no `--user`.** `docker run --entrypoint id <proxy>
   -u` read `0`; with the `USER` line below it reads `65534`. A `0600` file owned by the operator is `Permission
   denied` to that user under `--cap-drop ALL`, and readable with `--user $(id -u):$(id -g)`.
-- **Bubblewrap maps the caller's uid to itself**: inside `--unshare-all --tmpfs / --proc /proc`, `id` and a `stat` of
+- **A container's `--user` is the caller's own uid**: `docker run --user $(id -u):$(id -g)`, `id` and a `stat` of
   `/proc/self` both read `1000` on this machine, so the empty-root run `scripts/check-static.sh` makes is not refused
   — and does not need to be.
 
@@ -65,12 +66,12 @@ this runs as you, drop the sudo: holosmith status
 
 ## The honest limit, and what is not measured
 
-- **The read is procfs', so it answers for the namespace the process is in.** Bubblewrap maps the caller's uid to
-  itself, so the empty-root run reads `1000` and is not refused — correct, because that run is not root in any
-  namespace that owns a file. A namespace that maps no uid the process can name shows procfs's overflow uid instead
-  of 0, so that shape is not refused either; this machine cannot create one (`unshare -r` fails here with `write
-  failed /proc/self/uid_map: Operation not permitted`), so that half is procfs's documented behaviour rather than a
-  measurement. What the guard refuses is a process that can write root-owned files here.
+- **The read is procfs', so it answers for the namespace the process is in.** A container's `--user` names the uid it
+  maps, so the empty-root run reads this account's own uid and is not refused — correct, because that run is not root
+  in any namespace that owns a file. A namespace that maps no uid the process can name shows procfs's overflow uid
+  instead of 0, so that shape is not refused either; this machine cannot create one (`unshare -r` fails here with
+  `write failed /proc/self/uid_map: Operation not permitted`), so that half is procfs's documented behaviour rather
+  than a measurement. What the guard refuses is a process that can write root-owned files here.
 - **A gate case is the refusal, and it does not make the gate root.** `case_root_refusal` imports a root filesystem
   holding the shipped artifact — a static binary needs no base image — and runs it as uid 0 in a container, which is
   the one uid the decision is about; `tests/root_refusal.rs` still covers the decision at its own layer, for every

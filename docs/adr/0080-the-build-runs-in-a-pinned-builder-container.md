@@ -78,9 +78,8 @@ exist keep theirs; what a `pins/builder.txt` would add is a second place to read
 - **the entry script copies the tree into `/build`** (minus `target/`, `dist/`, `web/node_modules`, `web/dist` and
   `.git`) and runs `scripts/build.sh --target <triple> --no-check` there. One recipe for the artifact, run in here
   instead of on the host — not a second recipe that could drift from the one the gate proves.
-- **`--no-check`** because `scripts/check-static.sh` boots the artifact inside a bubblewrap sandbox and fetches from
-  loopback, a second namespace this container has no business needing. What it asserts about the bytes is read by the
-  host instead (D4).
+- **`--no-check`** because the empty-root check `scripts/check-static.sh` runs is a container of its own, and this
+  container has no Docker daemon to make one with. What it asserts about the bytes is read by the host instead (D4).
 - **the source is the current directory.** An agent works in a worktree and runs the command there; a developer's
   checkout is where `git describe` finds the tag. There is no `--source` flag, and a directory that is not a Holosmith
   tree is refused before anything is mounted.
