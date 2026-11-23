@@ -369,6 +369,22 @@ impl LinearMcp {
     }
 }
 
+/// `[update]`: the checkout a promotion would build.
+///
+/// One key, because the candidate is decided rather than configurable: the tree's `master` is the commit and
+/// `git describe --tags --always` is the tag the release directory is named after (ADR-0110 D3). Unset is the
+/// default and means the machine has **no candidate at all** — not a candidate it declines to promote — so a page
+/// has no button to draw and a request has nothing to name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Update {
+    /// The checkout `[update] source` names: absolute, and an existing directory.
+    ///
+    /// The semantic pass refuses anything else. A relative path would mean whatever directory `serve` was started
+    /// in, which is why the promotion job sets `WorkingDirectory=` to this tree rather than trusting a caller's cwd.
+    pub source: Option<PathBuf>,
+}
+
 /// The machine's settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -478,6 +494,7 @@ pub struct Config {
     pub publish: Publish,
     pub egress: Egress,
     pub linear: Linear,
+    pub update: Update,
 }
 
 impl Default for Config {
@@ -524,6 +541,7 @@ impl Default for Config {
             publish: Publish::default(),
             egress: Egress::default(),
             linear: Linear::default(),
+            update: Update::default(),
         }
     }
 }
@@ -829,6 +847,9 @@ fn semantic_problems(
             "must be an absolute path",
         );
     }
+    if let Some(message) = update_source_problem(config) {
+        report(&mut problems, document, text, "update.source", message);
+    }
     if let Some(owner) = &config.owner {
         if owner.trim().is_empty() {
             report(&mut problems, document, text, "owner", "must not be empty");
@@ -1002,6 +1023,29 @@ fn semantic_problems(
     );
 
     problems
+}
+
+/// What `[update] source` broke, if anything: it must be absolute and name an existing directory.
+///
+/// A relative path would mean whatever directory `serve` was started in, and a path that is not a directory gives a
+/// promotion nothing to build. Unset is not a problem: it means this machine has no candidate at all, which is a
+/// supported machine rather than a broken one.
+fn update_source_problem(config: &Config) -> Option<String> {
+    let source = config.update.source.as_ref()?;
+    if !source.is_absolute() {
+        return Some(
+            "must be an absolute path: a relative one would mean whatever directory `serve` was started \
+             in, and this key is the checkout a promotion builds"
+                .to_string(),
+        );
+    }
+    (!source.is_dir()).then(|| {
+        format!(
+            "must name a directory that exists, and {} is not one: this key is the checkout whose `master` \
+             a promotion would make live, so a machine with no checkout leaves it unset",
+            source.display()
+        )
+    })
 }
 
 /// `preview_listen` must differ from `control_listen`, or a preview is served on the control
@@ -1276,6 +1320,9 @@ allow = ["crates.io"]
 
 [linear]
 mcp = "readonly"
+
+[update]
+source = "/tmp"
 "#;
 
     fn parse(text: &str) -> Result<Config, Problems> {
@@ -1863,6 +1910,32 @@ mcp = "readonly"
         assert_eq!(
             problems_of("hosts_seed = \"hosts.toml\"\n"),
             "config.toml:1:1: hosts_seed: must be an absolute path\n1 problem in config.toml\n"
+        );
+    }
+
+    #[test]
+    fn the_update_source_must_be_an_absolute_existing_directory() {
+        // A relative path would be resolved against the directory `serve` was started in, and a key naming a
+        // directory that is not there gives a promotion nothing to build. Unset is not a problem: it is a machine
+        // with no candidate, and the key is one an operator adds when it has one.
+        assert_eq!(
+            parse("[update]\nsource = \"/tmp\"\n")
+                .expect("an existing directory is a candidate's source")
+                .update
+                .source,
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(
+            problems_of("[update]\nsource = \"relative/checkout\"\n"),
+            "config.toml:2:1: update.source: must be an absolute path: a relative one would mean \
+             whatever directory `serve` was started in, and this key is the checkout a promotion \
+             builds\n1 problem in config.toml\n"
+        );
+        let problems = problems_of("[update]\nsource = \"/nonexistent/holosmith\"\n");
+        assert!(
+            problems.contains("update.source: must name a directory that exists")
+                && problems.contains("/nonexistent/holosmith"),
+            "{problems}"
         );
     }
 

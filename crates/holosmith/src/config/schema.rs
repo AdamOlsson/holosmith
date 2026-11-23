@@ -292,6 +292,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         kind: Kind::String,
         set: set_linear_mcp,
     },
+    KeySpec {
+        path: "update.source",
+        section: Some("update"),
+        kind: Kind::String,
+        set: set_update_source,
+    },
 ];
 
 /// Pass 1: every unknown key and every kind mismatch, each at the key that caused it.
@@ -804,6 +810,11 @@ fn set_linear_mcp(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn set_update_source(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.update.source = Some(path(value)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -918,7 +929,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 38);
+        assert_eq!(KNOWN_KEYS.len(), 39);
     }
 
     #[test]
