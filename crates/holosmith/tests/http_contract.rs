@@ -20,20 +20,21 @@ const AS_PUBLIC: &str =
 const AS_PRIVATE: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
 
 #[tokio::test]
-async fn the_health_endpoint_answers_the_seven_keys() {
+async fn the_health_endpoint_answers_the_eight_keys() {
     // The data root is this test's own: `Config::default` names the *machine's*, and a machine that has deployed
     // holds a pair — which would make the sixth key a fact about the host rather than about this test (,
     // the same hazard `health.rs`'s unit test works around).
-    let dir = TempDir::new("health-six-keys");
+    let dir = TempDir::new("health-eight-keys");
     let config = Config {
         data_root: dir.path().join("data"),
         ..Config::default()
     };
-    let served = Served::start(
-        http::router(state_in(&dir, config.clone())),
-        Duration::from_secs(10),
-    )
-    .await;
+    // The process's own draining bit, kept from the state the router is built from: the eighth key is read from
+    // this clone at the moment a request is answered, so beginning a drain here is the whole of "this machine is
+    // draining" as far as the handler can tell.
+    let state = state_in(&dir, config.clone());
+    let drain = state.drain.clone();
+    let served = Served::start(http::router(state), Duration::from_secs(10)).await;
     let response = fetch(served.addr, "/api/health").await;
     assert_eq!(response.status, 200);
     assert_eq!(response.header("content-type"), Some("application/json"));
@@ -62,9 +63,12 @@ async fn the_health_endpoint_answers_the_seven_keys() {
     );
     // The seventh is what this machine calls itself in a notification's payload, and a machine with no name
     // of its own is `local` — the reserved word for *the machine whose page this is*.
+    // The eighth is the process's own draining bit, and a machine nobody has asked to drain answers `false`.
     assert!(
-        response.body.ends_with(r#","machine_name":"local"}"#),
-        "the seventh key is this machine's own name: {}",
+        response
+            .body
+            .ends_with(r#","machine_name":"local","draining":false}"#),
+        "the payload ends with this machine's own name and whether it is draining: {}",
         response.body
     );
 
@@ -81,7 +85,7 @@ async fn the_health_endpoint_answers_the_seven_keys() {
     assert_eq!(
         response.body,
         format!(
-            r#"{{"name":"holosmith","version":"{}","role":"both","uptime_s":{},"preview_origin":"http://localhost:8081","application_server_key":"{AS_PUBLIC}","machine_name":"local"}}"#,
+            r#"{{"name":"holosmith","version":"{}","role":"both","uptime_s":{},"preview_origin":"http://localhost:8081","application_server_key":"{AS_PUBLIC}","machine_name":"local","draining":false}}"#,
             version(),
             // The uptime is the one field that moves; the assertion is the whole shape around it.
             response
@@ -92,6 +96,19 @@ async fn the_health_endpoint_answers_the_seven_keys() {
                 .expect("the uptime is in the payload")
         ),
         "the sixth key is the pair's public half and the private half is nowhere: {}",
+        response.body
+    );
+
+    // And once this process begins to drain, the same request says so — on the wire, from the handler's own
+    // reading of the state's control, which is the fact a caller needs to tell a drain's refusal from any other.
+    assert!(drain.begin(), "the first begin starts the drain");
+    let response = fetch(served.addr, "/api/health").await;
+    assert_eq!(response.status, 200);
+    assert!(
+        response
+            .body
+            .ends_with(r#","machine_name":"local","draining":true}"#),
+        "a draining machine says so: {}",
         response.body
     );
     served.finish().await.expect("a clean shutdown");

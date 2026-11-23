@@ -135,6 +135,8 @@ type Health = {
   machine_name: string;
   // The origin a session's preview is served on: the listener's own origin, never the control one.
   preview_origin: string;
+  // Whether this machine is refusing new work while it waits for its turns and a restart. Nothing draws it yet.
+  draining: boolean;
 };
 
 type ErrorEnvelope = {

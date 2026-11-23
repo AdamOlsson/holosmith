@@ -103,6 +103,7 @@ impl Steps for Recorder {
             role: holosmith::config::Role::Server,
             uptime_s: self.health.1,
             preview_origin: None,
+            draining: false,
         })
     }
 }

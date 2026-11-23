@@ -562,7 +562,7 @@ pub fn router(state: AppState) -> Routes {
     let routes = Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
-            async move { health::respond(&Health::of(&state.config, &state.runtime)) }
+            async move { health::respond(&Health::of(&state.config, &state.runtime, &state.drain)) }
         })
         // Read-only, so the guards apply as they do to every other `GET`, the manifest records
         // `ReadOnly`, and nothing new is needed for the list (ADR-0017).
