@@ -68,6 +68,7 @@ pub mod trust;
 pub mod tunnel;
 pub mod turn;
 pub mod uninstall;
+pub mod update;
 pub mod vapid;
 pub mod version;
 pub mod web;
