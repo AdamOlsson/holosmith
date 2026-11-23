@@ -53,6 +53,11 @@ what makes a promotion that skipped the gate impossible rather than discouraged:
 to the drain. A check that some review artefact exists was refused — nothing in this build can tell a review from a
 file that names one, so it would be an assertion that measured a filename.
 
+**Superseded in part by ADR-0110:** for a promotion a browser starts, a passing verification replaces the
+acknowledgement — the whole `scripts/verify.sh` run, in a container, because a measurement is the thing this paragraph
+says a filename cannot be. What is superseded is the claim that the *pipeline* cannot run without a human's word; whether
+this command keeps `--acknowledge-review` as the hand path's is a later change's. D1 and D3–D13 stand.
+
 ## D3 — the candidate is verified from its bytes and from its own `version --json`
 
 Five checks, in this order, before anything is asked of the machine:

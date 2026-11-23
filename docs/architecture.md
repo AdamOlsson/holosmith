@@ -54,7 +54,10 @@ is enabled, the egress proxy (CONNECT/443, allow-list) and the MCP proxy (a tool
 **Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes.
 `holosmith build` compiles in a pinned builder container; `smoke` proves a candidate against the real daemon with a
 recorded turn; `upgrade` runs the review gate, smoke, image builds, drain, backup, release switch and health poll;
-`rollback` walks the release tree one step back. Migrations are expand/contract, so switching back is safe.
+`rollback` walks the release tree one step back. Migrations are expand/contract, so switching back is safe. Nothing
+on the wire promotes a release today, and the decision for when one does — a transient unit running the whole
+container gate in place of the review flag, with the tailnet as the authority that presses — is
+[ADR-0110](adr/0110-a-promotion-is-a-pass-of-the-gate-in-a-transient-unit.md).
 
 **A project is a repository directly inside `projects_root`** with a real `.git` directory; submodules and
 `extensions.worktreeConfig` are refused with `422 git_not_directory`, because those are the shapes that cannot be

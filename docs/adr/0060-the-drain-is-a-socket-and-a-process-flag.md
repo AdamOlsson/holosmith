@@ -52,6 +52,12 @@ The socket is **0600** and the directory **0700**. There is no authentication of
 the service user can open the file, so being able to open it *is* the authorisation, and the API table's "not
 reachable over HTTP" is then a fact about the filesystem rather than a claim about a route.
 
+**Superseded in part by ADR-0110:** the 0600 socket, the 0700 directory and "being able to open the file is the
+authorisation" are still the drain's own facts, and the drain stays on its socket. What is superseded is the paragraph's
+last clause read as the machine's answer to who may restart it: a promotion is a decided route, so the restart
+authority sits on a route as well as on this socket, and the drain stops being the machine's only machine-touching act.
+D1, D3–D9 stand.
+
 ## D3 — The wire is one request line, progress lines, and one `result:` line
 
 ```text
