@@ -1529,9 +1529,10 @@ PY
   rm -rf "$root"
 }
 
-# The health payload: exactly seven keys (the sixth is the application server key, the seventh is that story's
-# machine name), and the uptime is not predictable, so the assertion is the prefix and the closing brace (the shape
-# tests/http_contract.rs uses — where the whole string is compared, because the counts are what move).
+# The health payload: exactly eight keys (the sixth is the application server key, the seventh is the
+# machine's name, and the eighth is whether this machine is draining), and the uptime is not predictable, so
+# the assertion is the prefix and the tail (the shape tests/http_contract.rs uses — where the whole string is
+# compared, because the counts are what move).
 case_health() {
   local name=case_health response content_type body expected
   fetch "$name" GET /api/health "Host: 127.0.0.1" ||
@@ -1549,6 +1550,16 @@ case_health() {
       ;;
     *)
       fail "$name/body" "health answered $body"
+      ;;
+  esac
+  # The eighth key is last and a booted machine nobody has drained says so, which is also what makes the
+  # payload's closing brace the key's own: a shape that drifted would not end here.
+  case "$body" in
+    *',"draining":false}')
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "$name/draining" "the eighth key is not the payload's last, or this boot is draining: $body"
       ;;
   esac
 }
@@ -7818,7 +7829,8 @@ PY
 # 2. `POST /api/drain` is the fallback's 404 — the API table's "not reachable over HTTP" — and a raw drain line
 #    written to the **control port** is answered as a malformed HTTP request, not as a drain;
 # 3. a `--wait` shorter than the turn exits 1 and says the drain was left on;
-# 4. in that window the create and the prompt answer `503 draining` while both reads answer 200;
+# 4. in that window the create and the prompt answer `503 draining` while both reads answer 200 and
+#    `/api/health` says `true`;
 # 5. a `--wait` longer than the turn waits for it and then stops the idle sessions with `server_restart`, as a
 #    transition in the log, a row fact and one log line;
 # 6. a second drain says `already draining` and finds nothing left to stop;
@@ -7959,6 +7971,22 @@ print(answer.split(b"\r\n")[0].decode(errors="replace"))
     *)
       fail "${name}_read_one/running" \
         "the read did not answer the live row while draining: $(cat "$WORK/responses/${name}_read_one.body")"
+      ;;
+  esac
+
+  #    And the payload says so on the artifact too, with no refused request needed to learn it: the shipped half
+  #    of a fact measured in-process only (health.rs's unit test, tests/http_contract.rs's wire test), so a boot
+  #    that handed the handler a `Control` of its own rather than the drainer's clone fails here and nowhere else.
+  fetch "${name}_health" GET /api/health "Host: 127.0.0.1" ||
+    fail "${name}_health/no_answer" "GET /api/health did not answer while draining"
+  expect_status "${name}_health" "$(answer "${name}_health")" 200
+  case "$(cat "$WORK/responses/${name}_health.body")" in
+    *',"draining":true}')
+      assertions=$((assertions + 1))
+      ;;
+    *)
+      fail "${name}_health/draining" \
+        "the draining machine's payload does not say so: $(cat "$WORK/responses/${name}_health.body")"
       ;;
   esac
 

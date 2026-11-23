@@ -9,6 +9,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Role};
+use crate::drain::Control;
 use crate::runtime::Runtime;
 
 /// The name the health payload reports.
@@ -21,7 +22,7 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(3);
 /// The largest answer a probe reads before it gives up on the request being a health answer.
 const MAX_ANSWER: usize = 8 * 1024;
 
-/// Exactly seven keys, in this order. `target` and the rest of the build metadata stay on the
+/// Exactly eight keys, in this order. `target` and the rest of the build metadata stay on the
 /// startup line and in `version --json`: the host registration of item 4 reads name and
 /// version, and a key nobody reads is a promise about a shape.
 ///
@@ -40,6 +41,24 @@ const MAX_ANSWER: usize = 8 * 1024;
 /// so a page can label its own row with the name the phone will show and a hub can read a peer's claim through the
 /// hop. It is the config key verbatim (`local` by default), not a derived name, because the tap's path and the
 /// registry's row name are the same string one hop apart and only the operator can keep them equal.
+///
+/// `draining` is the eighth and last: whether this process is refusing new work because it is waiting for its
+/// running turns before a restart ([`crate::drain`]). A refusal already says so itself —
+/// [`crate::http::error::ApiError::draining`] carries the `draining` code and a sentence naming the wait — so this
+/// key is not how a caller learns *why* its create was turned away; it is the state read with no request to be
+/// refused, which is the shape an operator meets after a promotion failed *after* its drain: the machine is left
+/// draining, reads still answer, and the sentence that failure printed named the restart which clears it
+/// (ADR-0082). It is read from the process's own [`Control`] at the moment of asking and never stored: the bit is
+/// what the restart clears, so a stored copy would be a second truth about a state that has one.
+///
+/// **Its readers today are an operator's `curl` and the callers that take a peer's body as an [`Answer`] through
+/// [`parse_answer`]** — the parse is where a flag a later reader wants lands, and nothing reads it from there yet.
+/// No screen reads it yet either: the page already fetches this payload before either screen draws, so a screen
+/// that reports a drain costs no second request, but the header draws only the name, the version, the role and the
+/// uptime, and the app's `Health` carries this key for that screen rather than drawing it today.
+///
+/// The eighth key is also the body's half of the expand/contract rule: [`Answer`] defaults it, so a hub probing a
+/// peer of the previous release reads a payload with seven keys and answers `false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Health {
     pub name: &'static str,
@@ -49,11 +68,17 @@ pub struct Health {
     pub preview_origin: String,
     pub application_server_key: Option<String>,
     pub machine_name: String,
+    pub draining: bool,
 }
 
 impl Health {
-    /// What `GET /api/health` reports for this config and this run.
-    pub fn of(config: &Config, runtime: &Runtime) -> Self {
+    /// What `GET /api/health` reports for this config and this run, with `drain` being this process's own
+    /// draining bit.
+    ///
+    /// The control is a parameter rather than a field of `Config` or `Runtime` because it belongs to neither: it is
+    /// [`crate::http::AppState`]'s, one clone of it per request, and passing it here is what keeps the eighth key the
+    /// truth at the instant the request is answered.
+    pub fn of(config: &Config, runtime: &Runtime, drain: &Control) -> Self {
         Self {
             name: NAME,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -62,6 +87,7 @@ impl Health {
             preview_origin: config.preview_origin.as_str().to_string(),
             application_server_key: crate::vapid::public_key(&config.data_root),
             machine_name: config.machine_name.clone(),
+            draining: drain.is_draining(),
         }
     }
 }
@@ -85,6 +111,11 @@ pub fn respond(health: &Health) -> Json<Health> {
 /// **Optional, so a payload without it still parses.** The key answers for this build's own second listener; a peer
 /// that names none is a host whose previews cannot be forwarded (one sentence at the attempt), never a host that is
 /// not a Holosmith.
+///
+/// `draining` is the payload's half of the expand/contract rule, applied to a body: `#[serde(default)]`, so a hub
+/// reading a peer of the previous release — whose answer carries seven keys and no such key — still parses it, and
+/// reads `false`. That is the one reading an absent key can carry: the alternative is a hub that cannot probe a peer
+/// one release behind it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Answer {
     pub name: String,
@@ -93,6 +124,8 @@ pub struct Answer {
     pub uptime_s: u64,
     #[serde(default)]
     pub preview_origin: Option<String>,
+    #[serde(default)]
+    pub draining: bool,
 }
 
 /// One payload's body as an [`Answer`], or the reason it is not one.
@@ -180,7 +213,7 @@ mod tests {
     use crate::config::Overrides;
     use crate::runtime::Backend;
 
-    fn health(role: Role) -> Health {
+    fn health(role: Role, drain: &Control) -> Health {
         let dir =
             std::env::temp_dir().join(format!("holosmith-health-{role:?}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -192,18 +225,49 @@ mod tests {
             ..Config::default()
         };
         config.apply_overrides(&Overrides::default());
-        Health::of(&config, &Runtime::started(Backend::Stub))
+        Health::of(&config, &Runtime::started(Backend::Stub), drain)
     }
 
     #[test]
-    fn the_payload_is_exactly_seven_keys_in_order() {
+    fn the_payload_is_exactly_eight_keys_in_order() {
         assert_eq!(
-            serde_json::to_string(&health(Role::Hub)).expect("seven fields always serialise"),
+            serde_json::to_string(&health(Role::Hub, &Control::new()))
+                .expect("eight fields always serialise"),
             format!(
-                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local"}}"#,
+                r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local","draining":false}}"#,
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn the_eighth_key_is_the_processes_own_draining_bit() {
+        let drain = Control::new();
+        assert!(
+            serde_json::to_string(&health(Role::Server, &drain))
+                .expect("serialisable")
+                .ends_with(r#","draining":false}"#),
+            "a machine that is not draining says so"
+        );
+        assert!(drain.begin(), "the first begin starts the drain");
+        assert!(
+            serde_json::to_string(&health(Role::Server, &drain))
+                .expect("serialisable")
+                .ends_with(r#","draining":true}"#),
+            "the eighth key is read from the control at the moment of asking"
+        );
+    }
+
+    #[test]
+    fn a_previous_releases_payload_parses_as_not_draining() {
+        // The body a peer one release behind answers: seven keys, no `draining` at all. A hub must still probe it,
+        // and "not draining" is the only reading of a machine that cannot say (expand/contract, applied to a body).
+        let previous = format!(
+            r#"{{"name":"holosmith","version":"{}","role":"server","uptime_s":12,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local"}}"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        let answer = parse_answer(&previous).expect("a seven-key payload still parses");
+        assert!(!answer.draining, "a payload with no such key is {previous}");
     }
 
     #[test]
@@ -217,7 +281,7 @@ mod tests {
         };
         config.apply_overrides(&Overrides::default());
         // No pair: `null`, which is a JSON null rather than an absent key (a client reads one shape).
-        let without = Health::of(&config, &Runtime::started(Backend::Stub));
+        let without = Health::of(&config, &Runtime::started(Backend::Stub), &Control::new());
         assert_eq!(without.application_server_key, None);
         assert!(
             serde_json::to_string(&without)
@@ -234,7 +298,7 @@ mod tests {
             private_key: "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw".to_string(),
         };
         std::fs::write(&path, crate::vapid::render(&pair)).expect("the pair is writable");
-        let with = Health::of(&config, &Runtime::started(Backend::Stub));
+        let with = Health::of(&config, &Runtime::started(Backend::Stub), &Control::new());
         assert_eq!(
             with.application_server_key.as_deref(),
             Some(pair.public_key.as_str()),
@@ -250,7 +314,7 @@ mod tests {
             (Role::Server, "server"),
             (Role::Both, "both"),
         ] {
-            let json = serde_json::to_string(&health(role)).expect("serialisable");
+            let json = serde_json::to_string(&health(role, &Control::new())).expect("serialisable");
             assert!(
                 json.contains(&format!(r#""role":"{word}""#)),
                 "{role:?} did not render as {word}: {json}"
