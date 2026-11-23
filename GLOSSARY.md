@@ -1150,6 +1150,17 @@ the binary it is running as a release when none is live and leaving a live tree 
 leaves a fresh machine naming the file it was downloaded to nor undoes a promotion.
 _Avoid_: Pointer, live link, symlink target
 
+**Candidate**:
+One commit a promotion would make live, and the word names two things on user-facing surfaces, one sentence each.
+`holosmith upgrade <binary>` means the **artifact** it was handed and prints it as `candidate: <path>` — that is
+bytes on disk. A promotion's lookup into `[update] source` means the **commit**: that checkout's `master` with
+`master` checked out — a tree left on another branch or on a detached `HEAD` is refused, not promoted — on a clean
+tree, named by `git describe --tags --always` so the release directory is called after the tree it was built from.
+That second sense is `candidate::Candidate`, and why this machine has none is `candidate::Refusal`. A **Release** is
+neither: it exists once the candidate has been built into one.
+_Avoid_: Source (that is the key, `[update] source`), target (that is a **merge**'s), pending release (nothing is a
+release until it is built)
+
 **Promotion**:
 Moving a candidate **release** to live, as `holosmith upgrade <binary>` performs it: the review gate acknowledged
 (`--acknowledge-review`), a **smoke run**, the two **image builds** when their labels say so, a **drain**, a database

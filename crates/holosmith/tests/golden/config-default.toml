@@ -44,3 +44,6 @@ allow = []
 
 [linear]
 mcp = "off"
+
+[update]
+# source unset

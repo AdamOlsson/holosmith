@@ -154,6 +154,7 @@ seed. A row's `url` must be `http(s)` with a MagicDNS name or an address in `100
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `keep_releases` | integer | `5` | How many release directories a promotion leaves behind. At least **2**, because a prune always keeps the live release and the one behind it — the rollback target — and those two count towards the number. `0` is not "keep everything" (ADR-0084). |
+| `[update] source` | path | unset | The checkout a promotion reads before it runs, to name what it would make live. The candidate is that checkout's `master`, which has to be the branch checked out — a tree left on another branch or on a detached `HEAD` is refused rather than promoted — and the tree must be clean, untracked files included, because a build from a tree holding files the commit does not have is one nobody can reproduce. Absolute, and it must name an existing directory; a relative path would mean whatever directory `serve` was started in. **Unset means this machine has no candidate at all** — there is nothing to promote, rather than a promotion that is switched off (ADR-0110 D3). |
 
 ## Rules that span two keys
 
