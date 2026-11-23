@@ -108,8 +108,9 @@ never seen. That is the boundary, and it is the right one — a new dependency i
 host's `cargo fetch --locked`, and a rebuild of this image. A session that needs one is a session whose change has to
 reach a machine that can.
 
-The rest of ADR-0105's D6 stands unchanged: no Docker daemon, so the container-shaped integration binaries and
-`scripts/verify.sh` stay a host's work.
+The rest of ADR-0105's D6 stands unchanged: no Docker daemon in a session's container, so the container-shaped
+integration binaries and `scripts/verify.sh` measure nothing there — **amended by ADR-0109**: a gate that is handed
+the host's daemon (`scripts/verify-in-container.sh`) is the other supported shape, and this image is what it runs.
 
 ## D5 — the currency rule is unchanged, and so is the bound
 

@@ -326,8 +326,8 @@ fn two_processes_starting_at_once_end_at_one_schema() {
         start_serve(&dir, "second", &data_root),
     ];
     for (mut child, said) in started {
-        // A shell's `kill`, not `/bin/kill`: see `support::signal` — the agent image has no procps, and a session's
-        // command line reaches dash's builtin all the same.
+        // A shell's `kill`, not `/bin/kill`: see `support::signal` — a session's command line reaches dash's builtin,
+        // and that needs no `kill` file on `PATH` from the image this binary runs in.
         support::signal(&mut child, "TERM");
         // Both printed the database they opened and the schema they recorded.
         let line = said

@@ -199,11 +199,11 @@ pub fn version() -> String {
 
 /// `kill -<signal> <pid>` to a child, through a **shell**, and the exit code that followed.
 ///
-/// `kill` is a shell builtin in a session's container, and `/bin/kill` is `procps`, which the agent image's
-/// `node:24-bookworm-slim` base does not carry — a session sends `kill -TERM …` as a command line and dash answers
-/// it itself. `std::process::Command::new("kill")` needs a *file* on `PATH`, so that spelling was a test-shaped
-/// assumption about the host rather than a fact about the product; a test binary runs inside that same image
-/// (`scripts/verify.sh`'s toolchain case), where it would find nothing to exec.
+/// The shell is the point: a session sends `kill -TERM …` as a command line and dash answers it itself, so the signal
+/// travels the way a container's own does, and the test needs no `kill` file on `PATH` from whichever image it runs in.
+/// `std::process::Command::new("kill")` needs exactly that file — the agent image carries `procps` for the artifact's
+/// own `kill` children (`smoke`'s liveness check and stop, ADR-0109), and an image that did not would answer the spawn
+/// with an error rather than a signal.
 ///
 /// A signal that cannot be sent panics with a sentence, and the call **waits** for the child: an ignored status
 /// followed by a `wait()` with no deadline is a test that hangs instead of failing, which is how this was found.

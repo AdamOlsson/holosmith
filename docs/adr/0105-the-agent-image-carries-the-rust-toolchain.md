@@ -90,11 +90,14 @@ by — `Ok(None)` from the build is a sentence, not a hang.
 ## D6 — what a session still cannot do
 
 It carries no Docker daemon, and that is deliberate: a session with one is a container that can reach the host as
-root, which is the isolation this product is. So full verification stays the host's — inside the image, **26 of 68
-integration binaries and 23 of `scripts/verify.sh`'s cases measure nothing**, and each prints a `SKIP` naming the
-daemon. `cargo fmt`, `cargo clippy`, `cargo test` and `npm test` are the subset a session can own, and
-`scripts/gate-quick.sh`'s `cargo is not on PATH` sentence says both fixes because two machines reach it: a host needs
-the line that puts the toolchain on `PATH`, and a session that gets there is running a broken image.
+root, which is the isolation this product is. So full verification is not a *session's* work — inside the image, **26
+of 68 integration binaries and 23 of `scripts/verify.sh`'s cases measure nothing**, and each prints a `SKIP` naming
+the daemon. **Amended by ADR-0109:** a gate whose daemon is handed to it is another matter, and
+`scripts/verify-in-container.sh` runs the whole of `scripts/verify.sh` in this image on the host's daemon, so full
+verification has two shapes rather than only the host's. `cargo fmt`, `cargo clippy`, `cargo test` and `npm test` are
+the subset a session can own, and `scripts/gate-quick.sh`'s `cargo is not on PATH` sentence says both fixes because
+two machines reach it: a host needs the line that puts the toolchain on `PATH`, and a session that gets there is
+running a broken image.
 
 The version is the same version, in both places: 1.99 from `~/.pi/toolchains/env.sh` on a development machine and
 1.99 from the recipe's `FROM` line in the image. A `rust-toolchain.toml` would be a third source and is why the tree
@@ -118,8 +121,11 @@ has none.
   in-container run failed `serve_cli` and **hung** `db_migrations`, because `Command::new("kill")` needs a file on
   `PATH` while a session sends `kill -TERM …` as a command line and dash answers it as a builtin. They now go through
   `support::signal`, which runs it through a shell and **waits with the kill's own status asserted**, so the same
-  breakage is a failure with a sentence rather than a hang. The image gains no `procps`: the fixed set is a
-  documented contract, and a session that needs process tools is its own decision.
+  breakage is a failure with a sentence rather than a hang. The image gains no `procps`, on the ground that a session
+  that needs process tools is its own decision. **Amended by ADR-0109:** the fixed set does gain `procps`, because this
+  artifact is itself a subject that shells out to `kill` — `smoke`'s liveness check and its stop — and a shell builtin is
+  not a program `Command::new` can find. `support::signal` still goes through a shell, because that is about the command
+  line a session sends rather than about a file on `PATH`.
 - The agent image grows to ~3.4 GB on every machine (3.53 GB with the crate set and the npm cache in it, ADR-0106).
   **Amended by ADR-0106:** `scripts/build.sh` **is** a gate case — `case_agent_offline_build` runs it, and the
   `scripts/build-web.sh` before it, in `--network none` as the invoking uid with a session's
