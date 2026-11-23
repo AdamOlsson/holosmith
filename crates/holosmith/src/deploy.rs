@@ -728,9 +728,9 @@ impl<T: proxies::Containers + doctor::Machine + images::Images> Machine for T {}
 /// script it wrote.
 ///
 /// **The subtree this module writes is the operator's own** (ADR-0088): no step here escalates, and what root would
-/// do is printed. [`Tools::systemctl`] is the one field a **different** module reaches for — the two release verbs'
-/// single restart, through the operator's own user manager — and [`Tools::health_wait`] is the one field that is not a
-/// program at all.
+/// do is printed. [`Tools::systemctl`] and [`Tools::systemd_run`] are the two fields **other** modules reach for — the
+/// release verbs' single restart, and a promotion's transient unit, both through the operator's own user manager —
+/// and [`Tools::health_wait`] is the one field that is not a program at all.
 #[derive(Debug, Clone)]
 pub struct Tools {
     pub doctor: doctor::Tools,
@@ -742,9 +742,17 @@ pub struct Tools {
     pub id: PathBuf,
     /// `systemctl`: **not called by this module.** The two release verbs run `systemctl --user restart <unit>` through
     /// it — the unit is the operator's own, so the restart needs no privilege and `--user` is the whole of what picks
-    /// the manager (ADR-0088 D2) — and the field lives here so that a test points it at its recorder beside the
-    /// others.
+    /// the manager (ADR-0088 D2) — and the same manager is asked `systemctl --user is-active --quiet <unit>` about a
+    /// promotion already in flight ([`crate::update::start`]), the question that turns a refused start into
+    /// [`crate::update::Answer::AlreadyRunning`] or into a failure. The field lives here so that a test points it at
+    /// its recorder beside the others.
     pub systemctl: PathBuf,
+    /// `systemd-run`: **not called by this module either.** [`crate::update::start`] runs
+    /// `systemd-run --user --unit=holosmith-update …` through it, so that a promotion started from a request is a unit
+    /// of the operator's user manager rather than a child of the service it restarts (ADR-0110 D4). It sits beside
+    /// [`Tools::systemctl`] because the two are one manager's two verbs: one to begin a job outside the service's
+    /// cgroup, one to restart the service that job replaces.
+    pub systemd_run: PathBuf,
     /// How long the last step's apply waits for `/api/health`; [`HEALTH_WAIT`] on a machine.
     pub health_wait: Duration,
 }
@@ -759,6 +767,7 @@ impl Default for Tools {
             openssl: PathBuf::from("openssl"),
             id: PathBuf::from("id"),
             systemctl: PathBuf::from("systemctl"),
+            systemd_run: PathBuf::from("systemd-run"),
             health_wait: HEALTH_WAIT,
         }
     }
