@@ -135,8 +135,8 @@ impl Server {
 
     /// `kill -<signal>` and the exit code that followed.
     ///
-    /// The signal goes through a shell's builtin (`support::signal`): `/bin/kill` is procps, which the agent image's
-    /// `node:24-bookworm-slim` base does not carry, and a session sends the same command line.
+    /// The signal goes through a shell (`support::signal`): a session sends the same command line and dash answers it
+    /// as a builtin, so the test needs no `/bin/kill` from the image it runs in.
     fn signal(&mut self, signal: &str) -> i32 {
         support::signal(&mut self.child, signal)
     }

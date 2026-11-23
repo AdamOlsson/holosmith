@@ -1048,7 +1048,8 @@ key removes it and none moves its version. The analogue of the **pinned pi versi
 `agent.Dockerfile` and `builder.Dockerfile`, which a test asserts are one identical string; there is no `pins/rust.txt`
 because a Dockerfile cannot `include` anything. A session can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
 and `npm test` (ADR-0105) out of the **Vendored crate set** it carries too; what it does not have is a Docker daemon,
-so `scripts/verify.sh` and the container-shaped integration binaries stay a host's work.
+so `scripts/verify-in-container.sh` is what runs `scripts/verify.sh` in that image on the host's daemon (ADR-0109),
+where the container-shaped integration binaries measure instead of printing a `SKIP`.
 _Avoid_: Agent toolchain, build toolchain, dev container, rust image (there is no variant image)
 
 **Vendored crate set**:

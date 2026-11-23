@@ -5,9 +5,22 @@
 #
 # It also carries the Rust toolchain — rustc, cargo, rustfmt, clippy, both musl targets and both musl.cc cross
 # linkers — as part of the **fixed** set, not as an `agent_toolchains` entry: the tree a session works on is written
-# in Rust, so `cargo fmt`, `cargo clippy` and `cargo test` are the same three commands in there as on a host. What
-# it still does not carry is a Docker daemon, so the container-shaped integration binaries and `scripts/verify.sh`
-# stay a host's work; a session measures the tree, not the machine.
+# in Rust, so `cargo fmt`, `cargo clippy` and `cargo test` are the same three commands in there as on a host.
+#
+# **The Docker daemon stays outside, and the gate is not therefore a host's work alone.** A session's container carries
+# no daemon, because a container with the socket can reach the host as root, and that is the isolation this product is:
+# a session measures the tree, not the machine. What runs the whole gate in this image is
+# `scripts/verify-in-container.sh`, on the operator's own daemon, with the socket, the `docker` CLI and the tree mounted
+# for that run only (ADR-0109) — so this recipe is the one thing the host and the gate's container share, and the
+# container-shaped integration binaries measure there instead of printing a `SKIP`.
+#
+# **That makes this image a machine this binary runs on, so it carries every program the binary spawns.** A gate in
+# here runs `smoke`, whose liveness check and whose stop are `kill -0` and `kill -TERM` children (`src/smoke.rs`), and a
+# Debian slim base has no `procps`: `kill` there is a shell builtin, and a builtin is not a program `Command::new` can
+# find, so the child fails to spawn and a live candidate reads as `the candidate exited before printing its banner`.
+# `procps` is in the apt line below for that reason. What is *not* added is every other name a command line might carry:
+# the set is audited against each `Command::new` in `src/` rather than guessed, and what the gate supplies itself —
+# `tailscale`, `systemctl`, `journalctl` and `loginctl` stand-ins, the mounted `docker` CLI — stays out of this recipe.
 #
 # **The crate set and the npm packages ship in the image too, as files.** A session's container has no network — the
 # only thing it can reach is the egress proxy — so `cargo build` and `npm ci` have to be answered from the image and
@@ -89,8 +102,9 @@ ARG HOLOSMITH_TOOLCHAINS
 # it from source — `curl` is what fetches the two musl.cc tarballs below, at image-build time, and `file` is what
 # `scripts/check-static.sh` reads an artifact's link state with (`file -b`), so `scripts/build.sh` — whose last step
 # that script is — cannot finish in a session without it. The `readelf` it also runs arrives with `build-essential`.
+# `procps` is `/bin/kill`, the child the header says `smoke` needs and cannot get from a shell builtin.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates curl file git openssl \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates curl file git openssl procps \
       ${HOLOSMITH_TOOLCHAINS} \
  && rm -rf /var/lib/apt/lists/*
 

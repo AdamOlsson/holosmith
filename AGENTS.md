@@ -91,6 +91,16 @@ the artifact ships), `scripts/check-embed.sh`, and a boot of `dist/<host-triple>
 artifact the `build` phase just produced, never `target/debug`. Do not invent a second build path: the
 phases are the build.
 
+`scripts/verify-in-container.sh [<verify.sh argument>...]` runs that same gate **in a container** on this
+machine's daemon (ADR-0109): `agent-image:<the Cargo.toml version>` by default, the tree and its git dirs at their
+own absolute paths, the invoking uid, `--network host`, and the host's `docker` CLI and socket mounted in for the
+run. It parses no argument of its own — every argument and every exit status is `scripts/verify.sh`'s, so `--help`
+there is the gate's usage — and it needs no host toolchain, because the image's is the gate's. Its refusals (root,
+no `docker` CLI, a `DOCKER_CONTEXT` with no `DOCKER_HOST`, no daemon, no image, no workspace version, a tree the
+daemon cannot see) are exit 2 with one sentence naming the fix. A failed run's work dir is under
+`target/tmp-verify-in-container`, and the gate's own `kept work dir:` line prints the container path
+`/verify-work/tmp.XXXX`, which is that directory's `tmp.XXXX`.
+
 The `.` line is part of the command, not a convenience: `~/.pi/toolchains/env.sh` puts rustc 1.99, both
 musl targets, the cross gccs and node/npm on `PATH`. `verify.sh` needs the musl cross toolchains there
 **before** it runs, and the default `~/.cargo`/`~/.rustup` toolchain does not have them — its `build`
@@ -190,7 +200,10 @@ no visible reason is usually one of them missing:
   beyond its declared dependencies. The same toolchain in the same version is also inside the **agent image**, with
   this tree's crate set vendored beside it and the web app's packages in its npm cache, so a session can run
   `cargo build --locked`, `cargo fmt`, `cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag and no
-  network; full verification is still the host's, because a session carries no Docker daemon (ADR-0105, ADR-0106).
+  network. Full verification has two shapes: on the machine (`scripts/verify.sh`) or in the agent image on that
+  machine's daemon (`scripts/verify-in-container.sh`, ADR-0109). A *session's* container still carries no Docker
+  daemon (ADR-0105, ADR-0106) — the daemon stays outside, and the wrapper is what hands one to a gate for the
+  length of a run.
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** for the shipped targets. SQLite is compiled from
   source (`rusqlite`'s `bundled`), so the C toolchain crosses too.
 - **node and npm** for `scripts/build-web.sh`: Vite 7 needs node 20.19+, and `npm test` — node's own runner over
