@@ -14,6 +14,7 @@ use holosmith::backend::{Backends, StubBackend};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::db::{self, Database, OpenOptions};
+use holosmith::deploy;
 use holosmith::drain::Control;
 use holosmith::events::{self, EventWriter, StreamRegistry, WriterOptions};
 use holosmith::http::{App, AppState, Guards, RequestCounter, Routes};
@@ -87,7 +88,7 @@ pub fn open(dir: &TempDir) -> Database {
 /// never write.
 pub fn state() -> AppState {
     static SHARED: OnceLock<(TempDir, Arc<Mutex<Database>>, EventWriter)> = OnceLock::new();
-    let (_, database, events) = SHARED.get_or_init(|| {
+    let (dir, database, events) = SHARED.get_or_init(|| {
         let dir = TempDir::new("shared");
         let database = Arc::new(Mutex::new(open(&dir)));
         let events = writer_handle(Arc::clone(&database));
@@ -103,6 +104,16 @@ pub fn state() -> AppState {
         drain: Control::new(),
         merges: Merges::new(),
         tools: preflight::Tools::default(),
+        // The install tree and the promotion's programs: a test's own root, so the two `/api/update` routes answer
+        // about a directory this process can write rather than about the account's real one. The config path is inside
+        // the fixture for the same reason: a job is told `--config` explicitly, so leaving it to the default would name
+        // the developer's own `~/.config/holosmith.toml` in the argv a test reads. Nothing in this state's tests starts
+        // a job, which is why the programs are the names a machine resolves and not recorders.
+        root: deploy::Root::resolve(
+            Some(dir.path().to_path_buf()),
+            Some(dir.path().join("holosmith.toml")),
+        ),
+        deploy: deploy::Tools::default(),
         forwarding: holosmith::forward::Forwarding::default(),
     }
 }
@@ -153,6 +164,8 @@ pub fn state_with_writer(dir: &TempDir, config: Config, options: WriterOptions) 
         drain: Control::new(),
         merges: Merges::new(),
         tools: preflight::Tools::default(),
+        root: deploy::Root::resolve(Some(dir.path().to_path_buf()), None),
+        deploy: deploy::Tools::default(),
         forwarding: holosmith::forward::Forwarding::default(),
     }
 }

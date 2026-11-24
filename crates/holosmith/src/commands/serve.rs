@@ -356,6 +356,22 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // the floor measures the data root on the request path, with the same `df` this boot's
             // preflight used: the machine's own program, resolved through `PATH`, which a test swaps for a shim.
             tools,
+            // The install tree and the promotion's programs (ADR-0110): the root is `HOLOSMITH_ROOT`'s or the
+            // account's, and the config file is the one this boot read — a job is told both explicitly, because a
+            // transient unit inherits neither this process's flags nor its working directory. `serve` has no
+            // `--root` flag, so the tree is the account's own; the *data* root may have been moved by the config or
+            // by `--data-dir`, which is why `AppState::updater` takes it from the config rather than from here.
+            //
+            // **Inherited, and named because a caller now reads it**: a machine deployed with `server deploy --root
+            // DIR` gets a unit with no `Environment=HOLOSMITH_ROOT` and no `--root` on its `ExecStart`, so a `serve`
+            // from that unit resolves the *account's* root here and this route's `409 not_deployed` names
+            // `<home>/.local/share/holosmith/releases` on a machine whose releases are under `DIR` — and its repair,
+            // `holosmith server deploy`, does not move them. It is the same mismatch the unit's `doctor --quick` has,
+            // so it belongs to whatever change gives a custom-root install a unit that carries its root, and not to
+            // the resolution: a `serve` that read the deploy's root from anywhere but its own environment would be a
+            // second source of truth for a fact the unit is supposed to state.
+            root: crate::deploy::Root::resolve(None, Some(loaded.path.clone())),
+            deploy: crate::deploy::Tools::default(),
             forwarding: crate::forward::Forwarding::default(),
         };
         // The **startup reconcile** (V9): what a `kill -9` left behind, put right **before any

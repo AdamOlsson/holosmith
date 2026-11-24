@@ -20,6 +20,9 @@ mod sessions;
 mod streams;
 mod tool_image;
 mod tool_output;
+// `pub`: [`AppState::updater`] names the handle the two `/api/update` routes are answered from, so the type is part of
+// what a caller of the state can see — the same reason `error` and `health` are open.
+pub mod update;
 
 pub use app::{
     App, AppState, ManifestEntry, RequestCounter, RouteKind, Routes, is_guard_exempt, router,

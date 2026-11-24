@@ -144,6 +144,40 @@ pub const UNSAVED_WORK: &str = "unsaved_work";
 /// that request", while this one says "this *machine* cannot take it right now, and the operator is the reason".
 pub const DRAINING: &str = "draining";
 
+/// A promotion is already running on this machine (ADR-0110 D4).
+///
+/// One at a time is the transient unit's own rule — systemd refuses a second unit under a live name — so this code is
+/// a measurement of that refusal and not a flag in `serve` that the restart the job performs would reset.
+///
+/// The message is the caller's: it names the unit and the log, which is the whole of what a client can do about it.
+pub const UPDATE_RUNNING: &str = "update_running";
+
+/// A promotion was asked of a machine with no release tree.
+///
+/// `409` and not `404`: the route exists and the machine could take the request on any other day — what is missing is
+/// the tree a promotion switches and the unit it restarts, which is one `holosmith server deploy` away.
+pub const NOT_DEPLOYED: &str = "not_deployed";
+
+/// A promotion request's `commit` is not `master`'s any more (ADR-0110 D3).
+///
+/// The token is **optimistic concurrency, not a vouch**: the page rendered this commit and the request carried it
+/// back, so a press that arrives after `master` moved is a press about a tree nobody looked at.
+pub const STALE_CANDIDATE: &str = "stale_candidate";
+
+/// This machine has no candidate to promote.
+///
+/// One code for the five facts `candidate::Refusal` tells apart — no `[update] source`, not a repository, `HEAD` on
+/// another branch, a `master` with no commit, a dirty tree — because the client's move is one (read the sentence) and
+/// each sentence names the single command that repairs it.
+pub const NO_CANDIDATE: &str = "no_candidate";
+
+/// This machine will not start a promotion at all: the config's `[update] enabled` is false, or its role is `hub`.
+///
+/// Two facts share it for `cap_reached`'s reason: the client's move is one (stop offering the button), while whether a
+/// config key or the role is the reason is the sentence's — one is the operator's edit, the other their choice of
+/// machine.
+pub const UPDATE_DISABLED: &str = "update_disabled";
+
 /// A changes view was refused because there is no worktree to read (spec item 12).
 ///
 /// One code for four facts — the row never recorded a worktree, the directory is gone, git no longer registers
@@ -711,6 +745,128 @@ impl ApiError {
         )
     }
 
+    /// What a promotion request answers while another one is running (ADR-0110 D4).
+    ///
+    /// The message is the caller's, like [`Self::host_busy`]'s: it carries the unit systemd holds and the file the
+    /// job's output is appending to, which are the two facts a client shows and an operator reads.
+    pub fn update_running(unit: &str, log: &std::path::Path) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            UPDATE_RUNNING,
+            format!(
+                "a promotion is already running on this machine: `{unit}` is the unit systemd is holding, and its \
+                 output is appending to {}. One runs at a time, so this request started nothing — wait for that unit \
+                 to end and read the log meanwhile",
+                log.display()
+            ),
+        )
+    }
+
+    /// What a promotion request answers on a machine with no release tree.
+    ///
+    /// The **message** is the caller's because it names the path that is missing, which is the machine's own layout
+    /// rather than a constant; the repair it ends with is the deploy that writes it.
+    pub fn not_deployed(releases: &std::path::Path) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            NOT_DEPLOYED,
+            format!(
+                "this machine has no release tree: {} is not there, so there is no `current` for a promotion to \
+                 switch and no release the unit runs. Run `holosmith server deploy` on this machine first, and then \
+                 press promote again",
+                releases.display()
+            ),
+        )
+    }
+
+    /// What a promotion request carrying a commit that is not `master`'s answers.
+    ///
+    /// The message is [`crate::candidate::Stale`]'s own sentence, which names both commits and the next step: the
+    /// comparison is one function for the page and the request, so the refusal cannot word it twice.
+    pub fn stale_candidate(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, STALE_CANDIDATE, message)
+    }
+
+    /// What a promotion request answers on a machine with no candidate.
+    ///
+    /// The message is [`crate::candidate::Refusal`]'s sentence, which names the one command that repairs each of the
+    /// five shapes: an operator reading a page has to be able to act on it, and a second wording here would be a
+    /// second answer to one question.
+    pub fn no_candidate(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, NO_CANDIDATE, message)
+    }
+
+    /// What a promotion request answers on a machine whose `[update] enabled` is `false`.
+    ///
+    /// A `403` for [`Self::publish_disabled`]'s reason: the route exists, the *machine* will not do it, and no retry on
+    /// this machine changes that — the operator's move is a config edit and a restart. `false` is the default so that
+    /// an upgrade cannot hand a phone a restart button by accident, which is what the sentence has to say.
+    pub fn update_disabled() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            UPDATE_DISABLED,
+            "this machine's `[update] enabled` config key is false, so no promotion may be started from a request \
+             here; set it to `true` in the config file, with `[update] source` naming the checkout a promotion would \
+             build, and restart the server",
+        )
+    }
+
+    /// What a promotion request answers on a `hub`.
+    ///
+    /// The same code with the role's own sentence, for the reason [`Self::cap_reached`] and [`Self::cap_without_idle`]
+    /// share one: the client's move is one (press it elsewhere) while the machine's reason is the sentence's. A `hub`
+    /// promotes nothing for itself — no release tree, no Docker for the gate's container — and the next step is a
+    /// server, reached through this machine's forward route.
+    pub fn hub_cannot_promote() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            UPDATE_DISABLED,
+            "this machine's role is `hub`, so it starts no promotion of its own: a hub has no release tree and no \
+             Docker to run the gate in. Press promote on a server, through this machine's \
+             /api/hosts/<name>/update",
+        )
+    }
+
+    /// What `GET /api/update` answers before this machine has run a promotion.
+    ///
+    /// The [`Self::unknown_session`] shape, and the code is that constructor's `not_found` rather than a
+    /// `no_promotion` of its own: one code for "the route is there and what it names is not", which is why a client
+    /// switches on `not_found` here and reads the sentence to know what was missing. The sentence is about the report
+    /// file rather than about the endpoint — a `404` reading "no such endpoint" would be a lie about the table, and a
+    /// `200` with nothing in it would leave a client with no state to render. **`no_promotion` is this module's name for
+    /// the answer, not a word on the wire**: a page that switched on it would never match.
+    pub fn no_promotion() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            NOT_FOUND,
+            "no promotion has run on this machine yet: this endpoint answers the last one, read from the report its \
+             job writes",
+        )
+    }
+
+    /// What a promotion request answers when the transient unit could not be started at all.
+    ///
+    /// `500` and not a refusal: the request was well formed, this machine may promote, and the manager or the launcher
+    /// is what failed. The message is [`crate::update::start`]'s own sentence, which names the child that refused and
+    /// what its absence means — a machine with no `systemd-run` cannot promote today — because that sentence is the
+    /// repair, and a fixed 500 would hide it.
+    pub fn update_not_started(said: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL, said)
+    }
+
+    /// What a promotion request whose body is not `{commit}` answers.
+    ///
+    /// The same code as [`Self::bad_body`] with this request's own field, for the reason [`Self::bad_prompt`] has the
+    /// prompt's: a client told about a create's four fields would be describing the wrong request (ADR-0008).
+    pub fn bad_update_body() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BAD_BODY,
+            "the body must be a JSON object with a `commit` string: the commit the page was rendered from, which \
+             this machine compares with `master`'s before it starts anything",
+        )
+    }
+
     /// What a subscribe whose body is not `{endpoint, p256dh, auth}` answers.
     ///
     /// The same code as [`Self::bad_body`] with this request's own fields, for the reason [`Self::bad_prompt`] has
@@ -931,6 +1087,15 @@ impl ApiError {
     ///
     /// The message is one fixed sentence: a rusqlite error can carry the database path, so it
     /// goes to the log rather than to a client (ADR-0012).
+    ///
+    /// That is the contract for a failure inside this **server's own store** — one where the detail is a row, a query
+    /// or a file a client has no business reading. [`Self::update_not_started`] is the one `500` that does not keep it,
+    /// and deliberately: what failed there is the machine's own program refusing (`systemd-run`, or the binary a unit
+    /// would run), and that program's sentence names the child and the repair, which is the whole of what the operator
+    /// can act on. The paths in it are the machine's layout rather than anything private — `not_deployed` names the
+    /// release tree to the same caller for the same reason — and the caller is on this machine's tailnet, which is the
+    /// authority that may already press this route. A handler whose failure carries a *store's* detail still answers
+    /// this sentence.
     pub fn internal() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1004,7 +1169,8 @@ impl From<&crate::trust::Refusal> for ApiError {
 
 /// The 500 every handler answers for a failure no client can fix: the operation and the error go
 /// to the log, because a rusqlite message can carry the database path, and the client gets the one
-/// fixed sentence.
+/// fixed sentence. A machine failure whose own sentence is the repair is the exception and does not come
+/// through here: [`ApiError::update_not_started`] and [`ApiError::internal`]'s doc say which and why.
 pub fn internal(operation: &'static str, error: impl Display) -> ApiError {
     tracing::error!(
         target: "holosmith::http",

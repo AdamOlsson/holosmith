@@ -39,8 +39,10 @@
 //!
 //! # What this module does not decide
 //!
-//! **The route and the page.** `GET /api/update` is a later change's; [`Report`] is the object it will answer, which
-//! is why the type is here and not in the command surface.
+//! **The routes and the page.** `GET /api/update` answers [`Report`]'s own JSON — the file this module writes — plus
+//! the log's last lines, which is why the type is here and not in the command surface. `POST /api/update` starts this
+//! command as a transient unit and writes nothing itself: the report is the job's, so the route cannot lie about a
+//! job it did not start. The page is a later change's.
 //!
 //! **The launcher.** [`crate::update`] starts a command line as a transient user unit and has no opinion about what
 //! runs behind it; a route passes this command's argv there. Nothing here asks systemd anything.
@@ -119,6 +121,17 @@ pub fn run(
     tools: &deploy::Tools,
 ) -> ExitCode {
     let mut report = Report::start();
+    // The seed, written **before** the first step: a caller that polls `--report` reads a file from the moment the run
+    // exists, which is what makes "is a promotion running, and since when" a question the file answers rather than
+    // one only `systemctl` could. It is overwritten by the ending below; a run that is killed leaves `running` in
+    // place until the next run writes its own seed, which is the one lie this file can hold and the reason the state
+    // is named for the run rather than for the machine.
+    if let Some(path) = &options.report
+        && let Err(said) = report.write(path)
+    {
+        eprintln!("holosmith: {VERB}: {said}");
+        return ExitCode::FAILURE;
+    }
     let outcome = pass(config, root, options, steps, tools, &mut report);
     report.state = outcome.state();
     report.detail = outcome.said().map(str::to_string);
@@ -664,12 +677,18 @@ fn abbreviated(hex: &str) -> &str {
     hex.get(..12).unwrap_or(hex)
 }
 
-/// How a pass ended: the report's `state`, and the one word a caller switches on.
+/// How a pass stands: the report's `state`, and the one word a caller switches on.
+///
+/// Five, and the first is not an ending: [`State::Running`] is the seed [`run`] writes before the first step, so a
+/// caller polling the file can tell a run under way from a run that ended. The other four are the endings, and each
+/// is a different next act for whoever reads it.
 ///
 /// Serialized through [`State::word`] rather than by a `rename` attribute, so the JSON and the sentence a failed
 /// report write carries cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
+    /// The run is under way: this object is the seed, and an ending will replace it.
+    Running,
     /// The candidate answered `/api/health` as a process younger than the restart.
     Live,
     /// A step refused, or the run ended before one could, and the machine was asked nothing.
@@ -683,6 +702,7 @@ pub enum State {
 impl State {
     pub fn word(self) -> &'static str {
         match self {
+            Self::Running => "running",
             Self::Live => "live",
             Self::Refused => "refused",
             Self::CouldNotVerify => "could-not-verify",
@@ -700,11 +720,18 @@ impl Serialize for State {
 /// One pass, as a job's caller reads it: the object `--report` writes.
 ///
 /// The fields are the ones `GET /api/update` answers, which is why the type lives in the library and not beside the
-/// command: a route that answered a second shape would be a second spelling of one run.
+/// command: a route that answered a second shape would be a second spelling of one run. The route adds one key the
+/// report cannot hold — the log's last lines, which are a file's and not this value's.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
-    /// How the pass ended.
+    /// How the pass stands: under way, or how it ended.
     pub state: State,
+    /// When the run began, in unix seconds — the instant [`run`] wrote this object's first version.
+    ///
+    /// In the file rather than only in the answer to the request that started the run, because the file outlives
+    /// both the request and the restart a promotion performs: `GET /api/update` keeps answering when the job
+    /// started after `serve` has been replaced.
+    pub since: i64,
     /// The commit the pass was about, when `[update] source` named one.
     pub candidate: Option<Candidate>,
     /// The gate, when it ran.
@@ -720,13 +747,15 @@ pub struct Report {
 }
 
 impl Report {
-    /// A report with nothing in it yet.
+    /// A report with nothing in it yet: the run is under way, and it began now.
     ///
-    /// Its state is `failed` because nothing is claimed live until the health poll says so; every path out of
-    /// [`run`] sets it from the [`Outcome`] before the object is written, which is the only time one is written.
+    /// Its state is `running` and its `since` is this instant: nothing is claimed live until the health poll says so,
+    /// and every path out of [`run`] sets the state from the [`Outcome`] before the object is written for the last
+    /// time.
     fn start() -> Self {
         Self {
-            state: State::Failed,
+            state: State::Running,
+            since: crate::clock::unix_now(),
             candidate: None,
             gate: None,
             artifact: None,
@@ -905,6 +934,7 @@ mod tests {
     fn the_report_is_one_json_object_a_route_can_answer() {
         let report = Report {
             state: State::CouldNotVerify,
+            since: 1_700_000_000,
             candidate: Some(Candidate {
                 source: PathBuf::from("/src/holosmith"),
                 commit: "0".repeat(40),
@@ -929,6 +959,7 @@ mod tests {
                 .expect("the report is one JSON object");
 
         assert_eq!(value["state"], "could-not-verify");
+        assert_eq!(value["since"], 1_700_000_000);
         assert_eq!(value["candidate"]["source"], "/src/holosmith");
         assert_eq!(value["candidate"]["tag"], "v1.2.3-4-gabc");
         assert_eq!(
@@ -945,6 +976,7 @@ mod tests {
 
         // Every state has the word the prose uses, so the report and a sentence cannot spell one twice.
         for (state, word) in [
+            (State::Running, "running"),
             (State::Live, "live"),
             (State::Refused, "refused"),
             (State::CouldNotVerify, "could-not-verify"),
@@ -956,6 +988,38 @@ mod tests {
             );
             assert_eq!(state.word(), word);
         }
+    }
+
+    /// A report with nothing in it yet is the seed: `running`, dated now, and nothing claimed about a candidate or a
+    /// gate. It is what makes "is a promotion running, and since when" a question the file answers before the first
+    /// step has run — and the refusal arm keeps the field rather than dropping it, because every ending names when the
+    /// run that ended began.
+    #[test]
+    fn a_fresh_report_is_a_running_seed_dated_now() {
+        let before = crate::clock::unix_now();
+        let seed = Report::start();
+        let after = crate::clock::unix_now();
+        assert_eq!(seed.state, State::Running);
+        assert!(
+            (before..=after).contains(&seed.since),
+            "the seed's `since` is not the instant it was made: {} outside {before}..={after}",
+            seed.since
+        );
+        assert!(seed.candidate.is_none() && seed.gate.is_none() && seed.artifact.is_none());
+        assert!(seed.steps.is_empty() && seed.detail.is_none());
+
+        let refused = Report::refused("the config could not be read");
+        assert_eq!(refused.state, State::Refused);
+        assert!(
+            (before..=after).contains(&refused.since),
+            "a refusal before the run began has no `since`: {}",
+            refused.since
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&refused).expect("a report serializes"))
+                .expect("the report is one JSON object");
+        assert_eq!(value["state"], "refused");
+        assert_eq!(value["since"], refused.since);
     }
 
     /// The one refusal that names two numbers: the space it found and the space the run needs.

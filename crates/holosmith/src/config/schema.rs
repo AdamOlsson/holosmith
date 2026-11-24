@@ -293,6 +293,12 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_linear_mcp,
     },
     KeySpec {
+        path: "update.enabled",
+        section: Some("update"),
+        kind: Kind::Boolean,
+        set: set_update_enabled,
+    },
+    KeySpec {
         path: "update.source",
         section: Some("update"),
         kind: Kind::String,
@@ -810,6 +816,13 @@ fn set_linear_mcp(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn set_update_enabled(config: &mut Config, value: &Value) -> Result<(), String> {
+    config.update.enabled = value
+        .as_bool()
+        .ok_or_else(|| "expected a boolean".to_string())?;
+    Ok(())
+}
+
 fn set_update_source(config: &mut Config, value: &Value) -> Result<(), String> {
     config.update.source = Some(path(value)?);
     Ok(())
@@ -929,7 +942,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 39);
+        assert_eq!(KNOWN_KEYS.len(), 40);
     }
 
     #[test]

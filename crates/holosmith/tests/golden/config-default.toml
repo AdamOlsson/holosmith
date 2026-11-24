@@ -46,4 +46,5 @@ allow = []
 mcp = "off"
 
 [update]
+enabled = false
 # source unset

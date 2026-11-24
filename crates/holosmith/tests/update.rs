@@ -49,6 +49,9 @@ struct Recorder {
     trace: Mutex<Trace>,
     /// What `/api/health` answers: `(version, uptime_s)` — an uptime of 0 is a process younger than the restart.
     health: (String, u64),
+    /// The file the pass writes its report to, when a test wants the seed's **order** measured. `None` is every other
+    /// test: the report is read after `run` returns, which says nothing about when it was written.
+    report: Option<PathBuf>,
 }
 
 impl Recorder {
@@ -56,7 +59,48 @@ impl Recorder {
         Self {
             trace: Mutex::new(Vec::new()),
             health: (version.to_string(), 0),
+            report: None,
         }
+    }
+
+    /// The same recorder, holding the file the pass is writing its report to, so [`Recorder::witness`] can read it
+    /// from inside the pass.
+    fn watching(version: &str, report: &Path) -> Self {
+        Self {
+            report: Some(report.to_path_buf()),
+            ..Self::new(version)
+        }
+    }
+
+    /// The seed, read while the pass is in flight: `running`, dated, and nothing claimed.
+    ///
+    /// Called from the first [`Steps`] call — `smoke`, which the pipeline reaches only after the gate and after the
+    /// artifact — so this is the file **during** the run rather than after it. It fails if the seed is written after
+    /// `pass(...)`: at this moment the file then still holds the previous promotion's ending (or, on a machine that has
+    /// never promoted, nothing at all), and a `GET /api/update` would answer that for the whole run. The bytes are
+    /// parsed rather than matched as text because `pass::Report::write` pretty-prints them.
+    fn witness(&self) {
+        let Some(path) = &self.report else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!(
+                "the pass reached the machine with no report at {} ({error}): the seed is written before the first \
+                 step, so a `GET /api/update` during a run answers \"running\" rather than the last promotion",
+                path.display()
+            )
+        });
+        let seed: Value = serde_json::from_str(&text).expect("the seed is one JSON object");
+        assert_eq!(
+            seed["state"], "running",
+            "the report said `{}` when the pass first asked the machine: the seed was written after the pass began, \
+             so a `GET /api/update` would answer the previous promotion's ending for the whole run: {seed}",
+            seed["state"]
+        );
+        assert!(
+            seed["since"].as_i64().is_some_and(|since| since > 0),
+            "the seed carries no `since`, so a client cannot tell this run from the last one: {seed}"
+        );
     }
 
     fn record(&self, what: impl Into<String>) {
@@ -76,6 +120,9 @@ impl Recorder {
 
 impl Steps for Recorder {
     fn smoke(&self, _candidate: &Path, _root: &Path) -> smoke::Outcome {
+        // The first thing a pass asks of the machine, and therefore the reading of the seed: `smoke` is reached only
+        // after the gate and the artifact, so the file it reads is one the pass has been writing to for a while.
+        self.witness();
         self.record("smoke");
         smoke::Outcome::Passed
     }
@@ -175,9 +222,10 @@ fn world(label: &str, code: i32) -> World {
     std::fs::write(source.join(".gitignore"), "dist/\ntarget/\n")
         .expect("the ignore file is writable");
     let log = dir.file("gate.log");
+    let report = dir.file("report.json");
     let script = source.join("scripts").join("verify-in-container.sh");
     std::fs::create_dir_all(source.join("scripts")).expect("the scripts directory is creatable");
-    std::fs::write(&script, wrapper(&log, code)).expect("the fixture gate is writable");
+    std::fs::write(&script, wrapper(&log, &report, code)).expect("the fixture gate is writable");
     std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("the fixture gate is executable");
     git(&source, &["add", "-A"]);
@@ -231,13 +279,16 @@ fn world(label: &str, code: i32) -> World {
     }
 }
 
-/// The fixture gate: it records its argv, the image it was given and its working directory, prints a line of its own
-/// and two `SKIP `s, and exits with `code`.
+/// The fixture gate: it copies the report it finds, records its argv, the image it was given and its working
+/// directory, prints a line of its own and two `SKIP `s, and exits with `code`.
 ///
-/// The `SKIP ` lines are `scripts/verify.sh`'s shape at column 0, which is the count a pass of the gate reports.
-fn wrapper(log: &Path, code: i32) -> String {
+/// The `SKIP ` lines are `scripts/verify.sh`'s shape at column 0, which is the count a pass of the gate reports. The
+/// report is copied **first**, at `seed`: a real gate is the longest step of a promotion, so the file it reads here is
+/// the run's state for most of the wait, and a copy taken any later would not prove what it is taken for.
+fn wrapper(log: &Path, report: &Path, code: i32) -> String {
     format!(
         "#!/bin/sh\n\
+         cp '{report}' '{seed}' 2>/dev/null || printf 'no report while the gate ran\\n' > '{seed}'\n\
          printf 'argc %s\\n' \"$#\" > '{log}'\n\
          printf 'args %s\\n' \"$*\" >> '{log}'\n\
          printf 'image %s\\n' \"${{HOLOSMITH_VERIFY_IMAGE-<unset>}}\" >> '{log}'\n\
@@ -246,8 +297,15 @@ fn wrapper(log: &Path, code: i32) -> String {
          printf 'SKIP case_a: no Docker daemon answers\\n'\n\
          printf 'SKIP case_b: no image pi-agent:local (HOLOSMITH_TEST_IMAGE names another)\\n'\n\
          exit {code}\n",
-        log = log.display()
+        log = log.display(),
+        report = report.display(),
+        seed = seed_of(report).display(),
     )
+}
+
+/// Where the fixture gate leaves the report it found: beside the gate's log, one file for one world.
+fn seed_of(report: &Path) -> PathBuf {
+    report.with_file_name("report-at-the-gate.json")
 }
 
 impl World {
@@ -276,6 +334,19 @@ impl World {
     fn recorded(&self) -> String {
         std::fs::read_to_string(&self.log)
             .expect("the fixture gate recorded its argv and environment")
+    }
+
+    /// The report as the gate found it: the file a `GET` would have answered while that gate was running.
+    fn at_gate(&self) -> Value {
+        let path = seed_of(&self.report);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "the gate left no copy of the report at {} ({error}): the seed is written before the first step",
+                path.display()
+            )
+        });
+        serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{} is not one JSON object ({error})", path.display()))
     }
 }
 
@@ -574,21 +645,17 @@ fn a_checkout_with_no_gate_of_its_own_is_refused_rather_than_verified_elsewhere(
     );
 }
 
-/// A green gate promotes the artifact its own build phase wrote — and that artifact is the shipped one, because a
-/// promotion's first checks are about bytes: a static ELF of this machine, a `.sha256` beside it, and its own
-/// `version --json`.
-#[test]
-fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
-    let Some(artifact) = artifact() else {
+/// What the gate's build phase leaves behind, staged into the candidate tree so a pass has something to promote: the
+/// shipped artifact and the digest beside it, in `dist/<this machine's triple>/`. `None` on a tree that has not been
+/// built, which is the one SKIP these two tests take.
+fn stage_artifact(world: &World) -> Option<PathBuf> {
+    let artifact = artifact().or_else(|| {
         eprintln!(
             "SKIP tests/update.rs: no dist/<triple>/holosmith to promote (scripts/build.sh produces it; the gate's \
              case_upgrade and case_smoke measure the same pipeline end to end)"
         );
-        return;
-    };
-    let info = promote::ask_version(&artifact).expect("the artifact answers `version --json`");
-    let world = world("update-promote", 0);
-    // What the gate's build phase leaves: the artifact and its digest, in `dist/<this machine's triple>/`.
+        None
+    })?;
     let triple = holosmith::builder::default_target().expect("this binary is a release target");
     let directory = world.source.join("dist").join(triple);
     std::fs::create_dir_all(&directory).expect("the dist directory is creatable");
@@ -600,6 +667,84 @@ fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
         format!("{digest}  holosmith\n"),
     )
     .expect("the digest file is writable");
+    Some(candidate)
+}
+
+/// The seed's **order**, read from inside the run by a real child: the gate — the longest step of a promotion — copies
+/// the report file as it finds it, and what it finds is `running`, dated, with nothing claimed yet.
+///
+/// The copy is taken in the middle of the pass, so it can only say `running` if [`pass::run`] wrote the seed before the
+/// pass began, which is the property the `GET` leans on (ADR-0110 D1). Move the seed after `pass(...)`, or after the
+/// gate step, and the file holds the **previous** promotion's ending for the whole three quarters of an hour — while
+/// every test that reads the report once `run` returns stays green, which is why the reading is taken here.
+#[test]
+fn the_report_says_a_promotion_is_running_while_the_gate_runs() {
+    let world = world("update-seed-at-the-gate", 1);
+    let (code, report) = world.run(&Recorder::new("0.1.0"));
+
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(
+        report["state"], "refused",
+        "the fixture gate's red exit did not end this run at the gate: {report}"
+    );
+    let at_gate = world.at_gate();
+    assert_eq!(
+        at_gate["state"], "running",
+        "the gate found `{}` in the report file: the seed is written after it, so a `GET` answers the last promotion \
+         for the whole wait: {at_gate}",
+        at_gate["state"]
+    );
+    assert!(
+        at_gate["since"].as_i64().is_some_and(|since| since > 0),
+        "the gate found no `since`, so a client cannot tell this run from the last one: {at_gate}"
+    );
+    assert!(
+        at_gate["steps"].as_array().is_some_and(Vec::is_empty),
+        "the file the gate read is not the seed: it already carries steps: {at_gate}"
+    );
+}
+
+/// The same order, read later in the same pass: the first thing the pipeline asks of the machine — `smoke`, which is
+/// reached after the gate and after the artifact — is given the report path, and the file it reads there still says
+/// `running`.
+///
+/// [`the_report_says_a_promotion_is_running_while_the_gate_runs`] catches a seed moved after the gate by reading the
+/// file during it; this one catches a state rewritten mid-pass, because it reads the file again at the far end of the
+/// same run. It needs a candidate to promote, so it is the one reading these two take only on a built tree.
+#[test]
+fn the_report_still_says_running_when_the_pass_asks_the_machine() {
+    let world = world("update-seed-in-the-pass", 0);
+    let Some(candidate) = stage_artifact(&world) else {
+        return;
+    };
+    let info = promote::ask_version(&candidate).expect("the artifact answers `version --json`");
+    let steps = Recorder::watching(&info.version, &world.report);
+    let (code, report) = world.run(&steps);
+
+    assert_eq!(
+        code,
+        ExitCode::SUCCESS,
+        "this run did not reach the promotion the seed is read during: {report}"
+    );
+    assert!(
+        steps.trace().contains(&"smoke".to_string()),
+        "the pass never reached the call that reads the seed, so this test measured nothing: {:?}",
+        steps.trace()
+    );
+    assert_eq!(report["state"], "live");
+}
+
+/// A green gate promotes the artifact its own build phase wrote — and that artifact is the shipped one, because a
+/// promotion's first checks are about bytes: a static ELF of this machine, a `.sha256` beside it, and its own
+/// `version --json`.
+#[test]
+fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
+    let world = world("update-promote", 0);
+    let Some(candidate) = stage_artifact(&world) else {
+        return;
+    };
+    let info = promote::ask_version(&candidate).expect("the artifact answers `version --json`");
+    let digest = images::digest(&candidate).expect("the candidate is readable");
 
     // The tree is still the candidate's: `dist/` is ignored, so the build the gate ran left it clean.
     assert_eq!(
