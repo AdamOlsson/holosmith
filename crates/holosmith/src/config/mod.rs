@@ -369,15 +369,24 @@ impl LinearMcp {
     }
 }
 
-/// `[update]`: the checkout a promotion would build.
+/// `[update]`: the checkout a promotion would build, and whether this machine may be promoted at all.
 ///
-/// One key, because the candidate is decided rather than configurable: the tree's `master` is the commit and
-/// `git describe --tags --always` is the tag the release directory is named after (ADR-0110 D3). Unset is the
-/// default and means the machine has **no candidate at all** — not a candidate it declines to promote — so a page
+/// Two keys. The **candidate** is decided rather than configurable: the tree's `master` is the commit and
+/// `git describe --tags --always` is the tag the release directory is named after (ADR-0110 D3). Unset `source` is
+/// the default and means the machine has **no candidate at all** — not a candidate it declines to promote — so a page
 /// has no button to draw and a request has nothing to name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Update {
+    /// Whether this machine may be handed a promotion by a request at all (`POST /api/update`).
+    ///
+    /// **`false` by default, and that is the whole of the reason it is a key.** A promotion runs the gate and then
+    /// restarts this machine's own service, so a release that carried the route without this switch would hand every
+    /// browser and phone the tailnet admits a restart button the moment the machine upgraded — an authority nobody
+    /// chose. The operator turns it on in the config file, having decided that the tailnet's ACLs are the boundary
+    /// they want (ADR-0110 D1). A `hub` refuses the route whatever this says, because a hub has no release tree and
+    /// no Docker for the gate's container.
+    pub enabled: bool,
     /// The checkout `[update] source` names: absolute, and an existing directory.
     ///
     /// The semantic pass refuses anything else. A relative path would mean whatever directory `serve` was started
@@ -850,6 +859,9 @@ fn semantic_problems(
     if let Some(message) = update_source_problem(config) {
         report(&mut problems, document, text, "update.source", message);
     }
+    if let Some(message) = update_enabled_problem(config) {
+        report(&mut problems, document, text, "update.enabled", message);
+    }
     if let Some(owner) = &config.owner {
         if owner.trim().is_empty() {
             report(&mut problems, document, text, "owner", "must not be empty");
@@ -1023,6 +1035,25 @@ fn semantic_problems(
     );
 
     problems
+}
+
+/// What `[update] enabled` broke, if anything: it may only be on where there is a candidate to promote.
+///
+/// A bool has no shape to check, so the only rule a validator can keep is the cross-key one. `enabled = true` with no
+/// `[update] source` is a machine that says it may be promoted and cannot name what would be promoted — the state a
+/// page would draw a button in and a request would answer `404 no_candidate` to, which is a file that contradicts
+/// itself rather than a machine that is merely not ready. `enabled = false` with a `source` is fine and is what a
+/// machine that has a checkout but has not decided to be promoted from a browser looks like.
+///
+/// The **role** is not part of this rule: a `hub` refuses the route with a sentence of its own, and a hub whose config
+/// says `enabled = true` is a machine whose role, not its file, is what stops the promotion — refusing the file would
+/// make `hub deploy`'s own role union fail a config that names nothing wrong.
+fn update_enabled_problem(config: &Config) -> Option<String> {
+    (config.update.enabled && config.update.source.is_none()).then(|| {
+        "must be `false` while `[update] source` names no checkout: this key says a promotion may be started from a \
+         request, and `source` is what a promotion would build. Set `source` to the checkout, or leave this key out"
+            .to_string()
+    })
 }
 
 /// What `[update] source` broke, if anything: it must be absolute and name an existing directory.
@@ -1322,6 +1353,7 @@ allow = ["crates.io"]
 mcp = "readonly"
 
 [update]
+enabled = true
 source = "/tmp"
 "#;
 
@@ -1485,6 +1517,28 @@ source = "/tmp"
         assert_eq!(config.publish.remotes, ["origin"]);
         assert_eq!(config.egress.allow, ["crates.io"]);
         assert_eq!(config.linear.mcp, LinearMcp::ReadOnly);
+        assert!(config.update.enabled);
+    }
+
+    /// `[update] enabled` is `false` unless the file says otherwise, and `true` is refused without a `source`.
+    ///
+    /// The refusal is the only rule a bool's validator can keep, and it is the one state that would otherwise be a
+    /// machine saying it may be promoted while `POST /api/update` answers `404 no_candidate` to every press.
+    #[test]
+    fn the_update_switch_is_off_by_default_and_needs_a_checkout_to_be_on() {
+        assert!(!Config::default().update.enabled);
+        // A `source` alone does not switch it on, and does not refuse: a machine with a checkout stays unpressable
+        // until the operator says so.
+        let off = parse("[update]\nsource = \"/tmp\"\n").expect("a source alone is a valid file");
+        assert!(!off.update.enabled);
+        let on = parse("[update]\nenabled = true\nsource = \"/tmp\"\n")
+            .expect("a switch with a checkout is a valid file");
+        assert!(on.update.enabled);
+
+        let problem = problems_of("[update]\nenabled = true\n");
+        assert!(problem.contains("update.enabled"), "{problem}");
+        assert!(problem.contains("[update] source"), "{problem}");
+        assert!(problem.contains("1 problem"), "{problem}");
     }
 
     /// `[linear] mcp` is one of three words, `off` unless the file says otherwise, and an unknown word is refused

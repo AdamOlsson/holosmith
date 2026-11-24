@@ -22,10 +22,11 @@ operator's authority.
 
 **What has landed since, and what has not.** The candidate resolver (`candidate::resolve`, `[update] source`), the
 launcher (`update::start`, the transient user unit), the verb (`holosmith update`, which is one pass of the gate and
-then `promote`'s pipeline, with the free-space check in front of it and one JSON report behind it) and the digest line
-in `scripts/build.sh` are in the tree. The route, the page and the button are not: nothing on the wire can promote yet,
-so D1's authority is still exercised by a terminal, and the sections below that answer questions those changes own
-still say so rather than pretending the tree already does.
+then `promote`'s pipeline, with the free-space check in front of it and one JSON report behind it), the digest line
+in `scripts/build.sh`, and the two routes (`POST /api/update` and `GET /api/update`, the second answering the report
+file and the log after the restart the job performs) are in the tree. The page and the button are not: D1's authority is
+what the routes carry, and nothing in the app presses them yet, so the sections below that answer questions those
+changes own still say so rather than pretending the tree already does.
 
 ## Superseded in part: ADR-0060 D2, and ADR-0082 D2's review gate
 
@@ -188,9 +189,11 @@ be an assertion that measured a filename". A green gate is the opposite kind of 
 hour on this host once `target/` is warm", "nearer forty in a fresh worktree", and "34 to 43 minutes when the image
 cases rebuild `agent-image`" — which is the run a promotion always gets, because `case_server_images` removes both
 product tags before it does anything. So a promotion is that run plus the pipeline's own steps: **about three quarters
-of an hour**, and the job's log is the **only** feedback. The route can answer "started" and name the log; it cannot
-say how far along the run is. Accepted for now, and the first thing to improve later — nothing in this decision depends
-on the route learning to report progress.
+of an hour**, and while it runs the **log is the only detail**. `GET /api/update` answers the report's `state` —
+`running`, its `since`, and the steps that have finished — and the log's last lines, so a caller can say that a run is
+under way and show what the gate is printing; it cannot say how far along the run is, because the report gains a step
+only when that step ends and the gate is one step. Accepted for now, and the first thing to improve later — nothing in
+this decision depends on the route learning to report progress.
 
 ## D3 — The candidate is a clean `master`, and nothing else
 
@@ -390,16 +393,18 @@ so the repair is read once the gate has started rather than instead of it.
   this machine: ADR-0082's own limit applies unchanged — `systemctl` is a child the gate stands in for, and a real unit
   booting a real release is not measured here. So D4's mechanism is decided from the unit's directives and not from a
   run.
-- **A promotion started from a browser, end to end.** No route exists, so nothing about this path has been run. What
-  has been run is the gate in a container (ADR-0109, whose acceptance is a full green in-container run) and the
-  pipeline behind `holosmith upgrade` (ADR-0082's cases), which are the two halves this ADR joins.
+- **A promotion started from a browser, end to end.** The two routes are in the tree and no promotion has been started
+  through them: the answer shapes and the refusals are a unit test's, and `systemd-run` is not on this machine to run a
+  real start at all. What has been run is the gate in a container (ADR-0109, whose acceptance is a full green
+  in-container run) and the pipeline behind `holosmith upgrade` (ADR-0082's cases), which are the two halves this ADR
+  joins.
 - **The Docker behaviour behind "a running container holds its layers."** `case_server_images` untagging the image the
   gate itself runs in has not happened in a promotion yet; it happens in every in-container gate whose candidate shares
   the running release's version, and a run that finishes is what would measure it.
 - **The source tree's config key.** `[update] source` names the checkout now, with a validator and a row in
-  `docs/config.md`, and `candidate::resolve` is its one reader. What is still unmeasured is the transition the route
-  makes between a page that rendered a commit and a press that promotes it: the staleness comparison is a unit test's,
-  because no route carries a commit over the wire yet.
+  `docs/config.md`, and `candidate::resolve` is its one reader. What is still unmeasured is the transition a page makes
+  between rendering a commit and a press that promotes it: `POST /api/update` carries the commit and compares it with
+  `master`'s, and no test drives that comparison over a socket yet.
 - **A pass of the gate end to end.** `holosmith update` is measured by a fixture tree whose `scripts/verify-in-container.sh`
   records its argv and answers the exit code the test chooses, so the four steps, the exit-code translation and the
   report are facts about the command — and the run that is the point of D2, a green gate on a real machine promoting the

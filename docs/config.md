@@ -154,7 +154,8 @@ seed. A row's `url` must be `http(s)` with a MagicDNS name or an address in `100
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `keep_releases` | integer | `5` | How many release directories a promotion leaves behind. At least **2**, because a prune always keeps the live release and the one behind it — the rollback target — and those two count towards the number. `0` is not "keep everything" (ADR-0084). |
-| `[update] source` | path | unset | The checkout a promotion reads before it runs, to name what it would make live. The candidate is that checkout's `master`, which has to be the branch checked out — a tree left on another branch or on a detached `HEAD` is refused rather than promoted — and the tree must be clean, untracked files included, because a build from a tree holding files the commit does not have is one nobody can reproduce. Absolute, and it must name an existing directory; a relative path would mean whatever directory `serve` was started in. `holosmith update` is what reads it: the candidate is what that command's gate proves and then promotes, and the same value is the one that command's report speaks in, and the one a promotion's route and page will speak in (ADR-0110 D3). **Unset means this machine has no candidate at all** — there is nothing to promote, rather than a promotion that is switched off (ADR-0110 D3). |
+| `[update] enabled` | boolean | `false` | Whether `POST /api/update` may start a promotion on this machine. `true` requires `[update] source` to name a checkout and is refused at `update.enabled` without one, because a machine that may be promoted has to be able to say what it would promote. **`false` is the default because a promotion restarts the service**: an upgrade must not hand a phone a restart button by accident, so turning this on is the operator's decision that the authority the tailnet gives (ADR-0110 D1) is the one they want. A `hub` answers the route with a `403` whatever this says — it has no release tree and no Docker for the gate's container. |
+| `[update] source` | path | unset | The checkout a promotion reads before it runs, to name what it would make live. The candidate is that checkout's `master`, which has to be the branch checked out — a tree left on another branch or on a detached `HEAD` is refused rather than promoted — and the tree must be clean, untracked files included, because a build from a tree holding files the commit does not have is one nobody can reproduce. Absolute, and it must name an existing directory; a relative path would mean whatever directory `serve` was started in. `holosmith update` is what reads it: the candidate is what that command's gate proves and then promotes, and the same value is the one that command's report speaks in, and the one a promotion's route and page speak in (ADR-0110 D3). **Unset means this machine has no candidate at all** — there is nothing to promote, rather than a promotion that is switched off (ADR-0110 D3). |
 
 ## Rules that span two keys
 
@@ -167,6 +168,9 @@ one the file wrote:
   is folded before they are compared.
 - Every list refuses a duplicate.
 - `owner` must be non-empty and contain no whitespace (it is a login name).
+- `[update] enabled` may not be `true` while `[update] source` is unset: a machine that says a promotion may be started
+  from a request has to name what it would promote. `enabled = false` with a `source` is fine — a checkout this
+  machine does not promote from a browser yet.
 - Three limits refuse `0` by name, because Docker reads `0` as *unlimited*: `container_cpus`, `container_memory_mb`,
   `container_pids`. The three keys where `0` genuinely means *off* are `idle_stop_min`, `turn_timeout_min` and
   `session_disk_soft_gb`.

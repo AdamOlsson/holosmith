@@ -42,6 +42,7 @@ use crate::http::sessions;
 use crate::http::streams;
 use crate::http::tool_image;
 use crate::http::tool_output;
+use crate::http::update;
 use crate::ladder::Ladder;
 use crate::merge::Merges;
 use crate::provisioner::Provisioner;
@@ -96,6 +97,20 @@ pub struct AppState {
     /// `unsafe`, so a test cannot `set_var` a `PATH`, and a shim it wrote is the only way to put a machine's
     /// answer under a test's control. The production value is the program's name, which `PATH` resolves.
     pub tools: crate::preflight::Tools,
+    /// The install tree this machine serves from: `<root>/releases`, `<root>/current`, and the config file a
+    /// promotion's job is told to read.
+    ///
+    /// A value rather than `deploy::Root::resolve(None, None)` inside a handler, for [`Self::tools`]' reason one
+    /// field over: the crate denies `unsafe`, so a test cannot `set_var` `HOLOSMITH_ROOT`, and a route that resolved
+    /// the machine's root itself would answer about whatever account the test process runs as.
+    pub root: crate::deploy::Root,
+    /// The programs a **promotion** runs — `systemd-run` and `systemctl`, both of the operator's own user manager —
+    /// carried as the value that already holds them ([`crate::deploy::Tools`]).
+    ///
+    /// Beside [`Self::tools`] rather than in it because the two are different jobs: that one is the request path's
+    /// own measurements (`df`, `du`), this one is the verbs whose point is to outlive the process that runs them. A
+    /// test points at recorders the same way, which is the only way a start can be measured without systemd.
+    pub deploy: crate::deploy::Tools,
 }
 
 impl AppState {
@@ -300,6 +315,21 @@ impl AppState {
             Arc::clone(&self.database),
             self.stopper(),
             self.events.clone(),
+        )
+    }
+
+    /// The two `/api/update` routes' handle, wired to this state's install tree, the data root it serves from and the
+    /// programs a promotion runs.
+    ///
+    /// Here for the same reason as the helpers above, and with one extra job of its own: **the data root is the
+    /// config's**, not the install tree's — `[storage] data_dir` may move it — so the file a `GET` reads after the
+    /// restart is the one the machine serves from, while the root a job writes into is the install tree's. A handler
+    /// that resolved either itself would be a second spelling of one machine's layout.
+    pub fn updater(&self) -> update::Promotion {
+        update::Promotion::new(
+            self.root.clone(),
+            self.config.data_root.clone(),
+            self.deploy.clone(),
         )
     }
 }
@@ -533,7 +563,8 @@ impl RequestCounter {
 
 /// The control listener's route table: the health endpoint, the sessions collection (its list, its
 /// create and one row), the session's event stream, a session's prompt, abort, steer and resume, the
-/// embedded app, and the two answers to an unknown path (ADR-0007).
+/// machine's push subscriptions and host registry, the promotion, the embedded app, and the two answers to an unknown
+/// path (ADR-0007).
 pub fn router(state: AppState) -> Routes {
     let state = Arc::new(state);
     let health_state = Arc::clone(&state);
@@ -559,6 +590,8 @@ pub fn router(state: AppState) -> Routes {
     let subscribe_state = Arc::clone(&state);
     let unsubscribe_state = Arc::clone(&state);
     let forward_state = Arc::clone(&state);
+    let update_state = Arc::clone(&state);
+    let promotion_state = Arc::clone(&state);
     let routes = Routes::new()
         .get("/api/health", move || {
             let state = Arc::clone(&health_state);
@@ -798,7 +831,25 @@ pub fn router(state: AppState) -> Routes {
                 let name = hosts::path_name(name);
                 async move { hosts::remove(&state, &name, query).await }
             },
-        );
+        )
+        // The **promotion** (ADR-0110): two routes on one path, and the first pair in this table whose subject is the
+        // machine itself rather than a session or a host. The `POST` starts a transient unit, so it is `Mutating` by
+        // construction and every guard applies to it; the `GET` reads a report file, so it is `ReadOnly`. Both are
+        // **in this table** and for no other reason protected: ADR-0010's four header checks and the trust check run
+        // on them because `App::new` wraps the whole table, and neither route adds a rule of its own — no login-header
+        // requirement, no owner check, no promoter credential (ADR-0110 D1). The refusals — the role, `[update]
+        // enabled`, the release tree, the candidate, the staleness token, a unit already running — are the handler's,
+        // and all of them are answered before anything is started.
+        .get("/api/update", move || {
+            let state = Arc::clone(&update_state);
+            async move { update::last(&state).await }
+        })
+        // The body is one `commit` and taken as a `Result` for the reason the create's is: a rejection axum would
+        // answer in plain text becomes ADR-0008's `bad_body`.
+        .post("/api/update", move |body: Result<Bytes, BytesRejection>| {
+            let state = Arc::clone(&promotion_state);
+            async move { update::start(&state, body).await }
+        });
 
     // The **forwarding route** (spec item 3, ADR-0074): one peer's API, under this machine's host prefix.
     // Five registrations of one path rather than one `any` route, because `Routes` records a method and a kind per
