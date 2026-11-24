@@ -55,6 +55,12 @@ outside `apply`. `apply` reads the current state, looks the trigger up, and eith
   emits `session.status` **after** the write, logs `from`/`to`/`trigger` at `info`, and returns the
   new state.
 
+**Amended: one implementation, and the generation-aware calls are its doors.** That function is
+`apply_while`, and `apply` is it with no turn to compare; `apply_for_turn` hands it one and refuses a row
+another turn holds, and `apply_for_turn_logged` is that call's reporting wrapper, `apply_logged`'s sibling.
+So the rule above holds with `apply_while` in `apply`'s place. Which callers ask for a generation, and what
+a refusal means to each of them, is ADR-0020's to decide.
+
 The `Transitioner` carries both handles (the database and the event writer) so a caller cannot have
 one without the other and forget the event.
 
