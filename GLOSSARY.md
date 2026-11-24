@@ -331,8 +331,12 @@ Ending a turn early, on request or by timeout. The work is the abort ladder's.
 _Avoid_: Cancel, kill, stop
 
 **Abort ladder**:
-The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container and records the reason. Its machine names are the `Ladder` type and its two entry points: `Ladder::climb` (the rungs and then the way back, so rung 2 resumes the session at once) and `Ladder::end_turn` (the rungs alone, which is what a delete climbs, because resuming a session that is being removed would provision a container in order to delete it). The reason rung 2 records is the caller's — `forced_abort` for an abort, `deleted` for a delete, and the turn timeout's, the token budget's and the **session disk cap**'s own words (`turn_timeout`, `budget_exceeded`, `disk_quota`).
+The two-rung routine that ends a turn which will not end itself: rung 1 clears the agent's queue and then asks it to abort; rung 2 is reached when the row is still `running` after the grace, and kills the container and records the reason. Its machine names are the `Ladder` type and its two entry points: `Ladder::climb` (the rungs and then the way back, so rung 2 resumes the session at once) and `Ladder::end_turn` (the rungs alone, which is what a delete climbs, because resuming a session that is being removed would provision a container in order to delete it). The reason rung 2 records is the caller's — `forced_abort` for an abort, `deleted` for a delete, and the turn timeout's, the token budget's and the **session disk cap**'s own words (`turn_timeout`, `budget_exceeded`, `disk_quota`). It ends **the turn it was asked about and no other**: a climb carries the row's **turn generation**, and one that arrives after another turn has taken the row answers `Ending::Superseded` and does nothing.
 _Avoid_: Kill path, escape hatch, force stop, cancel chain
+
+**Turn generation**:
+Which turn a session row is running: a counter the prompt bumps as it takes the row, so a routine that outlives the turn it was asked about — above all the **abort ladder** — can tell "the row is mine" from "the row is somebody else's". It is a row fact and not part of the session object the API answers, the way `expected_stop` and `last_seq` are. Its machine names are `sessions.turn_generation` (migration `0008`), `TurnGeneration`, `SessionTurn` and `SessionRepository::turn`, which reads the state and the generation in one statement.
+_Avoid_: Turn id, turn number, epoch, attempt
 
 **Rung**:
 One numbered step of the abort ladder, as spec item 16 numbers them.
@@ -1236,7 +1240,7 @@ promotion never ships it, and `server deploy` does not build it.
 _Avoid_: Test image, agent image (that is the product one), fake image, mock image
 
 **Recorded turn**:
-`crates/holosmith/fixtures/smoke-turn.jsonl`: one header line (`{"type":"fixture","version":1,"schema":7,"recorded":
+`crates/holosmith/fixtures/smoke-turn.jsonl`: one header line (`{"type":"fixture","version":1,"schema":8,"recorded":
 "","turn":"tool"}`) and then the `pi-turn-tool.jsonl` **verbatim** — `agent_start`, deltas, one tool round
 trip, non-zero usage, closing `agent_settled`. Embedded in the binary (`include_str!`) because the container runs the
 candidate and has no file to read, and its header's `schema` is compared with `schema::SCHEMA_VERSION` by a test, so a

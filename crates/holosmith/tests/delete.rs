@@ -24,7 +24,7 @@ use holosmith::ladder::Ending;
 use holosmith::provisioner::Provisioner;
 use holosmith::runtime::Backend;
 use holosmith::sessions::state::{Transitioner, Trigger};
-use holosmith::sessions::{NewSession, Session, Status};
+use holosmith::sessions::{NewSession, Session, SessionTurn, Status};
 use serde_json::Value;
 
 mod support;
@@ -119,6 +119,12 @@ fn kept(response: &Response) -> Value {
 fn row(state: &AppState, id: &str) -> Option<Session> {
     let database = state.database.lock().expect("the lock is not poisoned");
     database.sessions().get(id).expect("the row reads")
+}
+
+/// The row and the turn it is running: what a ladder is handed, and what it ends.
+fn turn(state: &AppState, id: &str) -> Option<SessionTurn> {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database.sessions().turn(id).expect("the row reads")
 }
 
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -537,10 +543,13 @@ async fn the_ladder_ends_a_turn_without_bringing_the_session_back() {
     let id = created_id(&post_create(served.addr, "delete-end-turn").await);
     wait_status(&state, &id, Status::Idle).await;
     drive(&state, &id, Trigger::Prompt, None).await;
-    let running = row(&state, &id).expect("the session exists");
+    let running = turn(&state, &id).expect("the session exists");
     let after_create = stub.calls().len();
 
-    let ending = state.ladder().end_turn(&running, DELETED).await;
+    let ending = state
+        .ladder()
+        .end_turn(&running.session, running.turn, DELETED)
+        .await;
 
     assert_eq!(ending, Ending::Forced, "the hung turn was not forced");
     let stopped = row(&state, &id).expect("the session exists");

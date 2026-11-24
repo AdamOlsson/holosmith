@@ -122,6 +122,29 @@ pub struct Session {
     pub usage_out: u64,
 }
 
+/// Which turn a row is running: the prompt that takes the row bumps it, and nothing else writes it.
+///
+/// One session runs one turn at a time and the row names only the state, so a routine that outlives
+/// the turn it was asked about — the abort ladder above all — has nothing to compare itself against.
+/// The counter is that: the ladder holds the generation the row had when it was asked, and a row
+/// holding a later one belongs to somebody else (ADR-0020). `0` is "no turn has been taken yet", the
+/// value every row the migrations before schema 8 wrote.
+///
+/// It is deliberately **not** a field of [`Session`]: the session object is the API's body, pinned to
+/// fifteen keys (ADR-0038). [`repository::SessionRepository::turn`] is how a caller reads one.
+pub type TurnGeneration = u64;
+
+/// One session and the turn it is running: what a caller that must name a turn reads.
+///
+/// One value rather than two reads, because "the row is `running`" and "which turn holds it" are one
+/// question — a prompt landing between two statements would answer the state of one turn and the
+/// identity of the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTurn {
+    pub session: Session,
+    pub turn: TurnGeneration,
+}
+
 /// What a caller supplies to create a session; everything else is the repository's or `now`.
 #[derive(Debug, Clone)]
 pub struct NewSession {

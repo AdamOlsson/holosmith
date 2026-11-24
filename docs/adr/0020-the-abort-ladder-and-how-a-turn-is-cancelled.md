@@ -84,8 +84,35 @@ provisioning steps or only the container's is a later question — the trait's `
 exists and has no caller until a change says what it means. Answering it here would have been a
 guess that then had to undo.
 
-## Two owners can end one turn, and the table decides
+## The ladder ends the turn it was asked about, and no other
 
+**Amended: it may only end its own turn.** The ladder is spawned and then returns, so a climb outlives the turn
+that asked for it — and every question it used to ask was about the **session**. Rung 2's `abort_ladder` is
+legal from `running` whatever turn is running, and rung 3's `resume` provisions whatever row is there, so a
+prompt sent just after a timed-out turn could have its container stopped mid-flight and the session restarted
+with the row's reason naming a timeout the operator never hit. The window was the whole climb — up to
+`abort_grace` plus the forced rung — and it widens exactly when the machine is busy, which is when a turn is
+most likely to have timed out. The operator's abort is the same routine and had the same window.
+
+The row could not answer it, so the row gained the fact: `sessions.turn_generation` (migration `0008`, schema
+8), a counter the prompt bumps **inside the same critical section as its `running` write**, so a turn's
+identity and its `running` are one critical section and no climb can see the new turn's row under the old one's
+number. They are two statements in it and not one transaction, which leaves the one failure window
+Consequences records.
+It is deliberately not a `Session` field — the session object is the API's body, pinned to fifteen keys
+(ADR-0038) — and it is read together with the row's state (`SessionRepository::turn`), because "which turn"
+and "which state" are one question.
+
+The ladder carries that number. Rung 2's write is the one its own turn may make
+(`Transitioner::apply_for_turn`): the table stays the authority for which moves exist, and the generation
+narrows *whose* row it is — the comparison, the lookup and the write are one critical section, which is what
+makes it a compare-and-swap rather than a check followed by a hope. And rung 1 is not asked of a row that is
+not this turn's at all, because `clear_queue` and `abort` name no turn: they reach whatever the session is
+running now. A climb that finds another turn's row answers `Ending::Superseded`, asks the agent nothing, stops
+nothing, resumes nothing, and says so in one log line — which is how an operator learns that the abort they
+pressed was for the turn before this one, instead of seeing a turn they never ended.
+
+## Two owners can end one turn, and the table decides
 Rung 2 exists precisely because rung 1 did not work, so the turn runner and the ladder both end up
 holding the same `running` turn: the ladder applies `running → stopped`, and only then does the stop
 it issued make the runner's `start_turn` answer `Aborted`, at which point the runner's own ending is
@@ -127,8 +154,19 @@ and a 202 that does nothing is indistinguishable from a ladder that failed.
   `idle` with the same id and the four provisioning steps; the ladder's reason is the caller's
   (`turn_timeout`); `409 session_starting`, `409 session_idle` twice over, and `404 not_found`; and
   the route is recorded `Mutating`. Every refusal is asserted on status, `code` and `content-type`.
+  **An abort for a turn that has already ended** answers `Ending::Superseded` and asks the agent for
+  nothing, asserted there and, for a timed-out turn's climb, in `tests/turn_timeout.rs` — the row and
+  the next turn's container are the two it must not touch.
 - `src/backend/stub.rs` grows one test in three phases: an abort cuts the script short, an ignored
   abort does not, and a stop cuts it either way and leaves no stop request behind.
+- **The prompt's two statements are one critical section and not one commit.** The status write and the
+  generation bump happen under the one `Mutex<Database>` guard, so no in-process reader sees a `running`
+  row at the previous generation; a failure of the bump after the status write has committed answers the
+  prompt `500` with the row `running` at the previous generation and no runner started, which the abort
+  ladder can still end. Making the pair one commit is the fix if that window ever matters.
+- **A delete whose climb is superseded proceeds with the row as it stands**, snapshot included: the delete
+  can only ask for the ending of the turn it read, so a prompt that took the turn in the meantime leaves the
+  delete snapshotting and then removing a session that is running that new turn.
 - `scripts/verify.sh` grows two cases (`case_abort`, `case_abort_on_an_idle_session`) — 28 cases —
   and the shipped artifact is where rung 1's `abort_completed` is proved, because rung 2's trigger is
   a constructor argument only a test can set.

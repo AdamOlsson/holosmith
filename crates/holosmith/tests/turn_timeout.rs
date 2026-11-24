@@ -16,9 +16,10 @@ use holosmith::backend::{Call, StubBackend};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::AppState;
-use holosmith::sessions::Session;
+use holosmith::ladder::{Ending, Ladder};
 use holosmith::sessions::Status;
 use holosmith::sessions::state::{Transitioner, Trigger};
+use holosmith::sessions::{Session, SessionTurn};
 use holosmith::turn::{TURN_TIMEOUT, Turn, timeout};
 use serde_json::Value;
 
@@ -43,6 +44,16 @@ fn row(state: &AppState, id: &str) -> Session {
     database
         .sessions()
         .get(id)
+        .expect("the row reads")
+        .expect("the session exists")
+}
+
+/// The row and the turn it is running: what a runner is handed, and what its ladder is about.
+fn turn(state: &AppState, id: &str) -> SessionTurn {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .turn(id)
         .expect("the row reads")
         .expect("the session exists")
 }
@@ -153,7 +164,11 @@ async fn a_turn_past_its_timeout_ends_with_the_reason() {
     let session = running(&state, "timeout-fires").await;
 
     runner(&state, &stub, Some(TIMEOUT))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -194,7 +209,11 @@ async fn a_turn_shorter_than_its_timeout_settles_and_says_nothing_about_a_timeou
     let session = running(&state, "timeout-quiet").await;
 
     runner(&state, &stub, Some(TIMEOUT))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -237,7 +256,11 @@ async fn each_turn_gets_its_own_clock() {
     let session = running(&state, "timeout-per-turn").await;
 
     runner(&state, &stub, Some(TIMEOUT))
-        .run(session.clone(), "first".to_string())
+        .run(
+            session.clone(),
+            "first".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
     assert_eq!(row(&state, &session.id).status, Status::Idle);
 
@@ -249,7 +272,7 @@ async fn each_turn_gets_its_own_clock() {
     let second = row(&state, &session.id);
     let started = std::time::Instant::now();
     runner(&state, &fast_stub(), Some(TIMEOUT))
-        .run(second, "second".to_string())
+        .run(second, "second".to_string(), turn(&state, &session.id).turn)
         .await;
     let elapsed = started.elapsed();
 
@@ -272,6 +295,80 @@ async fn each_turn_gets_its_own_clock() {
 }
 
 #[tokio::test]
+async fn a_timed_out_turns_ladder_does_not_end_the_turn_that_followed_it() {
+    // A timed-out turn's ladder is a task of its own, and every question the old climb asked was about the
+    // **session**: rung 2's `abort_ladder` is legal from `running` whatever turn is running, and rung 3's
+    // `resume` then provisions the session. So once the operator's next prompt had moved the same session
+    // back to `running`, a climb for a turn that was over could stop and restart the turn that replaced it.
+    // The generation is the question the row could not answer before, and a climb for a turn the row has
+    // left does nothing at all (ADR-0020).
+    let dir = TempDir::new("turn-timeout-superseded");
+    let stub = paced(50);
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let session = running(&state, "timeout-superseded").await;
+    let timed_out = turn(&state, &session.id);
+
+    // Turn 1 ends, and the next prompt takes the row: a different turn, `running` again.
+    drive(
+        &state,
+        &session.id,
+        Trigger::AbortCompleted,
+        Some(TURN_TIMEOUT),
+    )
+    .await;
+    drive(&state, &session.id, Trigger::Prompt, None).await;
+    let second = turn(&state, &session.id);
+    assert_ne!(
+        second.turn, timed_out.turn,
+        "the prompt did not take a new turn, so nothing here is a superseded climb"
+    );
+    assert_eq!(second.session.status, Status::Running);
+    let asked = stub.calls().len();
+
+    // The ladder turn 1's timeout spawned, climbing after the fact. A grace of zero spends nothing before
+    // rung 2, so the climb is at the rung that would move the row on its first step — and the row is not
+    // its to move.
+    let ladder = Ladder::new(
+        state.backend.clone(),
+        Arc::clone(&state.database),
+        state.events.clone(),
+        Duration::ZERO,
+    );
+    let ending = ladder
+        .climb(&timed_out.session, timed_out.turn, TURN_TIMEOUT)
+        .await;
+
+    assert_eq!(
+        ending,
+        Ending::Superseded,
+        "the ladder climbed for a turn the row had already left"
+    );
+    // Not one call to the agent. `clear_queue` and `abort` name no turn, so they reach whatever the
+    // session is running now, and the climb has to know that before the first of them.
+    let calls: Vec<Call> = stub.calls()[asked..].to_vec();
+    assert!(
+        !calls.contains(&Call::ClearQueue)
+            && !calls.contains(&Call::Abort)
+            && !calls.contains(&Call::Stop),
+        "a superseded climb asked for or stopped a turn that is not its own: {calls:?}"
+    );
+    let after = turn(&state, &session.id);
+    assert_eq!(
+        after.session.status,
+        Status::Running,
+        "the next turn's row was stopped and restarted"
+    );
+    assert_eq!(
+        after.session.status_reason, None,
+        "the next turn's row records a timeout the operator never hit"
+    );
+    assert_eq!(
+        after.turn, second.turn,
+        "the row was handed to another turn"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_that_ignores_the_abort_is_force_stopped_with_the_reason() {
     // Rung 2: the story's reason has to be the ladder's when the agent never answers, which is what
     // `ignoring_abort` produces. The forced stop is followed by the ladder's own resume, so the row is
@@ -282,7 +379,11 @@ async fn an_agent_that_ignores_the_abort_is_force_stopped_with_the_reason() {
     let session = running(&state, "timeout-forced").await;
 
     runner(&state, &stub, Some(TIMEOUT))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let calls = stub.calls();
@@ -323,7 +424,11 @@ async fn no_timeout_configured_aborts_nothing() {
     let session = running(&state, "timeout-off").await;
 
     runner(&state, &stub, None)
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);

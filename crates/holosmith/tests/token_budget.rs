@@ -21,9 +21,9 @@ use holosmith::backend::{Backends, Call, StubBackend};
 use holosmith::clock;
 use holosmith::config::Config;
 use holosmith::http::AppState;
-use holosmith::sessions::Session;
 use holosmith::sessions::Status;
 use holosmith::sessions::state::{Transitioner, Trigger};
+use holosmith::sessions::{Session, SessionTurn};
 use holosmith::turn::{BUDGET_EXCEEDED, Turn};
 use serde_json::Value;
 
@@ -52,6 +52,16 @@ fn row(state: &AppState, id: &str) -> Session {
     database
         .sessions()
         .get(id)
+        .expect("the row reads")
+        .expect("the session exists")
+}
+
+/// The row and the turn it is running: what a runner is handed, and what its ladder is about.
+fn turn(state: &AppState, id: &str) -> SessionTurn {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .turn(id)
         .expect("the row reads")
         .expect("the session exists")
 }
@@ -161,7 +171,11 @@ async fn a_turn_that_spends_the_budget_ends_with_the_reason() {
 
     // One turn with no ceiling: it settles, and the tally becomes the stub's 1540.
     runner(&state, &stub, None, None)
-        .run(spent.clone(), "read the app shell".to_string())
+        .run(
+            spent.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &spent.id).turn,
+        )
         .await;
     wait_for_usage(&state, &spent.id, SPENT_IN, SPENT_OUT).await;
     let after_first = row(&state, &spent.id);
@@ -182,7 +196,7 @@ async fn a_turn_that_spends_the_budget_ends_with_the_reason() {
     drive(&state, &spent.id, Trigger::Prompt, None).await;
     let again = row(&state, &spent.id);
     runner(&state, &stub, None, Some(CEILING))
-        .run(again, "and again".to_string())
+        .run(again, "and again".to_string(), turn(&state, &spent.id).turn)
         .await;
 
     let ended = row(&state, &spent.id);
@@ -225,7 +239,11 @@ async fn a_turn_that_settles_over_its_ceiling_is_labelled_without_a_climb() {
     let session = running(&state, "budget-settled").await;
 
     runner(&state, &stub, None, Some(CEILING))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -262,12 +280,20 @@ async fn two_turns_add_up() {
     let session = running(&state, "budget-two-turns").await;
 
     runner(&state, &stub, None, None)
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
     drive(&state, &session.id, Trigger::Prompt, None).await;
     let again = row(&state, &session.id);
     runner(&state, &stub, None, None)
-        .run(again, "and again".to_string())
+        .run(
+            again,
+            "and again".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     wait_for_usage(&state, &session.id, 2 * SPENT_IN, 2 * SPENT_OUT).await;
@@ -291,7 +317,11 @@ async fn a_session_that_has_spent_exactly_its_ceiling_is_over_it() {
     let session = running(&state, "budget-at-the-limit").await;
 
     runner(&state, &stub, None, Some(SPENT_IN + SPENT_OUT))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -314,7 +344,11 @@ async fn the_first_policy_to_fire_is_the_only_one_that_climbs() {
     let state = with_stub(state_in(&dir, Config::default()), stub.clone());
     let spent = running(&state, "budget-one-climb").await;
     runner(&state, &stub, None, None)
-        .run(spent.clone(), "read the app shell".to_string())
+        .run(
+            spent.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &spent.id).turn,
+        )
         .await;
 
     drive(&state, &spent.id, Trigger::Prompt, None).await;
@@ -328,7 +362,7 @@ async fn the_first_policy_to_fire_is_the_only_one_that_climbs() {
         Some(Duration::from_millis(200)),
         Some(CEILING),
     )
-    .run(again, "and again".to_string())
+    .run(again, "and again".to_string(), turn(&state, &spent.id).turn)
     .await;
 
     let ended = row(&state, &spent.id);
@@ -352,7 +386,11 @@ async fn an_unset_budget_never_ends_a_turn() {
     let session = running(&state, "budget-unset").await;
 
     runner(&state, &stub, None, None)
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     wait_for_usage(&state, &session.id, SPENT_IN, SPENT_OUT).await;
@@ -381,7 +419,11 @@ async fn a_backend_that_reports_no_usage_cannot_trip_the_budget() {
     let session = running(&state, "budget-no-usage").await;
 
     runner(&state, &stub, None, Some(1))
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -411,14 +453,22 @@ async fn a_message_end_without_usage_adds_nothing_to_the_tally() {
     let state = with_stub(state_in(&dir, Config::default()), stub.clone());
     let session = running(&state, "budget-mixed").await;
     runner(&state, &stub, None, None)
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let quiet = paced(1).omitting_usage();
     drive(&state, &session.id, Trigger::Prompt, None).await;
     let again = row(&state, &session.id);
     runner(&state, &quiet, None, None)
-        .run(again, "and again".to_string())
+        .run(
+            again,
+            "and again".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     wait_for_usage(&state, &session.id, SPENT_IN, SPENT_OUT).await;
@@ -481,7 +531,11 @@ async fn a_real_turns_usage_becomes_the_sessions_tally_and_trips_the_ceiling() {
     // spec item 13 describes, with the numbers a provider reported rather than a stub's script.
     let ceiling = REAL_IN + REAL_OUT - 1;
     runner(&state, &stub, None, Some(ceiling))
-        .run(row(&state, &session.id), "and again".to_string())
+        .run(
+            row(&state, &session.id),
+            "and again".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
 
     let ended = row(&state, &session.id);
@@ -511,7 +565,11 @@ async fn counts_survive_a_stop_and_a_resume() {
     let session = running(&state, "budget-resume").await;
 
     runner(&state, &stub, None, None)
-        .run(session.clone(), "read the app shell".to_string())
+        .run(
+            session.clone(),
+            "read the app shell".to_string(),
+            turn(&state, &session.id).turn,
+        )
         .await;
     wait_for_usage(&state, &session.id, SPENT_IN, SPENT_OUT).await;
 

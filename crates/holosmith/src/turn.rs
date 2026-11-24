@@ -51,6 +51,7 @@ use crate::db::Database;
 use crate::events::EventWriter;
 use crate::ladder::Ladder;
 use crate::sessions::Session;
+use crate::sessions::TurnGeneration;
 use crate::sessions::activity;
 use crate::sessions::state::{StateError, Transitioner, Trigger};
 
@@ -152,18 +153,22 @@ impl Turn {
         }
     }
 
-    /// Hand `session` and `prompt` to a background task and return immediately.
+    /// Hand `session`, `prompt` and the turn the prompt took to a background task and return
+    /// immediately.
     ///
     /// The task owns everything it needs, so the caller drops its references the moment the answer
     /// is built: no response ever waits for a turn.
-    pub fn spawn(self, session: Session, prompt: String) -> JoinHandle<()> {
-        tokio::spawn(async move { self.run(session, prompt).await })
+    pub fn spawn(self, session: Session, prompt: String, turn: TurnGeneration) -> JoinHandle<()> {
+        tokio::spawn(async move { self.run(session, prompt, turn).await })
     }
 
     /// Run one turn for `session`, which the caller has already moved to `running`.
     ///
     /// Public so a test can await it instead of racing a spawned task; `spawn` is what production
     /// calls.
+    ///
+    /// `turn` is the row's generation as the prompt left it — the identity this runner hands the ladder
+    /// it spawns, so a climb started for this turn is refused once the row is another turn's (ADR-0020).
     ///
     /// The deadline starts here and dies with this task, which is what "the timeout is per turn, not per
     /// session" means: a turn that settles never has a clock to reset, and a steer cannot extend one
@@ -175,16 +180,18 @@ impl Turn {
     /// climb would ask a second abort of a turn that is already ending, and the row's one
     /// `status_reason` could only keep one of the words anyway. It is also why both arms are guarded on
     /// `fired`: after one has fired there is nothing left for the other to do but wait for the turn.
-    pub async fn run(self, session: Session, prompt: String) {
+    pub async fn run(self, session: Session, prompt: String, turn: TurnGeneration) {
         self.touch(&session.id);
-        let turn = self.backend.start_turn(&session, &prompt, &self.events);
-        tokio::pin!(turn);
+        // The agent's own turn, waited on below; `turn` is the row's generation, which is a name for the
+        // turn rather than the turn itself.
+        let the_turn = self.backend.start_turn(&session, &prompt, &self.events);
+        tokio::pin!(the_turn);
         let deadline = self.timeout.map(|limit| Instant::now() + limit);
         let mut poll = Instant::now() + BUDGET_POLL;
         let mut fired: Option<&'static str> = None;
         loop {
             tokio::select! {
-                ended = &mut turn => {
+                ended = &mut the_turn => {
                     self.finished(&session, ended, fired).await;
                     return;
                 }
@@ -199,7 +206,7 @@ impl Turn {
                         "the turn ran past its timeout; the ladder is ending it"
                     );
                     fired = Some(TURN_TIMEOUT);
-                    self.spawn_ladder(&session, TURN_TIMEOUT);
+                    self.spawn_ladder(&session, turn, TURN_TIMEOUT);
                 }
                 () = tokio::time::sleep_until(poll), if fired.is_none() && self.budget.is_some() => {
                     poll = Instant::now() + BUDGET_POLL;
@@ -212,7 +219,7 @@ impl Turn {
                             "the turn spent the session's token budget; the ladder is ending it"
                         );
                         fired = Some(BUDGET_EXCEEDED);
-                        self.spawn_ladder(&session, BUDGET_EXCEEDED);
+                        self.spawn_ladder(&session, turn, BUDGET_EXCEEDED);
                     }
                 }
             }
@@ -232,8 +239,12 @@ impl Turn {
     /// [`TurnEnd::Aborted`]: the ladder asks the agent, and the agent's answer arrives as that future
     /// resolving. Nothing is cancelled and no server token is invented: the backend still decides how its
     /// turn ended.
-    fn spawn_ladder(&self, session: &Session, reason: &'static str) {
-        self.ladder().spawn(session.clone(), reason);
+    ///
+    /// `turn` is what keeps the spawned climb about this turn: the ladder compares it with the row before
+    /// it asks for anything and again before it stops a container, so a ladder that outlives its turn
+    /// cannot end the one after it (ADR-0020).
+    fn spawn_ladder(&self, session: &Session, turn: TurnGeneration, reason: &'static str) {
+        self.ladder().spawn(session.clone(), turn, reason);
     }
 
     /// The label a turn that settled over its ceiling carries, or `None` when it settled under it
