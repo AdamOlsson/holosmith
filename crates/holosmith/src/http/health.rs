@@ -53,9 +53,9 @@ const MAX_ANSWER: usize = 8 * 1024;
 ///
 /// **Its readers today are an operator's `curl` and the callers that take a peer's body as an [`Answer`] through
 /// [`parse_answer`]** — the parse is where a flag a later reader wants lands, and nothing reads it from there yet.
-/// No screen reads it yet either: the page already fetches this payload before either screen draws, so a screen
-/// that reports a drain costs no second request, but the header draws only the name, the version, the role and the
-/// uptime, and the app's `Health` carries this key for that screen rather than drawing it today.
+/// A screen reads it at the source instead of through the parse, and costs no second request: the page already
+/// fetches this payload before any screen draws, so `main.ts`'s `serviceSection` draws the drain from it and
+/// withholds the promote button while the bit is set.
 ///
 /// The eighth key is also the body's half of the expand/contract rule: [`Answer`] defaults it, so a hub probing a
 /// peer of the previous release reads a payload with seven keys and answers `false`.

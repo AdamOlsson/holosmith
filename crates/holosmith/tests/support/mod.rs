@@ -104,7 +104,7 @@ pub fn state() -> AppState {
         drain: Control::new(),
         merges: Merges::new(),
         tools: preflight::Tools::default(),
-        // The install tree and the promotion's programs: a test's own root, so the two `/api/update` routes answer
+        // The install tree and the promotion's programs: a test's own root, so the three `/api/update` routes answer
         // about a directory this process can write rather than about the account's real one. The config path is inside
         // the fixture for the same reason: a job is told `--config` explicitly, so leaving it to the default would name
         // the developer's own `~/.config/holosmith.toml` in the argv a test reads. Nothing in this state's tests starts

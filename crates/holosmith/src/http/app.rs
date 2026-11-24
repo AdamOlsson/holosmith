@@ -318,8 +318,8 @@ impl AppState {
         )
     }
 
-    /// The two `/api/update` routes' handle, wired to this state's install tree, the data root it serves from and the
-    /// programs a promotion runs.
+    /// The two `/api/update` routes that start and read the job, as one handle: this state's install tree, the data
+    /// root it serves from and the programs a promotion runs.
     ///
     /// Here for the same reason as the helpers above, and with one extra job of its own: **the data root is the
     /// config's**, not the install tree's — `[storage] data_dir` may move it — so the file a `GET` reads after the
@@ -591,6 +591,7 @@ pub fn router(state: AppState) -> Routes {
     let unsubscribe_state = Arc::clone(&state);
     let forward_state = Arc::clone(&state);
     let update_state = Arc::clone(&state);
+    let candidate_state = Arc::clone(&state);
     let promotion_state = Arc::clone(&state);
     let routes = Routes::new()
         .get("/api/health", move || {
@@ -832,17 +833,24 @@ pub fn router(state: AppState) -> Routes {
                 async move { hosts::remove(&state, &name, query).await }
             },
         )
-        // The **promotion** (ADR-0110): two routes on one path, and the first pair in this table whose subject is the
-        // machine itself rather than a session or a host. The `POST` starts a transient unit, so it is `Mutating` by
-        // construction and every guard applies to it; the `GET` reads a report file, so it is `ReadOnly`. Both are
-        // **in this table** and for no other reason protected: ADR-0010's four header checks and the trust check run
-        // on them because `App::new` wraps the whole table, and neither route adds a rule of its own — no login-header
-        // requirement, no owner check, no promoter credential (ADR-0110 D1). The refusals — the role, `[update]
-        // enabled`, the release tree, the candidate, the staleness token, a unit already running — are the handler's,
-        // and all of them are answered before anything is started.
+        // The **promotion** (ADR-0110): three routes on two paths, and the first set in this table whose subject is
+        // the machine itself rather than a session or a host. The `POST` starts a transient unit, so it is `Mutating`
+        // by construction and every guard applies to it; both `GET`s read — one a report file, one a checkout — so
+        // they are `ReadOnly`. All three are **in this table** and for no other reason protected: ADR-0010's four
+        // header checks and the trust check run on them because `App::new` wraps the whole table, and none adds a rule
+        // of its own — no login-header requirement, no owner check, no promoter credential (ADR-0110 D1). The
+        // refusals — the role, `[update] enabled`, the release tree, the candidate, the staleness token, a unit
+        // already running — are the handler's, and all of them are answered before anything is started.
         .get("/api/update", move || {
             let state = Arc::clone(&update_state);
             async move { update::last(&state).await }
+        })
+        // What a press would make live, so the page can draw the commit before there is a press. Read-only and a
+        // route of its own rather than a field on the one above: that one is polled while a job runs, and this costs
+        // five `git` children (ADR-0110).
+        .get("/api/update/candidate", move || {
+            let state = Arc::clone(&candidate_state);
+            async move { update::candidate(&state).await }
         })
         // The body is one `commit` and taken as a `Result` for the reason the create's is: a rejection axum would
         // answer in plain text becomes ADR-0008's `bad_body`.

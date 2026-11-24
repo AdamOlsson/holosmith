@@ -15,6 +15,12 @@
 //! The promotion half needs a real artifact (`dist/<triple>/holosmith`, a static ELF of this machine with a
 //! `version --json`), so the whole of it is skipped with one printed line on a tree that has not been built — the
 //! convention `tests/images.rs` and `tests/upgrade.rs` established.
+//!
+//! **One test is about a wire shape rather than a pass.** `http/update.rs`'s unit tests call `promotable`,
+//! `resolve_candidate` and `CandidateBody::of` directly, so none of them would fail if `GET /api/update/candidate`
+//! left the route table; the last test here builds that router over the same fixture checkout and reads the answer
+//! over a socket, which is also the only place the page's `Candidate` (`{source, commit, tag}`) is checked against
+//! what the machine sends.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -23,10 +29,12 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use axum::http::Method;
 use holosmith::commands::update;
-use holosmith::config::Config;
+use holosmith::config::{Config, Update};
 use holosmith::deploy::Root;
 use holosmith::http::health::Answer;
+use holosmith::http::{self, App, Guards, RouteKind};
 use holosmith::images::{self, Log};
 use holosmith::pass::{self, Options};
 use holosmith::promote::{self, DrainAnswer, Steps};
@@ -35,7 +43,10 @@ use holosmith::smoke;
 use serde_json::Value;
 
 mod support;
-use support::{TempDir, git, repository_on};
+use support::{Served, TempDir, fetch, git, head, repository_on, state_in};
+
+/// How long a served app waits for its sessions when a test stops it: no test here creates one.
+const GRACE: Duration = Duration::from_millis(100);
 
 /// One recorded call, in the order the pipeline made it.
 type Trace = Vec<String>;
@@ -808,6 +819,100 @@ fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
     );
     assert!(release.binary(&info.git_tag).is_file());
     assert_eq!(backups(&world).len(), 1, "{:?}", backups(&world));
+}
+
+/// The route the page reads the candidate from: in the manifest as a `GET`/`ReadOnly`, answering the two refusals a
+/// press would get and then `{source, commit, tag}`.
+///
+/// Three machines, one per state, each with its own `TempDir`: one directory holds one `app.db`, and ADR-0009's lock is
+/// the reason two states in one process never share a path.
+#[tokio::test]
+async fn the_candidate_route_is_read_only_and_answers_the_pages_three_fields() {
+    // A machine that has not opted in. `[update] enabled` is `false` by default, which is the state an upgrade leaves
+    // a machine in — the one where the route must exist and refuse rather than be absent.
+    let off = TempDir::new("update-candidate-off");
+    let machine = state_in(&off, candidate_config(&off, None));
+    assert!(
+        !machine.config.update.enabled,
+        "the fixture opted in, so it no longer measures a machine that has not"
+    );
+
+    let app = App::new(
+        http::router(machine.clone()),
+        Guards::from_config(&machine.config),
+    );
+    let entry = app
+        .manifest()
+        .iter()
+        .find(|entry| entry.path == "/api/update/candidate")
+        .expect("`GET /api/update/candidate` is not in the route table: the page reads a route nothing serves");
+    assert_eq!(entry.method, Method::GET);
+    assert_eq!(entry.kind, RouteKind::ReadOnly);
+
+    let served = Served::start(http::router(machine.clone()), GRACE).await;
+    let refused = fetch(served.addr, "/api/update/candidate").await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert_eq!(code_of(&refused.body), "update_disabled");
+    served.finish().await.expect("the server stops");
+
+    // A server that opted in with no `[update] source`: the press's own `404`, so the page has a sentence and no
+    // button.
+    let on = TempDir::new("update-candidate-no-source");
+    let mut config = candidate_config(&on, None);
+    config.update.enabled = true;
+    let served = Served::start(http::router(state_in(&on, config)), GRACE).await;
+    let refused = fetch(served.addr, "/api/update/candidate").await;
+    assert_eq!(refused.status, 404, "{}", refused.body);
+    assert_eq!(code_of(&refused.body), "no_candidate");
+    served.finish().await.expect("the server stops");
+
+    // The same server naming a clean `master` checkout: exactly the three fields the page's `Candidate` carries, with
+    // the commit the release directory will name and the tag `git describe` gives it.
+    let ready = TempDir::new("update-candidate");
+    let source = ready.file("source");
+    repository_on(&source, "master");
+    let commit = head(&source);
+    let tag = git(&source, &["describe", "--tags", "--always"]);
+    let mut config = candidate_config(&ready, Some(source.clone()));
+    config.update.enabled = true;
+    let served = Served::start(http::router(state_in(&ready, config)), GRACE).await;
+    let answer = fetch(served.addr, "/api/update/candidate").await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let body: Value = serde_json::from_str(&answer.body).expect("the candidate is one JSON object");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "source": source.display().to_string(),
+            "commit": commit,
+            "tag": tag,
+        }),
+        "the route's answer is not the page's `Candidate` (`web/src/service.ts`)"
+    );
+    served.finish().await.expect("the server stops");
+}
+
+/// A machine's config for the candidate route: its own data root and projects root, and `[update] source` when the test
+/// names one. The switch is left off, which is the default.
+fn candidate_config(dir: &TempDir, source: Option<PathBuf>) -> Config {
+    Config {
+        data_root: dir.file("data"),
+        projects_root: dir.file("projects"),
+        control_listen: "127.0.0.1:1".parse().expect("a valid address"),
+        update: Update {
+            enabled: false,
+            source,
+        },
+        ..Config::default()
+    }
+}
+
+/// The `code` a refusal's envelope carries.
+fn code_of(body: &str) -> String {
+    let value: Value = serde_json::from_str(body).expect("a refusal is one JSON object");
+    value["code"]
+        .as_str()
+        .expect("a refusal carries a code")
+        .to_string()
 }
 
 /// The gate's own path, as the report and a refusal name it.

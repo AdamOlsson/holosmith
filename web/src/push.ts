@@ -21,6 +21,12 @@ export const SETTINGS_PATH = "/settings";
 // and a path spelled in two places is a link that 404s on one of them.
 export const COMPUTERS_PATH = "/computers";
 
+// The Service screen: this machine's own, and the one the Computers card links to. A path like the two above rather
+// than a route: the app shell is answered for every non-`/api/` path (ADR-0007), so nothing on the server names it —
+// and it is the screen the Computers card links to and the header lists, which is the only pair of places that need
+// the word.
+export const SERVICE_PATH = "/service";
+
 // The two push routes built. The page never spells either anywhere else.
 export const SUBSCRIBE_PATH = "/api/push/subscribe";
 
@@ -348,15 +354,17 @@ export const PER_MACHINE_SENTENCE =
 // rather than in the DOM.
 //
 // One link per **other** screen, and never one to the page you are on: a link to the page you are reading is a
-// no-op the operator has to read before ignoring it. Since there are three screens — the
-// sessions list at `/`, the Computers screen at `COMPUTERS_PATH`, and this one — so the header carries two links
-// where it carried one, and this is the reason `case_pwa`'s `id="nav-link"` needle became a class name.
+// no-op the operator has to read before ignoring it. Four screens are listed — the sessions list at `/`, the
+// Computers screen at `COMPUTERS_PATH`, this machine's Service screen at `SERVICE_PATH` and the notifications at
+// `SETTINGS_PATH` — so the header carries three links, and this is the reason `case_pwa`'s `id="nav-link"` needle
+// became a class name. A session's own page is not in the list: it is reached from a row.
 export type NavLink = { href: string; label: string };
 
 // Every screen the app serves, in the order the header lists them.
 export const SCREENS: readonly NavLink[] = [
   { href: "/", label: "Sessions" },
   { href: COMPUTERS_PATH, label: "Computers" },
+  { href: SERVICE_PATH, label: "Service" },
   { href: SETTINGS_PATH, label: "Notifications" },
 ];
 

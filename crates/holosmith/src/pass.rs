@@ -42,7 +42,7 @@
 //! **The routes and the page.** `GET /api/update` answers [`Report`]'s own JSON — the file this module writes — plus
 //! the log's last lines, which is why the type is here and not in the command surface. `POST /api/update` starts this
 //! command as a transient unit and writes nothing itself: the report is the job's, so the route cannot lie about a
-//! job it did not start. The page is a later change's.
+//! job it did not start. The page that reads both is the app's (`web/src/service.ts`).
 //!
 //! **The launcher.** [`crate::update`] starts a command line as a transient user unit and has no opinion about what
 //! runs behind it; a route passes this command's argv there. Nothing here asks systemd anything.

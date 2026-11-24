@@ -23,10 +23,22 @@ operator's authority.
 **What has landed since, and what has not.** The candidate resolver (`candidate::resolve`, `[update] source`), the
 launcher (`update::start`, the transient user unit), the verb (`holosmith update`, which is one pass of the gate and
 then `promote`'s pipeline, with the free-space check in front of it and one JSON report behind it), the digest line
-in `scripts/build.sh`, and the two routes (`POST /api/update` and `GET /api/update`, the second answering the report
-file and the log after the restart the job performs) are in the tree. The page and the button are not: D1's authority is
-what the routes carry, and nothing in the app presses them yet, so the sections below that answer questions those
-changes own still say so rather than pretending the tree already does.
+in `scripts/build.sh`, and the three routes — `POST /api/update`, `GET /api/update`, which answers the report file and
+the log after the restart the job performs, and `GET /api/update/candidate`, which says what a press would make live
+before there is a press — are in the tree, and so are the **page and the button**: the app's **Service** screen at
+`/service`, which draws the live version, whether the machine is draining, `master`'s commit and tag, one button with
+the wait it starts stated before the press, and the job's own lines while it runs and its ending when it stops.
+
+The screen is a screen of its own and not a card on the **Computers** screen, which owns "what is this machine
+running" for every machine and this one included: a promotion's job prints for three quarters of an hour and its lines
+do not fit in a card, so this machine's card gained **one sentence and a link** to the screen and nothing else. That is
+the placement this ADR owes the app a sentence about, and it is the whole of what it costs the card. The candidate is a
+route of its own rather than a field on `GET /api/update` because that one is polled while a job runs and the candidate
+is five `git` children: a field there would make every poll five processes, and the report's own `candidate` is the
+commit a run was *about*, not the commit a press would make live now.
+
+What is still **not** in the tree is a measurement of the whole path: no promotion has been started from a browser, and
+the sections below that answer questions those changes own still say so rather than pretending otherwise.
 
 ## Superseded in part: ADR-0060 D2, and ADR-0082 D2's review gate
 
@@ -393,18 +405,19 @@ so the repair is read once the gate has started rather than instead of it.
   this machine: ADR-0082's own limit applies unchanged — `systemctl` is a child the gate stands in for, and a real unit
   booting a real release is not measured here. So D4's mechanism is decided from the unit's directives and not from a
   run.
-- **A promotion started from a browser, end to end.** The two routes are in the tree and no promotion has been started
-  through them: the answer shapes and the refusals are a unit test's, and `systemd-run` is not on this machine to run a
-  real start at all. What has been run is the gate in a container (ADR-0109, whose acceptance is a full green
+- **A promotion started from a browser, end to end.** The three routes are in the tree and no promotion has been started
+  through them: the answer shapes and the refusals have tests behind them, and `systemd-run` is not on this machine to
+  run a real start at all. What has been run is the gate in a container (ADR-0109, whose acceptance is a full green
   in-container run) and the pipeline behind `holosmith upgrade` (ADR-0082's cases), which are the two halves this ADR
   joins.
 - **The Docker behaviour behind "a running container holds its layers."** `case_server_images` untagging the image the
   gate itself runs in has not happened in a promotion yet; it happens in every in-container gate whose candidate shares
   the running release's version, and a run that finishes is what would measure it.
 - **The source tree's config key.** `[update] source` names the checkout now, with a validator and a row in
-  `docs/config.md`, and `candidate::resolve` is its one reader. What is still unmeasured is the transition a page makes
-  between rendering a commit and a press that promotes it: `POST /api/update` carries the commit and compares it with
-  `master`'s, and no test drives that comparison over a socket yet.
+  `docs/config.md`, and `candidate::resolve` is its one reader — reached from three places, which is the point of the
+  candidate route: the job's own first step (`pass::pass`), `GET /api/update/candidate` rendering it for the page, and
+  `POST /api/update` re-resolving it to compare a press's token against `master`'s now. What is still unmeasured is
+  that transition end to end: no test drives the comparison over a socket yet, and none presses the button.
 - **A pass of the gate end to end.** `holosmith update` is measured by a fixture tree whose `scripts/verify-in-container.sh`
   records its argv and answers the exit code the test chooses, so the four steps, the exit-code translation and the
   report are facts about the command — and the run that is the point of D2, a green gate on a real machine promoting the
