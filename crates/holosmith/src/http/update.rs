@@ -1,15 +1,28 @@
-//! `POST /api/update` and `GET /api/update`: a promotion started from a request, and the last one read back
-//! (ADR-0110).
+//! `POST /api/update`, `GET /api/update` and `GET /api/update/candidate`: a promotion started from a request, the
+//! last one read back, and the commit a press would make live (ADR-0110).
 //!
-//! The app's Service screen needs two things the route table did not have: a way to **start** a job, and a way to see
+//! The app's Service screen needs three things the route table did not have: a way to **start** a job, a way to see
 //! how it is going **after the process that served the request has been replaced** — which a promotion does on
-//! purpose, because its last step restarts the unit it runs under. So the two routes are one pair:
+//! purpose, because its last step restarts the unit it runs under — and a way to name the commit a press would make
+//! live **before** there is one. So the three routes are one set:
 //!
 //! - `start` refuses what it can refuse, starts [`crate::update::start`]'s transient unit, and answers
 //!   `202 {job, since}`. It writes no file: the job owns its report, and a route that seeded one could claim a run it
 //!   did not start.
 //! - `last` answers the **report file and the log** and nothing else, which is why it keeps answering across the
 //!   restart: both are under the data root, and neither is in this process's memory.
+//! - `candidate` answers the checkout a press would build — `{source, commit, tag}` — or the refusal a press would
+//!   get, so the page can draw the commit it is offering and send that same commit back.
+//!
+//! # Why the candidate is a route of its own
+//!
+//! Because `last` is **polled while a job runs** — every few seconds, for the three quarters of an hour a gate takes
+//! — and the candidate is [`candidate::resolve`]'s five `git` children. A field on `last` would make every poll five
+//! processes, and it would answer a question the report's file cannot hold: a report's own `candidate` is the commit
+//! a run was **about**, not the commit a press would make live now. Those are the two ends of the staleness token
+//! [`candidate::Candidate::stale`] compares, and a page that rendered the report's would send a commit `master` may
+//! have left behind. So the report gains nothing, `last` keeps its shape, and a page reads the candidate once and the
+//! job as often as it likes.
 //!
 //! # The POST's refusals, in the order they are asked
 //!
@@ -24,6 +37,10 @@
 //! 5. **the candidate** — [`crate::candidate::resolve`]'s five `git` reads, off the request's task: no candidate at
 //!    all is `404 no_candidate`, one sentence per shape, each naming the command that repairs it;
 //! 6. **the token** — the request's `commit` against `master`'s now: `422 stale_candidate` naming both commits.
+//!
+//! `GET /api/update/candidate` asks 2, 3 and 5, in that order and with those answers, because a page told "here is
+//! what a press would do" by a machine that would refuse the press would be drawing a button for a `403`.
+//! [`promotable`] is the one spelling of 2 and 3 and [`resolve_candidate`] of 5, so the two routes cannot drift.
 //!
 //! Then, and only then, the unit starts. **No digest is echoed and no acknowledgement is taken**: the gate is the
 //! acknowledgement (ADR-0110 D2), so a request carrying a digest would be a client vouching for bytes this machine
@@ -62,18 +79,20 @@
 //!
 //! # The one layer, and no rule of its own
 //!
-//! Both routes sit in [`crate::http::router`]'s one table, so ADR-0010's four header checks and the trust check apply
-//! to them because `App::new` wraps the whole table and for no other reason — no hand-written guard, and no entry in
-//! `is_guard_exempt`. The `POST` adds **no rule the merge route does not already have** (ADR-0110 D1): no login
-//! header, no owner check beyond the configured one, no promoter credential. The authority is the tailnet.
+//! All three routes sit in [`crate::http::router`]'s one table, so ADR-0010's four header checks and the trust check
+//! apply to them because `App::new` wraps the whole table and for no other reason — no hand-written guard, and no
+//! entry in `is_guard_exempt`. The `POST` adds **no rule the merge route does not already have** (ADR-0110 D1): no
+//! login header, no owner check beyond the configured one, no promoter credential. The authority is the tailnet.
 //!
 //! # What this module does not decide
 //!
 //! **The gate, the space it needs and the promotion.** [`crate::pass`] runs the gate and checks the candidate's
-//! filesystem for room before it starts one; this module starts that command and reads what it wrote. **The page** is
-//! another change's. So is refusing a candidate whose `Cargo.lock` the running release's image cannot build: today
-//! the gate answers `3` and [`crate::pass::Verdict::StaleCrateSet`] turns it into the host act's sentence, and
-//! nothing refuses it before the unit is spawned.
+//! filesystem for room before it starts one; this module starts that command and reads what it wrote. **The page's
+//! sentences** are the app's (`web/src/service.ts`): what a disabled button says and how a job's lines are drawn are
+//! the browser's to decide, and nothing here spells a sentence a page shows. Neither does anything here refuse a
+//! candidate whose `Cargo.lock` the running release's image cannot build: today the gate answers `3` and
+//! [`crate::pass::Verdict::StaleCrateSet`] turns it into the host act's sentence, and nothing refuses it before the
+//! unit is spawned.
 
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
@@ -89,7 +108,7 @@ use serde_json::{Value, json};
 
 use crate::candidate;
 use crate::clock;
-use crate::config::Role;
+use crate::config::{Config, Role};
 use crate::deploy::{Root, Tools};
 use crate::http::AppState;
 use crate::http::error::{ApiError, internal};
@@ -247,28 +266,19 @@ pub(crate) async fn start(state: &AppState, body: Result<Bytes, BytesRejection>)
         Ok(commit) => commit,
         Err(error) => return error.into_response(),
     };
-    // The role first, for the create's reason: a machine that starts no promotion for itself makes the questions
-    // after this unnecessary, and the client's next step is the sentence's (a server, through this machine's forward
-    // route).
-    if state.config.role == Role::Hub {
-        return ApiError::hub_cannot_promote().into_response();
-    }
-    // Then the machine's switch. `false` by default, so a release that carries this route cannot hand a phone a
-    // restart button by accident (ADR-0110 D1).
-    if !state.config.update.enabled {
-        return ApiError::update_disabled().into_response();
+    // The role and then the machine's switch, before anything about a tree is asked: a machine that starts no
+    // promotion for itself makes every question after these unnecessary, and a machine that has not opted in cannot
+    // hand a phone a restart button by accident (ADR-0110 D1).
+    if let Some(refusal) = promotable(&state.config) {
+        return refusal.into_response();
     }
     let promotion = state.updater();
     if let Some(refusal) = promotion.not_deployed() {
         return refusal.into_response();
     }
-    // The candidate is five `git` children, so it goes to the blocking pool: a request path must not park a runtime
-    // worker on one, and the config is cloned for it the way the host registry's probe clones it.
-    let config = state.config.clone();
-    let candidate = match tokio::task::spawn_blocking(move || candidate::resolve(&config)).await {
-        Ok(Ok(candidate)) => candidate,
-        Ok(Err(refusal)) => return ApiError::no_candidate(refusal.to_string()).into_response(),
-        Err(error) => return internal("update candidate", error).into_response(),
+    let candidate = match resolve_candidate(&state.config).await {
+        Ok(candidate) => candidate,
+        Err(error) => return error.into_response(),
     };
     // The token, not a vouch: the page rendered `master`'s commit and the request carried it back, so this refuses a
     // press about a tree that moved while the page was open.
@@ -309,6 +319,77 @@ pub(crate) async fn last(state: &AppState) -> Response {
         // A file this machine wrote and cannot read back is a machine problem: the detail goes to the log, and the
         // client gets ADR-0008's one sentence.
         Err(Reading::Broken(said)) => internal("update report", said).into_response(),
+    }
+}
+
+/// Answer `GET /api/update/candidate`: the commit a press would make live, or the refusal a press would get.
+///
+/// It asks the same questions the `POST` asks, in the same order and of the same functions — [`promotable`] and then
+/// [`resolve_candidate`] — because a page that was told "here is what a press would do" by a machine that would refuse
+/// the press would be drawing a button for a `403`. The release tree is **not** one of them: a machine that has not
+/// deployed has nothing to *switch*, which is a fact about a press, and the page's job is to say what the candidate
+/// is.
+///
+/// It is a route rather than a field on `GET /api/update` for the reason the module's header gives: that `GET` is
+/// polled while a job runs, and this answer costs five `git` children.
+pub(crate) async fn candidate(state: &AppState) -> Response {
+    if let Some(refusal) = promotable(&state.config) {
+        return refusal.into_response();
+    }
+    match resolve_candidate(&state.config).await {
+        Ok(candidate) => (StatusCode::OK, Json(CandidateBody::of(&candidate))).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The two questions a promotion asks before it reads any file: the role, and then the machine's switch.
+///
+/// One function because two routes ask them — the `POST` before it looks at the release tree, and the `GET
+/// /api/update/candidate` before it looks at the checkout — and because the order is the answer: a `hub` is refused
+/// as a `hub` whatever its config says, since a hub has no release tree and no Docker for the gate's container.
+fn promotable(config: &Config) -> Option<ApiError> {
+    if config.role == Role::Hub {
+        return Some(ApiError::hub_cannot_promote());
+    }
+    (!config.update.enabled).then(ApiError::update_disabled)
+}
+
+/// The commit a promotion would make live, or the `404 no_candidate` a press would answer.
+///
+/// [`candidate::resolve`] is five `git` children, so it goes to the blocking pool: a request path must not park a
+/// runtime worker on one, and the config is cloned for it the way the host registry's probe clones it.
+async fn resolve_candidate(config: &Config) -> Result<candidate::Candidate, ApiError> {
+    let config = config.clone();
+    match tokio::task::spawn_blocking(move || candidate::resolve(&config)).await {
+        Ok(Ok(candidate)) => Ok(candidate),
+        Ok(Err(refusal)) => Err(ApiError::no_candidate(refusal.to_string())),
+        Err(error) => Err(internal("update candidate", error)),
+    }
+}
+
+/// What `GET /api/update/candidate` answers: a [`candidate::Candidate`] with its checkout rendered.
+///
+/// The three fields are the candidate's own, and `source` is a `String` rather than the `PathBuf` it is: a checkout
+/// whose path is not valid UTF-8 is one `[update] source` this tree accepts, and `Path`'s `Serialize` errors on it —
+/// which would turn a `GET` into a `500` rather than an answer about a tree. The `GET /api/update` renders the log's
+/// path the same way and for the same reason.
+#[derive(Debug, Serialize)]
+struct CandidateBody {
+    /// The checkout `[update] source` names, as it prints.
+    source: String,
+    /// `master`'s commit: the token a press carries back, so a tree that moved is a `422` and not a promotion.
+    commit: String,
+    /// `git describe --tags --always`'s answer: the name `releases/<tag>/` will get.
+    tag: String,
+}
+
+impl CandidateBody {
+    fn of(candidate: &candidate::Candidate) -> Self {
+        Self {
+            source: candidate.source.display().to_string(),
+            commit: candidate.commit.clone(),
+            tag: candidate.tag.clone(),
+        }
     }
 }
 
@@ -720,5 +801,154 @@ mod tests {
             !ApiError::bad_update_body().body.message.contains("digest"),
             "the sentence offers a field the request must not carry"
         );
+    }
+
+    /// The candidate route asks the same first two questions as the `POST`, in the same order: the role, then the
+    /// switch. A hub is a hub whatever its config says, and a machine that has not opted in is refused as one — the two
+    /// are different sentences with one code, which is why the order is measured by which sentence comes back.
+    #[test]
+    fn the_role_is_asked_before_the_switch() {
+        use crate::http::error::UPDATE_DISABLED;
+        let off = Config::default();
+        assert!(!off.update.enabled, "the switch is on by default");
+
+        let refused =
+            promotable(&off).expect("a machine that has not opted in refuses a promotion");
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.body.code, UPDATE_DISABLED);
+        assert_eq!(
+            refused.body.message,
+            ApiError::update_disabled().body.message
+        );
+
+        let hub = Config {
+            role: Role::Hub,
+            ..Config::default()
+        };
+        let refused = promotable(&hub).expect("a hub refuses a promotion");
+        assert_eq!(
+            refused.body.message,
+            ApiError::hub_cannot_promote().body.message,
+            "a hub with `[update] enabled = false` was refused as a config rather than as a hub"
+        );
+
+        let server = Config {
+            role: Role::Server,
+            update: crate::config::Update {
+                enabled: true,
+                source: None,
+            },
+            ..Config::default()
+        };
+        assert!(
+            promotable(&server).is_none(),
+            "a server that turned the switch on is refused before its candidate is read"
+        );
+    }
+
+    /// The candidate's own three fields, and a checkout whose path is not UTF-8 answered rather than panicked on: the
+    /// `Path`'s `Serialize` errors on one, which would turn a `GET` into a `500` about a tree that is fine.
+    #[test]
+    fn the_candidate_is_three_fields_and_a_path_that_is_not_utf8_is_still_an_answer() {
+        use std::os::unix::ffi::OsStringExt;
+        let candidate = candidate::Candidate {
+            source: PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b's', 0xff])),
+            commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c".to_string(),
+            tag: "v0.1.0".to_string(),
+        };
+        let answer =
+            serde_json::to_value(CandidateBody::of(&candidate)).expect("the body serializes");
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "source": candidate.source.display().to_string(),
+                "commit": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+                "tag": "v0.1.0",
+            })
+        );
+        assert!(
+            answer["source"].is_string(),
+            "the checkout is not a string: {}",
+            answer["source"]
+        );
+    }
+
+    /// A clean `master` checkout is the candidate the route answers, and a machine whose `[update] source` names no
+    /// checkout is the `404` a press would get. Three `git` children of the test's own rather than `tests/support`'s
+    /// helpers: this is the route's mapping, and the `POST`'s own surface is measured in `tests/update.rs`.
+    #[tokio::test]
+    async fn a_clean_master_checkout_is_the_candidates_commit_and_tag() {
+        use crate::http::error::NO_CANDIDATE;
+        let directory = crate::sql::guard::TempDir::new("update-candidate");
+        let source = directory.path().join("src");
+        std::fs::create_dir_all(&source).expect("a checkout directory");
+        git(&source, &["init", "--quiet", "-b", "master"]);
+        git(
+            &source,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "the first commit",
+            ],
+        );
+        let config = Config {
+            role: Role::Server,
+            update: crate::config::Update {
+                enabled: true,
+                source: Some(source.clone()),
+            },
+            ..Config::default()
+        };
+
+        let candidate = resolve_candidate(&config)
+            .await
+            .expect("a clean checkout on `master` is a candidate");
+        assert_eq!(candidate.source, source);
+        assert_eq!(candidate.commit, git(&source, &["rev-parse", "HEAD"]));
+        assert_eq!(
+            candidate.tag,
+            git(&source, &["describe", "--tags", "--always"]),
+            "the tag is not the one the release directory will be named after"
+        );
+
+        // No `[update] source` at all: the press's own `404`, with the refusal's sentence rather than a new one.
+        let error = resolve_candidate(&Config {
+            role: Role::Server,
+            ..Config::default()
+        })
+        .await
+        .expect_err("a machine with no source has no candidate");
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.body.code, NO_CANDIDATE);
+        assert_eq!(
+            error.body.message,
+            candidate::Refusal::NoCandidate.to_string(),
+            "the route worded the refusal itself"
+        );
+    }
+
+    /// `git` in a test's own directory, with an identity on every call so a commit needs no repository configuration.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=holosmith-test",
+                "-c",
+                "user.email=test@example",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }

@@ -18,6 +18,7 @@ import {
   IOS_INSTALL_SENTENCE,
   PER_MACHINE_SENTENCE,
   COMPUTERS_PATH,
+  SERVICE_PATH,
   SETTINGS_PATH,
   SUBSCRIBE_PATH,
   UNKNOWN_KIND,
@@ -351,7 +352,7 @@ test("the machine's row names the machine and whether it is subscribed", () => {
 });
 
 test("the header offers every other screen and never itself", () => {
-  // Three screens, so two links on every page — and one fewer than the screens on each.
+  // Four screens, so three links on every page — and one fewer than the screens on each.
   for (const screen of SCREENS) {
     const links = navLinks(screen.href);
     assert.equal(links.length, SCREENS.length - 1, screen.href);
@@ -372,12 +373,13 @@ test("the header offers every other screen and never itself", () => {
   for (const pathname of [`/sessions/${ID}`, `/hosts/workshop/sessions/${ID}`, "/nonsense"]) {
     assert.deepEqual(
       navLinks(pathname).map((link) => link.href),
-      ["/", COMPUTERS_PATH, SETTINGS_PATH],
+      ["/", COMPUTERS_PATH, SERVICE_PATH, SETTINGS_PATH],
       pathname,
     );
   }
   assert.deepEqual(navLinks("/"), [
     { href: COMPUTERS_PATH, label: "Computers" },
+    { href: SERVICE_PATH, label: "Service" },
     { href: SETTINGS_PATH, label: "Notifications" },
   ]);
 });
@@ -385,10 +387,11 @@ test("the header offers every other screen and never itself", () => {
 test("the routes the page spells are the ones the server serves", () => {
   assert.equal(SETTINGS_PATH, "/settings");
   assert.equal(SUBSCRIBE_PATH, "/api/push/subscribe");
-  // The Computers screen is the fourth, and it is a path the fallback answers with the app shell like the rest
-  // (ADR-0007) — a route nothing registered, so the page's own path is all that names it.
+  // The Computers and Service screens are paths the fallback answers with the app shell like the rest (ADR-0007) — a
+  // route nothing registered, so the page's own path is all that names them.
   assert.equal(COMPUTERS_PATH, "/computers");
-  assert.equal(SCREENS.length, 3);
+  assert.equal(SERVICE_PATH, "/service");
+  assert.equal(SCREENS.length, 4);
   // No two screens share a path: two links to one page is one link too many, and `navLinks` filters by value.
   assert.equal(new Set(SCREENS.map((screen) => screen.href)).size, SCREENS.length);
 });

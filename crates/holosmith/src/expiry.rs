@@ -301,7 +301,7 @@ mod tests {
                 drain: crate::drain::Control::new(),
                 merges: Merges::new(),
                 tools: Tools::default(),
-                // The two `/api/update` routes' wiring, which nothing in this pass reads: the state is one value and
+                // The three `/api/update` routes' wiring, which nothing in this pass reads: the state is one value and
                 // this test's subject is the expiry's decision about a row.
                 root: crate::deploy::Root::resolve(Some(dir.0.clone()), None),
                 deploy: crate::deploy::Tools::default(),

@@ -296,8 +296,27 @@ that instead of asking. This machine is always the first card, and its own start
 `hub`. Its
 rules are `web/src/transcript.ts`'s functions — among them `apiPath`, `hostRef`, `sessionCounts`, `skewNote`,
 `reachText`, `lastCheckText`, `hostFailure` and `createOffered` — with tests in `web/test/transcript.test.ts`, and its
-DOM is `main.ts`'s `computersSection`.
+DOM is `main.ts`'s `computersSection`. This machine's own card carries one sentence and a link to the **Service
+screen**, and nothing else about the service: what is running is a card's fact, and a promotion's job is a screen's.
 _Avoid_: Machines page, hosts page, fleet view, nodes
+
+**Service screen**:
+The app's screen for **this** machine's own service, at `/service`: the version it is running, whether it is
+**draining**, the **candidate** (`master`'s commit and tag, or the refusal's own sentence when there is none), one
+promote button, and the job — its last lines while it runs and its ending when it stops. It is a screen of its own
+rather than a card on the **Computers** screen even though that one owns "what is this machine running" for every
+machine, because a promotion's job prints for about 45 minutes and its lines do not fit in a card: this machine's card
+carries one sentence and a link here instead. The button is drawn and disabled rather than hidden, with the sentence
+that says why (a hub, a job already under way, a draining machine, or the API's own refusal — the **Composer**'s
+affordance rule, one screen over), and the wait is stated **before** the press; a press sends the commit the page
+rendered, so a `master` that moved while the page was open is a `422` and not a promotion nobody saw. Its two reads are
+`GET /api/update/candidate` and `GET /api/update`, the second polled while a job is under way; a report whose `since`
+is before the press's own `202` is the previous run and is not rendered as this one.
+Its rules are `web/src/service.ts`'s — `promoteOffered`, `candidateText`, `endingText`, `jobHead`, `jobLines`,
+`isThisRun` — with tests in `web/test/service.test.ts`, its DOM is `main.ts`'s `serviceSection`, and its path is
+`push.ts`'s `SERVICE_PATH`. A `hub` has no service of its own: it answers `GET /api/update/candidate` `403`, and
+`GET /api/update` `404` until a job of this release has written a report.
+_Avoid_: Update screen, deploy screen, promote page, release page
 
 **Composer**:
 The session screen's box of guidance and the four actions it offers: prompt, steer, abort and resume. Which of the four exist is the state's (`affordances`): prompt on `idle`, steer and abort on `running`, resume on `stopped` and `error`, and none on `starting` or `deleting`.

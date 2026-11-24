@@ -1,4 +1,4 @@
-// The app shell: two screens that share one header and one stream. `/` is the machine's health, the
+// The app shell: the screens that share one header and one stream. `/` is the machine's health, the
 // session list and the new-session form; `/sessions/<id>` is one session with its live transcript
 // Every value either screen shows came from a response or from a stream frame, so a
 // reconnect has nothing to reconcile and there is no cache to invalidate (ADR-0017). The one value
@@ -105,6 +105,7 @@ import {
 import {
   COMPUTERS_PATH,
   PER_MACHINE_SENTENCE,
+  SERVICE_PATH,
   SETTINGS_PATH,
   installSentence,
   isIos,
@@ -120,6 +121,29 @@ import {
   type PushFacts,
   type PushState,
 } from "./push";
+import {
+  CANDIDATE_PATH,
+  POLL_INTERVAL_MS,
+  PROMOTE_LABEL,
+  PROMOTE_WAIT,
+  SERVICE_CARD_SENTENCE,
+  SERVICE_LINK_LABEL,
+  UPDATE_PATH,
+  candidateFacts,
+  candidateText,
+  detailText,
+  drainText,
+  endingText,
+  jobHead,
+  jobLines,
+  jobRunning,
+  liveText,
+  isThisRun,
+  promoteBody,
+  promoteOffered,
+  type Candidate,
+  type Report,
+} from "./service";
 
 type Health = {
   name: string;
@@ -135,7 +159,8 @@ type Health = {
   machine_name: string;
   // The origin a session's preview is served on: the listener's own origin, never the control one.
   preview_origin: string;
-  // Whether this machine is refusing new work while it waits for its turns and a restart. Nothing draws it yet.
+  // Whether this machine is refusing new work while it waits for its turns and a restart. The Service screen draws it
+  // beside the version, and withholds the promotion button while it is set.
   draining: boolean;
 };
 
@@ -731,9 +756,9 @@ function noCreateSection(): HTMLElement {
 }
 
 // The header every screen shares: the machine's own facts, and the links between the screens. Which links exist is
-// `push.ts`'s `navLinks` rule — one per screen other than this one — so a fourth screen is a row in `SCREENS` and
+// `push.ts`'s `navLinks` rule — one per screen other than this one — so another screen is a row in `SCREENS` and
 // not a branch here, and `case_pwa` sees the class in the served bundle. The links carry a **class** and no id
-// three screens mean two links on every page, and an id two elements share is not an id.
+// four screens mean three links on every page, and an id two elements share is not an id.
 function header(health: Health, navs: NavLink[]): HTMLElement {
   const element = make("header", "machine");
   const nav_ = make("nav", "machine-nav");
@@ -910,6 +935,18 @@ function machineCard(
     section.append(start, confirm, forced, notice);
   }
 
+  // This machine's own service, one sentence and the link to the screen that draws it (ADR-0110 D2's placement: a
+  // job's lines while it runs do not fit in a card, so the card says what the screen is for and the screen is where
+  // the button is). Only this machine's card: a peer's card is a peer's, and a promotion is asked of the machine it
+  // would restart.
+  if (host === LOCAL_HOST) {
+    const service = make("p", "computer-service");
+    const link = make("a", "computer-service-link", SERVICE_LINK_LABEL);
+    link.href = SERVICE_PATH;
+    service.append(make("span", "", SERVICE_CARD_SENTENCE), link);
+    section.append(service);
+  }
+
   card.append(section);
 
   // This machine's own facts are the ones the page already fetched, so its card is complete before it is drawn —
@@ -1038,6 +1075,194 @@ function computersSection(health: Health, rows: HostRow[]): HTMLElement {
     })();
   });
   section.append(make("h2", "", "Add a machine"), form, error);
+  return section;
+}
+
+// ---- the Service screen (ADR-0110) -----------------------------------------------------------
+
+// This machine's own service: the version it is running, the commit a promotion would make live, the one button, and
+// the job's lines while it runs.
+//
+// Every sentence is `service.ts`'s and every branch that matters is a rule there, which is what lets `npm test` see
+// them without a browser. This function turns those answers into nodes; the only state it keeps is the page's own —
+// the machine's facts, the `202`'s `since` while it waits for a report of its own, and the poll's one timer. The
+// candidate is read once, at the load: it is five `git` children on the machine, and a promotion makes the commit a
+// press sent live rather than moving `master`. The machine's facts are the ones that move, so they are read again
+// when a job **stops** being under way and never on a poll that finds it running (`poll` says why).
+function serviceSection(
+  health: Health,
+  candidate: Answer<Candidate>,
+  report: Answer<Report>,
+): HTMLElement {
+  const section = make("section", "service");
+  section.id = "service";
+  const facts = candidateFacts(candidate);
+  // What this machine answered about itself, and the two lines its version and its drain decide. Both are kept as
+  // nodes and redrawn from `machine` on every `draw()`: the load's answer is a fact about the process that served the
+  // page, and a promotion replaces that process — so a sentence appended once here would print the version the press
+  // was made against for the rest of the page's life, and would never say a machine was left draining.
+  let machine = health;
+  const live = make("p", "service-live");
+  const drain = make("p", "service-drain");
+  section.append(make("h2", "", "Service"), live, drain, make("p", "service-candidate", candidateText(facts)));
+
+  // The press: the sentence that says what it will do and how long it takes, the button, and the sentence that says
+  // why it is off while it is.
+  const press = make("button", "", PROMOTE_LABEL);
+  press.type = "button";
+  press.id = "service-promote";
+  const wait = make("p", "service-wait", PROMOTE_WAIT);
+  wait.id = "service-wait";
+  const why = make("p", "service-why");
+  why.id = "service-why";
+  const notice = make("p", "error");
+  notice.id = "service-notice";
+  notice.hidden = true;
+  section.append(press, wait, why, notice);
+
+  // The job: its heading, its own last lines, and its ending. The lines are one text node in a `<pre>` — a build's
+  // output is text and never markup — and the detail keeps the refusal's own newlines, because it carries the gate's
+  // last lines inside its one sentence.
+  const job = make("div", "service-job");
+  job.id = "service-job";
+  const heading = make("p", "service-job-head");
+  const lines = make("pre", "service-lines");
+  lines.id = "service-lines";
+  const ending = make("p", "service-ending");
+  ending.id = "service-ending";
+  const detail = make("p", "service-detail");
+  detail.id = "service-detail";
+  job.append(heading, lines, ending, detail);
+  section.append(job);
+
+  // The last answer to `GET /api/update` this page holds, and the `202`'s `since` while it waits for a report of its
+  // own. `accepted` is the whole of `http/update.rs`'s window: a report written before it is the **previous** run's.
+  let last = report;
+  let accepted: number | null = null;
+  let timer: number | null = null;
+
+  const waiting = (): boolean =>
+    accepted !== null && !(last.ok && isThisRun(last.value.since, accepted));
+  const underWay = (): boolean => waiting() || (last.ok && jobRunning(last.value));
+
+  const draw = (): void => {
+    live.textContent = liveText(machine.version);
+    const draining = drainText(machine.draining);
+    drain.textContent = draining ?? "";
+    drain.hidden = draining === null;
+
+    const offered = promoteOffered({
+      role: machine.role,
+      draining: machine.draining,
+      running: underWay(),
+      candidate: facts,
+    });
+    press.disabled = !offered.allowed;
+    why.textContent = offered.sentence ?? "";
+    why.hidden = offered.sentence === null;
+
+    const shown = last.ok ? last.value : null;
+    heading.textContent = jobHead(waiting(), shown) ?? "";
+    heading.hidden = heading.textContent === "";
+    const text = jobLines(shown);
+    lines.textContent = text.join("\n");
+    lines.hidden = text.length === 0;
+    ending.textContent = endingText(shown) ?? "";
+    ending.hidden = ending.textContent === "";
+    detail.textContent = detailText(shown) ?? "";
+    detail.hidden = detail.textContent === "";
+    job.hidden = heading.hidden && lines.hidden && ending.hidden && detail.hidden;
+
+    // One timer, and the next read only while something is still coming: an ending stops the poll. A job that was
+    // killed leaves `running` in the file (`http/update.rs` names that cost), so that page polls until it is closed.
+    if (underWay() && timer === null) {
+      timer = window.setTimeout(() => {
+        timer = null;
+        void poll();
+      }, POLL_INTERVAL_MS);
+    }
+  };
+
+  // One re-read of this machine's own facts, asked when a job has stopped being under way. That ending is the one
+  // moment they can have moved: a promotion that ended `live` restarted the process, so the version is new, and a
+  // pass that refused *after* the drain (a backup or a release write that failed, so no restart ever happens) or a
+  // restart that failed leaves the process the page is talking to draining — a fact no other line on the screen can
+  // carry, and the one that withholds the button.
+  //
+  // A refused read keeps the facts the page already has rather than blanking the line or throwing: the version it
+  // drew is still the true one for the process that answered the load, and a machine in the middle of a restart is
+  // away for a moment rather than wrong.
+  const readMachine = async (): Promise<void> => {
+    const answer = await getJson<Health>(apiPath(LOCAL_HOST, "health"));
+    if (answer.ok) {
+      machine = answer.value;
+    }
+  };
+
+  // One re-read of the job, and of the machine's facts **only** once it has ended. A refused read — no promotion has
+  // run on this machine, or it went away — keeps the lines the page already has and the press it is waiting for.
+  const poll = async (): Promise<void> => {
+    const answer = await getJson<Report>(UPDATE_PATH);
+    if (answer.ok) {
+      last = answer;
+      if (accepted !== null && isThisRun(answer.value.since, accepted)) {
+        // This run's own report: the job's state is the truth from here, and the press's clock has done its work.
+        accepted = null;
+      }
+    }
+    // The ending, once: a poll is scheduled only while a job is under way (`draw`), so a poll that finds none is the
+    // first read after it stopped, and the last until the next press. Asking on every poll would be a read whose
+    // answer cannot have moved — the version changes across a restart and a drain across a stop or a failure.
+    if (!underWay()) {
+      await readMachine();
+    }
+    draw();
+  };
+
+  press.addEventListener("click", () => {
+    void (async () => {
+      if (!candidate.ok) {
+        // The button is never offered without a candidate (`promoteOffered`), so this is a press that arrived between
+        // two draws rather than a request to make.
+        return;
+      }
+      press.disabled = true;
+      notice.hidden = true;
+      try {
+        const response = await fetch(UPDATE_PATH, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-holosmith-client": "1" },
+          // The commit the page rendered, never one read again: a `master` that moved while this page was open is the
+          // `422` that says so (`promoteBody`).
+          body: promoteBody(candidate.value.commit),
+        });
+        if (!response.ok) {
+          const envelope = (await response.json()) as ErrorEnvelope;
+          notice.textContent = `${envelope.code}: ${envelope.message}`;
+          notice.hidden = false;
+          // `409 update_running` is the one refusal that names a job this page did not start — a `holosmith update`
+          // in a terminal, a second phone. `last` is still the load's answer, so `underWay()` is false, `draw`
+          // schedules no timer and the button stays offered for a job the screen's own rule says is under way; one
+          // report read puts the job in hand. The refusal's notice stays: it is the sentence the operator pressed for.
+          if (envelope.code === "update_running") {
+            await poll();
+          }
+          return;
+        }
+        // The `202`: the job exists, and the page waits for a report that is its own rather than rendering the last
+        // run's ending as this one.
+        const started = (await response.json()) as { job: string; since: number };
+        accepted = started.since;
+      } catch (failure) {
+        notice.textContent = `unreachable: ${String(failure)}`;
+        notice.hidden = false;
+      } finally {
+        draw();
+      }
+    })();
+  });
+
+  draw();
   return section;
 }
 
@@ -2843,8 +3068,8 @@ async function show(): Promise<void> {
     }
     return;
   }
-  // `/computers` is the fourth: the machines this one may send a request to, and their state. It reads the
-  // registry and then one health and one session list per machine, so it is a screen of its own rather than a
+  // `/computers` is the screen of machines: the ones this one may send a request to, and their state. It reads
+  // the registry and then one health and one session list per machine, so it is a screen of its own rather than a
   // section of the list — a machine with no sessions still has a state, and a hub has no sessions at all.
   if (location.pathname === COMPUTERS_PATH) {
     const hosts = await getJson<HostList>(apiPath(LOCAL_HOST, "hosts"));
@@ -2855,6 +3080,23 @@ async function show(): Promise<void> {
     app?.replaceChildren(
       header(health.value, navLinks(location.pathname)),
       computersSection(health.value, hosts.value.hosts),
+    );
+    return;
+  }
+  // `/service` is this machine's own (ADR-0110): what it is running, the commit a promotion would make live, one
+  // button, and the job's lines while it runs. Both reads are asked once — the candidate is five `git` children on
+  // the machine, and the section polls the job alone and reads this machine's health again only when a job **ends**,
+  // because a promotion replaces the process the load's answer came from — and a refusal from either is a **state of
+  // this screen**, not a page that failed: a hub answers `403` and a machine that never promoted answers `404`, and
+  // both are sentences the section draws.
+  if (location.pathname === SERVICE_PATH) {
+    const [candidate, report] = await Promise.all([
+      getJson<Candidate>(CANDIDATE_PATH),
+      getJson<Report>(UPDATE_PATH),
+    ]);
+    app?.replaceChildren(
+      header(health.value, navLinks(location.pathname)),
+      serviceSection(health.value, candidate, report),
     );
     return;
   }
