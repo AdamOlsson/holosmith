@@ -7,7 +7,10 @@
 # `scripts/verify.sh` verbatim, so `--help` prints the gate's usage and this script parses nothing. Exit 0 is a green
 # gate, 1 a red one, and 2 is a misuse: this script refusing to start (root, no `docker` CLI, no daemon, no image, no
 # workspace version, a tree the daemon cannot see), or `scripts/verify.sh`'s own unknown argument. No operator may read
-# a 2 as a red tree — and 125, 126, 127 and 137 are `docker run`'s own codes, for docker failing, a container command
+# a 2 as a red tree — and 3 is `scripts/check-crate-set.sh`'s answer, reached through `scripts/verify.sh`'s preflight
+# before its first phase and passed through this script unchanged: the image vendored another `Cargo.lock`, so a crate
+# this tree needs is missing from it and the repair is a rebuilt `agent-image`, which is no verdict about the tree
+# either — and 125, 126, 127 and 137 are `docker run`'s own codes, for docker failing, a container command
 # that is not executable, one that is not there, and a container the kernel killed, so none of those is the gate's
 # verdict either.
 #

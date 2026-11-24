@@ -83,8 +83,9 @@ a worker's turn goes when it re-runs `cargo test` two or three times. `cargo tes
 belong to the parent: its run is the proof, and a green quick gate says on its last line that the tree
 is not proven. The two tiers are therefore recorded here and not in an ADR — ADR-0003 still reads as if
 there is one gate, which is the cost of keeping the rule where an agent will read it.
-`scripts/gate-quick.sh` also exits 3 when the image's vendored crate set came from another `Cargo.lock`
-(`scripts/check-crate-set.sh`), which is a stale `agent-image` and an image rebuild rather than a code fix.
+Both gates also exit 3 when the image's vendored crate set came from another `Cargo.lock`
+(`scripts/check-crate-set.sh`, which both run as a precondition before their first phase), which is a stale
+`agent-image` and an image rebuild rather than a code fix.
 
 `scripts/verify.sh` runs those three, then `scripts/build.sh` (which builds the web app and checks what
 the artifact ships), `scripts/check-embed.sh`, and a boot of `dist/<host-triple>/holosmith` — the

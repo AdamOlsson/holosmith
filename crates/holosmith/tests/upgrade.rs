@@ -219,7 +219,8 @@ fn world(label: &str) -> Option<World> {
 fn options(world: &World, acknowledge_review: bool) -> Options {
     Options {
         candidate: world.candidate.clone(),
-        acknowledge_review,
+        review: acknowledge_review.then_some(promote::Review::Acknowledged),
+        verb: "upgrade",
         wait: Duration::from_millis(1),
         window: WINDOW,
     }

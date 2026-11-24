@@ -85,6 +85,12 @@ fn main() -> ExitCode {
             target,
             out,
         }),
+        Cmd::Update { report, wait, root } => commands::update::run(commands::update::UpdateArgs {
+            config: cli.config,
+            report,
+            wait,
+            root,
+        }),
         Cmd::Upgrade {
             binary,
             acknowledge_review,

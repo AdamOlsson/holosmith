@@ -201,17 +201,20 @@ mod tests {
         assert!(!guarded(Backend::Docker, Role::Hub));
     }
 
-    /// The files allowed to name the measurement outside this one: the measurement itself, the boot's check, and
-    /// the request-path refusal.
+    /// The files allowed to name the measurement outside this one: the measurement itself, the boot's check, the
+    /// request-path refusal, and a pass of the gate.
     ///
     /// `http/disk.rs` and not `http/sessions.rs` — the file that holds `prompt`, `abort` and `steer` beside the
     /// two starts must stay *checked*, or the guard would exempt exactly where a disk read on a turn's path would
-    /// be added. That is why the refusal has a module of its own.
+    /// be added. That is why the refusal has a module of its own. `pass.rs` is the fourth reader and a different
+    /// floor: it measures the candidate tree's filesystem before the gate writes about 10 GB into it, which is a
+    /// question about *starting* a run and not about a turn's.
     const THE_MEASURED_HALF: &str = "disk.rs";
     const THE_BOOT: &str = "preflight.rs";
     const THE_REQUEST_PATHS: &str = "http/disk.rs";
+    const THE_GATE: &str = "pass.rs";
 
-    /// Every file under `root` that names `disk::measure` outside the three allowed ones, as `<file>:<line>`.
+    /// Every file under `root` that names `disk::measure` outside the four allowed ones, as `<file>:<line>`.
     ///
     /// One function, so the rule and any planted test share the matcher. It is what makes item 14's "running
     /// turns are not interrupted; only new starts are refused" a fact about the tree rather than a claim: the
@@ -222,7 +225,11 @@ mod tests {
     fn offenders_under(root: &Path) -> Vec<String> {
         let mut offenders = Vec::new();
         for (file, text) in crate::sql::guard::sources_under(root) {
-            if file == THE_MEASURED_HALF || file == THE_BOOT || file == THE_REQUEST_PATHS {
+            if file == THE_MEASURED_HALF
+                || file == THE_BOOT
+                || file == THE_REQUEST_PATHS
+                || file == THE_GATE
+            {
                 continue;
             }
             for (line, text) in text.lines().enumerate() {
@@ -243,7 +250,7 @@ mod tests {
             .into_iter()
             .map(|(file, _)| file)
             .collect();
-        for expected in [THE_MEASURED_HALF, THE_BOOT, THE_REQUEST_PATHS] {
+        for expected in [THE_MEASURED_HALF, THE_BOOT, THE_REQUEST_PATHS, THE_GATE] {
             assert!(
                 files.iter().any(|file| file == expected),
                 "the walk did not find src/{expected}"

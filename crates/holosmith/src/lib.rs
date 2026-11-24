@@ -36,6 +36,7 @@ pub mod logging;
 pub mod logs;
 pub mod mcpproxy;
 pub mod merge;
+pub mod pass;
 pub mod pins;
 pub mod preflight;
 pub mod preview;
