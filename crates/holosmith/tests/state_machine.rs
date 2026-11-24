@@ -49,6 +49,17 @@ fn row(state: &holosmith::http::AppState, id: &str) -> Session {
         .expect("the session exists")
 }
 
+/// The row's turn generation: which turn the row is running (ADR-0020).
+fn turn(state: &holosmith::http::AppState, id: &str) -> u64 {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .turn(id)
+        .expect("the row reads")
+        .expect("the session exists")
+        .turn
+}
+
 /// Every committed event of `session`, in seq order, as (kind, payload).
 fn events(state: &holosmith::http::AppState, session: &str) -> Vec<(String, Value)> {
     let database = state.database.lock().expect("the lock is not poisoned");
@@ -157,7 +168,7 @@ async fn an_applied_change_persists_its_state_and_reports_from_and_to() {
         .apply(&session.id, Trigger::PiReady, None)
         .await
         .expect("starting -> idle is in the table");
-    assert_eq!(settled, Status::Idle);
+    assert_eq!(settled.status, Status::Idle);
     assert_eq!(row(&state, &session.id).status, Status::Idle);
 
     let events = committed_events(&state, &session.id, 1).await;
@@ -202,7 +213,7 @@ async fn stopped_at_is_set_by_the_transition_into_stopped_and_cleared_by_the_one
         .apply(&session.id, Trigger::IdleStop, Some("idle_stop"))
         .await
         .expect("idle -> stopped");
-    assert_eq!(stopped, Status::Stopped);
+    assert_eq!(stopped.status, Status::Stopped);
     let row_stopped = row(&state, &session.id);
     assert!(row_stopped.stopped_at.is_some(), "stopped_at was not set");
     assert_eq!(row_stopped.status_reason.as_deref(), Some("idle_stop"));
@@ -211,7 +222,7 @@ async fn stopped_at_is_set_by_the_transition_into_stopped_and_cleared_by_the_one
         .apply(&session.id, Trigger::Resume, None)
         .await
         .expect("stopped -> starting");
-    assert_eq!(resumed, Status::Starting);
+    assert_eq!(resumed.status, Status::Starting);
     let row_resumed = row(&state, &session.id);
     assert_eq!(row_resumed.stopped_at, None, "resume left stopped_at set");
     assert_eq!(
@@ -265,7 +276,7 @@ async fn the_expirys_row_admits_stopped_and_nothing_else() {
         .apply(&session.id, Trigger::Expire, None)
         .await
         .expect("stopped -> deleting is the expiry's row");
-    assert_eq!(deleting, Status::Deleting);
+    assert_eq!(deleting.status, Status::Deleting);
     let row = row(&state, &session.id);
     assert_eq!(row.status, Status::Deleting);
     // `deleting` is not `stopped`, so the clock the row has left the state with is cleared — and the row is
@@ -294,7 +305,7 @@ async fn interrupted_is_a_reason_on_a_recovery_transition_not_a_state() {
         .apply(&session.id, Trigger::CrashRecovery, Some("interrupted"))
         .await
         .expect("any -> starting is the recovery row");
-    assert_eq!(recovered, Status::Starting);
+    assert_eq!(recovered.status, Status::Starting);
     assert_eq!(
         row(&state, &session.id).status_reason.as_deref(),
         Some("interrupted")
@@ -334,9 +345,9 @@ async fn every_row_of_the_table_can_be_walked_end_to_end() {
             .await
             .unwrap_or_else(|error| panic!("{from} on {trigger}: {error}"));
         let row_to = lookup(from, trigger).map(|row| row.to).expect("a row");
-        assert_eq!(to, row_to, "{from} on {trigger}");
-        walk.push((from, trigger, to));
-        current = to;
+        assert_eq!(to.status, row_to, "{from} on {trigger}");
+        walk.push((from, trigger, to.status));
+        current = to.status;
     }
     assert_eq!(current, Status::Deleting);
     // Nine transitions applied and the table has at least the rows they used.
@@ -355,5 +366,108 @@ async fn every_row_of_the_table_can_be_walked_end_to_end() {
     assert!(
         TABLE.iter().any(|row| row.to == Status::Deleting),
         "the table cannot reach deleting"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_takes_a_turn_and_no_other_move_does() {
+    // The turn generation is the prompt's row fact, and it is what makes "the row is `running`" answerable
+    // as "the row is running *this* turn" — the thing a ladder climbing for a timed-out turn compares
+    // against (ADR-0020). It is bumped by the one trigger that starts a turn and by nothing else: a move
+    // that bumped it would take the row away from a ladder that is still climbing for it.
+    let dir = TempDir::new("state-turn-generation");
+    let state = state_with_writer(&dir, Config::default(), WriterOptions::default());
+    let session = starting_session(&state, "turn-generation");
+    let transitioner = state.transitioner();
+    assert_eq!(turn(&state, &session.id), 0, "a create takes no turn");
+
+    let took = transitioner
+        .apply(&session.id, Trigger::PiReady, None)
+        .await
+        .expect("starting -> idle");
+    assert_eq!(took.turn, 0, "provisioning took a turn");
+    assert_eq!(turn(&state, &session.id), 0);
+
+    let took = transitioner
+        .apply(&session.id, Trigger::Prompt, None)
+        .await
+        .expect("idle -> running");
+    assert_eq!(took.turn, 1, "the prompt did not answer the turn it took");
+    assert_eq!(turn(&state, &session.id), 1);
+
+    // The ending is not the next turn's: the row still belongs to the turn the prompt took until another
+    // prompt takes it.
+    transitioner
+        .apply(&session.id, Trigger::AgentSettled, None)
+        .await
+        .expect("running -> idle");
+    assert_eq!(turn(&state, &session.id), 1, "a settle took a turn");
+
+    let took = transitioner
+        .apply(&session.id, Trigger::Prompt, None)
+        .await
+        .expect("idle -> running");
+    assert_eq!(took.turn, 2, "the second prompt did not take the next turn");
+    assert_eq!(turn(&state, &session.id), 2);
+}
+
+#[tokio::test]
+async fn a_move_for_a_turn_the_row_has_left_is_refused_and_writes_nothing() {
+    // The other half of the generation: `apply_for_turn` is the compare-and-swap the abort ladder's forced rung
+    // is, and the table alone cannot say whose row it is (ADR-0020). This is the layer that can fail if the
+    // comparison ever goes away — the two integration cases stop at the ladder's own question about the row
+    // (`Ladder::whose`) and so never reach this write.
+    let dir = TempDir::new("state-superseded");
+    let state = state_with_writer(&dir, Config::default(), WriterOptions::default());
+    let session = starting_session(&state, "superseded");
+    let transitioner = state.transitioner();
+
+    transitioner
+        .apply(&session.id, Trigger::PiReady, None)
+        .await
+        .expect("starting -> idle");
+    transitioner
+        .apply(&session.id, Trigger::Prompt, None)
+        .await
+        .expect("turn 1: idle -> running");
+    transitioner
+        .apply(&session.id, Trigger::AgentSettled, None)
+        .await
+        .expect("turn 1 over: running -> idle");
+    transitioner
+        .apply(&session.id, Trigger::Prompt, None)
+        .await
+        .expect("turn 2: idle -> running");
+    assert_eq!(turn(&state, &session.id), 2, "turn 2 did not take the row");
+
+    // The timed-out turn 1 climbs after the operator's prompt took turn 2: the move is in the table for a
+    // `running` row, and it is still refused, because the row is not turn 1's any more.
+    let error = transitioner
+        .apply_for_turn(&session.id, Trigger::AbortLadder, Some("turn_timeout"), 1)
+        .await
+        .expect_err("turn 2's row cannot be ended by turn 1");
+    assert!(
+        matches!(error, StateError::Superseded { asked: 1, found: 2 }),
+        "the move was refused for the wrong reason: {error:?}"
+    );
+
+    // Nothing was written: the row is still turn 2's `running`, with no reason and no new turn.
+    let after = row(&state, &session.id);
+    assert_eq!(after.status, Status::Running, "the refusal moved the row");
+    assert_eq!(after.status_reason, None, "the refusal stamped a reason");
+    assert_eq!(turn(&state, &session.id), 2, "the refusal took a turn");
+
+    // And nothing was reported: the four moves above and no fifth event carrying the timed-out turn's reason.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let emitted = committed_events(&state, &session.id, 4).await;
+    assert_eq!(
+        emitted.len(),
+        4,
+        "the refusal emitted an event: {emitted:?}"
+    );
+    assert!(
+        emitted.iter().all(|(kind, payload)| kind != SESSION_STATUS
+            || payload["reason"].as_str() != Some("turn_timeout")),
+        "the refused move's reason reached the log: {emitted:?}"
     );
 }

@@ -1,0 +1,24 @@
+-- a session's turn generation (schema 8). Which turn the row is running.
+--
+-- The row says `running` and nothing else about the turn that made it so: `status`, `status_reason`,
+-- `stopped_at` and the usage counters name no turn. A routine that outlives the turn it was asked
+-- about therefore cannot tell "the row is mine" from "the row is somebody else's" — and the abort
+-- ladder is exactly that routine. It is spawned for a timed-out turn and then returns; the operator's
+-- next prompt moves the same session back to `running`; rung 2's `abort_ladder` is legal from
+-- `running` whatever turn is running, so the ladder stops and restarts a turn nobody asked it about.
+--
+-- This counter is the smallest thing that answers it. A prompt bumps it as it takes the row, inside
+-- the same critical section as the `running` write, so the row's state and its turn are one critical
+-- section and no climb can see the new turn's row under the old one; a ladder carries the generation the
+-- row had when it was asked, and the ladder's forced rung is a compare-and-swap on it (ADR-0020).
+--
+-- It is deliberately **not** part of the session object the API answers: `Session` is pinned to
+-- fifteen keys, and phase 1b may not change the API. Two repository methods read and write it, the
+-- same way `expected_stop`, `last_seq`, `touch` and `set_worktree` are row facts no client sees
+-- (ADR-0038).
+--
+-- `NOT NULL DEFAULT 0` makes every existing row correct without a backfill — `0` is "no turn has
+-- been taken yet", which is true of every row the migrations before this one wrote — and the ADD
+-- COLUMN is the expand step ADR-0009 asks for. It is the last statement in this file, so nothing
+-- after it can be read as depending on the new column.
+ALTER TABLE sessions ADD COLUMN turn_generation INTEGER NOT NULL DEFAULT 0;

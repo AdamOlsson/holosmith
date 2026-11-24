@@ -11,7 +11,7 @@ use std::str::FromStr;
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::{NewSession, RepoError, Session, Status};
+use super::{NewSession, RepoError, Session, SessionTurn, Status, TurnGeneration};
 
 /// Every column, in the order `row_to_session` reads them.
 const COLUMNS: &str = "id, project, model, thinking, worktree, base_commit, status, status_reason, \
@@ -75,6 +75,11 @@ const REMOVE: &str = "DELETE FROM sessions WHERE id = ?1";
 /// derived counter would rewind and reuse a seq (ADR-0013).
 const BUMP_LAST_SEQ: &str =
     "UPDATE sessions SET last_seq = last_seq + 1 WHERE id = ?1 RETURNING last_seq";
+
+/// The turn counter's bump, returning the value it assigned: the prompt that takes the row carries
+/// the turn it just took, and the abort ladder compares that number with the one the row holds
+/// (ADR-0020).
+const BUMP_TURN: &str = "UPDATE sessions SET turn_generation = turn_generation + 1 WHERE id = ?1 RETURNING turn_generation";
 
 /// The order `list` answers in: newest activity first, for the Sessions screen, and the
 /// id after it so the order is total. The same `sessions_last_active` index also serves
@@ -475,6 +480,46 @@ impl<'a> SessionRepository<'a> {
             .map_err(|error| RepoError::sqlite("bump_last_seq", error))
     }
 
+    /// One session and the turn it is running, or `None` when there is no such row.
+    ///
+    /// One statement, because "the row is `running`" and "which turn holds it" are one question: two
+    /// reads would let a prompt land between them and answer the state of one turn with the identity of
+    /// the next, which is the confusion this column exists to end (ADR-0020). It is the abort ladder's
+    /// own read, and the abort, delete and quota callers' — every one of them must name the turn it is
+    /// about to end.
+    pub fn turn(&self, id: &str) -> Result<Option<SessionTurn>, RepoError> {
+        self.connection
+            .query_row(
+                &format!("SELECT {COLUMNS}, turn_generation FROM sessions WHERE id = ?1"),
+                [id],
+                row_to_session_turn,
+            )
+            .optional()
+            .map_err(|error| RepoError::sqlite("turn", error))?
+            .transpose()
+    }
+
+    /// Take the next turn of this session: bump the counter and answer the generation the row now
+    /// holds, or `None` when there is no such row.
+    ///
+    /// The one production caller is [`super::state::Transitioner::apply`], which runs it inside the same
+    /// critical section as the status write that makes the row `running`, so a turn's identity and its
+    /// `running` are atomic to every in-process reader and no ladder can see a `running` row still carrying
+    /// the previous turn's generation (ADR-0020). They are two statements and not one transaction, so this
+    /// one failing after the status write has committed leaves the row `running` at the previous generation.
+    ///
+    /// `pub(crate)` for [`Self::bump_last_seq`]'s reason: there is exactly one writer of this column,
+    /// and a second one would be a second answer to "which turn is the row running".
+    pub(crate) fn bump_turn_generation(
+        &self,
+        id: &str,
+    ) -> Result<Option<TurnGeneration>, RepoError> {
+        self.connection
+            .query_row(BUMP_TURN, [id], |row| row.get(0))
+            .optional()
+            .map_err(|error| RepoError::sqlite("bump_turn_generation", error))
+    }
+
     /// The counter's current value for this session, or `None` when there is no such row.
     ///
     /// A **reader**, and the only one: the counter is bumped by [`Self::bump_last_seq`] inside the event
@@ -567,6 +612,23 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<Result<Session, RepoError>>
         stopped_at: row.get("stopped_at")?,
         usage_in: row.get("usage_in")?,
         usage_out: row.get("usage_out")?,
+    }))
+}
+
+/// One row with its turn generation: [`row_to_session`] plus the one column that is deliberately not
+/// part of the session object (ADR-0038).
+///
+/// The parse is fallible and `Row` is not, so the session's mapper answers `Result` inside the
+/// `rusqlite` result and this one passes that through rather than flattening a corrupt row's status
+/// into a SQLite error.
+fn row_to_session_turn(row: &Row<'_>) -> rusqlite::Result<Result<SessionTurn, RepoError>> {
+    let session = match row_to_session(row)? {
+        Ok(session) => session,
+        Err(error) => return Ok(Err(error)),
+    };
+    Ok(Ok(SessionTurn {
+        session,
+        turn: row.get("turn_generation")?,
     }))
 }
 

@@ -24,7 +24,7 @@ use holosmith::exit::{Exits, LOG_FILE, PI_EXIT};
 use holosmith::http::{self, AppState};
 use holosmith::ladder::{FORCED_ABORT, Ladder};
 use holosmith::sessions::state::{Transitioner, Trigger};
-use holosmith::sessions::{NewSession, Session, Status};
+use holosmith::sessions::{NewSession, Session, SessionTurn, Status};
 use holosmith::stop::Stopper;
 use serde_json::Value;
 
@@ -65,6 +65,16 @@ fn row(state: &AppState, id: &str) -> Session {
     database
         .sessions()
         .get(id)
+        .expect("the row reads")
+        .expect("the session exists")
+}
+
+/// The row and the turn it is running: what a ladder is handed, and what it ends.
+fn turn(state: &AppState, id: &str) -> SessionTurn {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .turn(id)
         .expect("the row reads")
         .expect("the session exists")
 }
@@ -250,8 +260,10 @@ async fn the_forced_rung_records_the_flag() {
         state.events.clone(),
         Duration::ZERO,
     );
-    let running = row(&state, &session.id);
-    ladder.end_turn(&running, FORCED_ABORT).await;
+    let running = turn(&state, &session.id);
+    ladder
+        .end_turn(&running.session, running.turn, FORCED_ABORT)
+        .await;
 
     assert_eq!(
         row(&state, &session.id).status,

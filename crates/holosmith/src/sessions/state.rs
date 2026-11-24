@@ -28,7 +28,7 @@ use crate::backend::Step;
 use crate::clock;
 use crate::db::Database;
 use crate::events::{AppendError, EventWriter, NewEvent};
-use crate::sessions::{RepoError, Status};
+use crate::sessions::{RepoError, Status, TurnGeneration};
 
 /// The event type every state change and every provisioning step is reported as.
 pub const SESSION_STATUS: &str = "session.status";
@@ -319,6 +319,13 @@ pub enum StateError {
     /// The move is not in the table. A bug at the caller, never a client error: the row is left
     /// exactly as it was.
     Illegal { from: Status, trigger: Trigger },
+    /// The row belongs to a turn the caller did not name: the turn it was asked about is over, and a
+    /// later one holds the row now. Nothing was written. Not a bug at the caller — the abort ladder's
+    /// question is "is this row still mine", and "no" is an answer a climb can get (ADR-0020).
+    Superseded {
+        asked: TurnGeneration,
+        found: TurnGeneration,
+    },
     /// No such session. The change is not applied and nothing is emitted.
     UnknownSession(String),
     /// The status write failed.
@@ -334,6 +341,10 @@ impl fmt::Display for StateError {
             Self::Illegal { from, trigger } => {
                 write!(f, "illegal transition: from {from} on {trigger}")
             }
+            Self::Superseded { asked, found } => write!(
+                f,
+                "the row belongs to turn {found}, not to turn {asked}: that turn is over"
+            ),
             Self::UnknownSession(id) => write!(f, "there is no session \"{id}\""),
             Self::Repository(error) => write!(f, "{error}"),
             Self::Unreported(error) => write!(f, "{error}"),
@@ -346,7 +357,7 @@ impl std::error::Error for StateError {
         match self {
             Self::Repository(error) => Some(error),
             Self::Unreported(error) => Some(error),
-            Self::Illegal { .. } | Self::UnknownSession(_) => None,
+            Self::Illegal { .. } | Self::Superseded { .. } | Self::UnknownSession(_) => None,
         }
     }
 }
@@ -402,6 +413,19 @@ pub struct Transitioner {
     events: EventWriter,
 }
 
+/// What a transition left the row as: the state it holds and the turn it belongs to.
+///
+/// The generation is answered from the same critical section as the write, and that is the whole of
+/// why it is here: a prompt's caller must carry "the turn I just took" to the runner, and a second
+/// read after the write could already be reading the next turn (ADR-0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Applied {
+    /// The status the row holds now.
+    pub status: Status,
+    /// The turn the row belongs to: bumped by a `prompt`, unchanged by every other trigger.
+    pub turn: TurnGeneration,
+}
+
 impl Transitioner {
     pub fn new(database: Arc<Mutex<Database>>, events: EventWriter) -> Self {
         Self { database, events }
@@ -413,34 +437,86 @@ impl Transitioner {
     /// trigger and the state the caller asked for. It is a bug in the caller, so it is an `Err`
     /// and not a silent no-op: a story that invents a transition fails its own test instead of
     /// producing a row nobody can explain.
+    ///
+    /// `prompt` also **takes the turn**: the row's `running` and the generation that names it are one
+    /// critical section, so a ladder cannot see the new turn's `running` under the old turn's identity.
+    /// They are two statements in it and not one transaction, so a bump that fails after the status has
+    /// committed leaves the row `running` at the previous generation.
     pub async fn apply(
         &self,
         session_id: &str,
         trigger: Trigger,
         reason: Option<&str>,
-    ) -> Result<Status, StateError> {
-        let (from, to) = {
+    ) -> Result<Applied, StateError> {
+        self.apply_while(session_id, trigger, reason, None).await
+    }
+
+    /// Apply `trigger` **only while the row still belongs to `turn`**, and refuse it as
+    /// [`StateError::Superseded`] otherwise.
+    ///
+    /// The table stays the authority for which moves exist; the generation narrows *whose* row it is,
+    /// which is the one thing the abort ladder's forced rung needs and the table cannot express. The
+    /// row's turn is read, compared and written in the one critical section `apply` already holds, so
+    /// the comparison is a compare-and-swap and not a check followed by a hope (ADR-0020).
+    pub async fn apply_for_turn(
+        &self,
+        session_id: &str,
+        trigger: Trigger,
+        reason: Option<&str>,
+        turn: TurnGeneration,
+    ) -> Result<Applied, StateError> {
+        self.apply_while(session_id, trigger, reason, Some(turn))
+            .await
+    }
+
+    /// The one transition implementation: `turn` is `Some` when the move is only that turn's to make.
+    async fn apply_while(
+        &self,
+        session_id: &str,
+        trigger: Trigger,
+        reason: Option<&str>,
+        turn: Option<TurnGeneration>,
+    ) -> Result<Applied, StateError> {
+        let (from, updated, turn) = {
             // One synchronous block: the guard is not `Send`, so it cannot outlive this scope and
             // cannot be held across the `await` below (ADR-0012/ADR-0013).
             let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
             let repository = database.sessions();
             let current = repository
-                .get(session_id)
+                .turn(session_id)
                 .map_err(StateError::Repository)?
                 .ok_or_else(|| StateError::UnknownSession(session_id.to_string()))?;
-            let Some(transition) = lookup(current.status, trigger) else {
+            if let Some(asked) = turn
+                && current.turn != asked
+            {
+                // Whose row it is, before whether the move exists: a ladder asking about a turn the
+                // row has left has no business here, whatever state the row is in now.
+                tracing::debug!(
+                    target: "holosmith::sessions::state",
+                    session = session_id,
+                    trigger = trigger.as_str(),
+                    asked,
+                    found = current.turn,
+                    "refused a state change for a turn the row has left"
+                );
+                return Err(StateError::Superseded {
+                    asked,
+                    found: current.turn,
+                });
+            }
+            let Some(transition) = lookup(current.session.status, trigger) else {
                 // `debug`, not `error`: a refused transition is the *expected* outcome
                 // of a legal request (a prompt that lost a race to another prompt), and the callers
                 // that treat it as impossible log it themselves.
                 tracing::debug!(
                     target: "holosmith::sessions::state",
                     session = session_id,
-                    from = current.status.as_str(),
+                    from = current.session.status.as_str(),
                     trigger = trigger.as_str(),
                     "refused an illegal state change"
                 );
                 return Err(StateError::Illegal {
-                    from: current.status,
+                    from: current.session.status,
                     trigger,
                 });
             };
@@ -449,8 +525,18 @@ impl Transitioner {
                 .set_status(session_id, to, reason, clock::unix_now())
                 .map_err(StateError::Repository)?
                 .ok_or_else(|| StateError::UnknownSession(session_id.to_string()))?;
-            (current.status, updated.status)
+            // A prompt takes the turn, inside the same critical section as the `running` above. The
+            // bump is the transition's own row fact and not a second call a caller could forget.
+            let turn = match trigger {
+                Trigger::Prompt => repository
+                    .bump_turn_generation(session_id)
+                    .map_err(StateError::Repository)?
+                    .ok_or_else(|| StateError::UnknownSession(session_id.to_string()))?,
+                _ => current.turn,
+            };
+            (current.session.status, updated, turn)
         };
+        let to = updated.status;
         // After the write, never before: an event must not claim a state the row does not hold.
         let payload = SessionStatus::transitioned(from, to, reason.map(str::to_string));
         let event = NewEvent {
@@ -476,7 +562,7 @@ impl Transitioner {
             trigger = trigger.as_str(),
             "state changed"
         );
-        Ok(to)
+        Ok(Applied { status: to, turn })
     }
 
     /// Apply one transition from a background runner: every failure is logged, never returned.

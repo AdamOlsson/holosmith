@@ -13,12 +13,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::http::Method;
-use holosmith::backend::StubBackend;
+use holosmith::backend::{Call, StubBackend};
 use holosmith::config::{Config, Duration as ConfigDuration};
 use holosmith::http::error::{NOT_FOUND, SESSION_IDLE, SESSION_RUNNING, SESSION_STARTING};
 use holosmith::http::{self, AppState, Guards, RouteKind};
-use holosmith::ladder::{FORCED_ABORT, Ladder};
-use holosmith::sessions::{Session, Status};
+use holosmith::ladder::{Ending, FORCED_ABORT, Ladder};
+use holosmith::sessions::{Session, SessionTurn, Status};
 use serde_json::Value;
 
 mod support;
@@ -113,6 +113,16 @@ fn row(state: &AppState, id: &str) -> Session {
     database
         .sessions()
         .get(id)
+        .expect("the row reads")
+        .expect("the session exists")
+}
+
+/// The row and the turn it is running: what a ladder is handed, and what it ends.
+fn turn(state: &AppState, id: &str) -> SessionTurn {
+    let database = state.database.lock().expect("the lock is not poisoned");
+    database
+        .sessions()
+        .turn(id)
         .expect("the row reads")
         .expect("the session exists")
 }
@@ -340,8 +350,10 @@ async fn the_ladders_reason_is_the_callers_so_a_later_story_can_pass_its_own() {
         state.events.clone(),
         Duration::from_millis(120),
     );
-    let running = row(&state, &id);
-    ladder.climb(&running, "turn_timeout").await;
+    let running = turn(&state, &id);
+    ladder
+        .climb(&running.session, running.turn, "turn_timeout")
+        .await;
 
     wait_until("the timeout's stop is committed", || {
         carries(
@@ -440,4 +452,82 @@ fn the_abort_route_is_recorded_mutating() {
     // and read the state from the code.
     assert_eq!(SESSION_RUNNING, "session_running");
     assert_eq!(SESSION_IDLE, "session_idle");
+}
+
+#[tokio::test]
+async fn an_abort_for_a_turn_that_already_ended_does_not_stop_the_one_after_it() {
+    // The operator's abort is the same ladder and the same question, and the 202 is answered for a row that
+    // is `running` at that moment. By the time the climb is scheduled the turn it named may be over and the
+    // next prompt's turn may own the row, and `abort_ladder` is legal from `running` whatever turn is
+    // running — so the climb has to ask whose row it is before it asks the agent anything, and its ending
+    // has to say which ending it got (ADR-0020).
+    let dir = TempDir::new("abort-superseded");
+    let stub = paced(50);
+    let state = with_stub(state_in(&dir, impatient_grace(120)), stub.clone());
+    let served = Served::start(http::router(state.clone()), GRACE).await;
+    let id = created_id(&post_create(served.addr, "abort-superseded").await);
+    wait_idle(&state, &id).await;
+    assert_eq!(
+        post_prompt(served.addr, &id, PROMPT).await.status,
+        202,
+        "the first prompt is accepted"
+    );
+    wait_until("the first turn is running", || {
+        row(&state, &id).status == Status::Running
+    })
+    .await;
+    // The row an abort would have been answered with, and the turn it names.
+    let first = turn(&state, &id);
+
+    // That turn ends by itself, and the next prompt takes the row: a different turn, `running` again.
+    wait_idle(&state, &id).await;
+    assert_eq!(
+        post_prompt(served.addr, &id, PROMPT).await.status,
+        202,
+        "the second prompt is accepted"
+    );
+    wait_until("the second turn is running", || {
+        row(&state, &id).status == Status::Running
+    })
+    .await;
+    let second = turn(&state, &id);
+    assert_ne!(
+        first.turn, second.turn,
+        "the second prompt did not take a new turn, so nothing here is superseded"
+    );
+    let asked = stub.calls().len();
+
+    // The ladder the first turn's abort would have climbed, arriving after the turn it was for.
+    let ending = state
+        .ladder()
+        .end_turn(&first.session, first.turn, FORCED_ABORT)
+        .await;
+
+    assert_eq!(
+        ending,
+        Ending::Superseded,
+        "an abort for a turn that had already ended did not say so"
+    );
+    let calls: Vec<Call> = stub.calls()[asked..].to_vec();
+    assert!(
+        !calls.contains(&Call::ClearQueue)
+            && !calls.contains(&Call::Abort)
+            && !calls.contains(&Call::Stop),
+        "a superseded abort asked for or stopped a turn that is not its own: {calls:?}"
+    );
+    let after = turn(&state, &id);
+    assert_eq!(
+        after.session.status,
+        Status::Running,
+        "an abort for the previous turn moved the next one's row"
+    );
+    assert_eq!(
+        after.session.status_reason, None,
+        "the next turn's row records the previous turn's ending"
+    );
+    assert_eq!(
+        after.turn, second.turn,
+        "the row was handed to another turn"
+    );
+    served.finish().await.expect("a clean shutdown");
 }

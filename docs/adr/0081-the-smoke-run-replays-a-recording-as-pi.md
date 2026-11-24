@@ -72,7 +72,7 @@ does not.
 `tests/fixtures/pi-turn-tool.jsonl`: deltas, one tool round trip, non-zero usage, closing `agent_settled`.
 
 ```json
-{"type":"fixture","version":1,"schema":7,"recorded":"","turn":"tool"}
+{"type":"fixture","version":1,"schema":8,"recorded":"","turn":"tool"}
 ```
 
 - **It is embedded, not read.** The container runs the *candidate*, and the candidate is what must hold the recording —

@@ -687,11 +687,14 @@ async fn three_triggers_and_the_negative_reach_the_recorder() {
             let database = state.database.lock().expect("the lock is not poisoned");
             database
                 .sessions()
-                .get(&other)
+                .turn(&other)
                 .expect("the row reads")
                 .expect("the row exists")
         };
-        state.ladder().end_turn(&session, reason).await;
+        state
+            .ladder()
+            .end_turn(&session.session, session.turn, reason)
+            .await;
         sends += 1;
         wait_for_sends(&recorder, sends).await;
         let (_, request) = recorder.sent().pop().expect("a send");

@@ -32,12 +32,18 @@
 //! - **It is not a state machine.** Every state change goes through
 //!   [`Transitioner::apply`](crate::sessions::state::Transitioner::apply); a refused application
 //!   means the other owner ended the turn first, which is a race by construction and not a bug.
+//! - **It ends the turn it was asked about, and no other.** The row cannot name a turn, so a climb
+//!   carries the generation the row held when it was asked ([`Ladder::spawn`]'s `turn`): rung 1's
+//!   abort reaches whatever turn the session is running, rung 2's write is that turn's alone, and a
+//!   row holding a later generation is another turn's — this climb has nothing left to do and says
+//!   so with [`Ending::Superseded`] (ADR-0020).
 //!
 //! The resume after rung 2 goes through the provisioner — `stopped -> starting` by `resume`, then
 //! the four steps back to `idle` — which is the flow the `POST /resume` reuses. It does not
 //! call [`SessionBackend::resume`]: whether a resumed session runs every provisioning step or only
 //! the container's is a later question, and answering it here would be a guess.
 
+use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -52,6 +58,7 @@ use crate::provisioner::Provisioner;
 use crate::sessions::RepoError;
 use crate::sessions::Session;
 use crate::sessions::Status;
+use crate::sessions::TurnGeneration;
 use crate::sessions::state::{StateError, Transitioner, Trigger};
 use crate::stop::Stopper;
 
@@ -83,15 +90,53 @@ async fn bounded(
 
 /// How a running turn ended, as the ladder saw it.
 ///
-/// What the caller does next is the only difference between the two: [`Self::Asked`] is rung 1
+/// What the caller does next is the only difference between the first two: [`Self::Asked`] is rung 1
 /// working, so the session is whatever the turn runner left it (`idle`); [`Self::Forced`] is rung 2,
-/// so the row is `stopped` with the caller's reason and the backend has been told to stop.
+/// so the row is `stopped` with the caller's reason and the backend has been told to stop. The third
+/// is neither: the climb was for a turn the row had already left, and it did nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
     /// The agent stopped: the turn runner wrote `running -> idle` (or the row had already moved).
     Asked,
     /// The grace was spent: the row was moved to `stopped` and the backend was stopped.
     Forced,
+    /// The row is another turn's: the turn this climb was asked about was already over, so nothing was
+    /// asked of the agent, nothing was stopped and nothing was resumed.
+    Superseded,
+}
+
+impl Ending {
+    /// The word a log line prints for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asked => "asked",
+            Self::Forced => "forced",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+impl fmt::Display for Ending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whose row the ladder is looking at.
+///
+/// The ladder's whole question, answered in one read: the row is this turn's or it is not, and if it
+/// is, whether the turn is still running. `Mine` is the only answer that lets the climb ask the agent
+/// anything at all (ADR-0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    /// This turn's, and still `running`.
+    Mine,
+    /// This turn's, and no longer `running`: the turn ended without the ladder's help.
+    Ended,
+    /// Another turn's: the turn this climb is for ended and a prompt has taken the row since.
+    Another,
+    /// No row at all: there is nothing left to ask, stop or bring back.
+    Nothing,
 }
 
 /// The abort ladder: two rungs, the row's state as its clock, and one reason per caller.
@@ -122,55 +167,106 @@ impl Ladder {
         }
     }
 
-    /// Hand `session` to a background task and return immediately.
+    /// Hand `session` and the turn it is running to a background task and return immediately.
     ///
-    /// `reason` is what a forced stop records; the abort's caller passes [`FORCED_ABORT`].
-    pub fn spawn(self, session: Session, reason: &'static str) -> JoinHandle<()> {
-        tokio::spawn(async move { self.climb(&session, reason).await })
+    /// `reason` is what a forced stop records; the abort's caller passes [`FORCED_ABORT`]. `turn` is the
+    /// row's generation as the caller read it, and it is the whole of "which turn this climb is for".
+    ///
+    /// **The ending is logged here**, because the caller never sees it: the 202 has already gone out, and
+    /// "my abort was superseded" is exactly the line an operator needs when a turn they ended is not the
+    /// turn that stopped.
+    pub fn spawn(
+        self,
+        session: Session,
+        turn: TurnGeneration,
+        reason: &'static str,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let ending = self.climb(&session, turn, reason).await;
+            tracing::info!(
+                target: "holosmith::ladder",
+                session = %session.id,
+                turn,
+                reason,
+                ending = %ending,
+                "the abort ladder finished"
+            );
+        })
     }
 
-    /// Climb the ladder for `session`, which the caller has already checked is `running`.
+    /// Climb the ladder for `session`, which the caller has already checked is `running` **for `turn`**.
     ///
     /// Public so a test can await it instead of racing a spawned task; `spawn` is what production
     /// calls. A forced stop is brought straight back: a killed container is not a session the
     /// operator asked to keep stopped.
-    pub async fn climb(&self, session: &Session, reason: &'static str) {
-        if self.end_turn(session, reason).await == Ending::Asked {
-            return;
+    pub async fn climb(
+        &self,
+        session: &Session,
+        turn: TurnGeneration,
+        reason: &'static str,
+    ) -> Ending {
+        let ending = self.end_turn(session, turn, reason).await;
+        if ending == Ending::Forced {
+            self.resume(session).await;
         }
-        self.resume(session).await;
+        ending
     }
 
-    /// End the running turn for `session` and answer how, **without** bringing the session back.
+    /// End the turn `turn` names and answer how, **without** bringing the session back.
     ///
     /// This is [`Self::climb`] minus the resume, and it exists for the delete flow: a
     /// session about to be removed wants its turn over — the snapshot must not race the agent — and
     /// it emphatically does not want a fresh container provisioned on the way out.
     ///
-    /// The caller has already checked that the session is `running`. The clock starts here, so the
-    /// whole of it is bounded by `abort_grace` however a wedged backend behaves.
-    pub async fn end_turn(&self, session: &Session, reason: &'static str) -> Ending {
+    /// The caller has already checked that the session is `running` for `turn`. The clock starts here, so
+    /// the whole of it is bounded by `abort_grace` however a wedged backend behaves.
+    pub async fn end_turn(
+        &self,
+        session: &Session,
+        turn: TurnGeneration,
+        reason: &'static str,
+    ) -> Ending {
         let deadline = Instant::now() + self.grace;
-        self.rung_one(session, deadline).await;
-        if self.the_turn_ended(session, deadline).await {
-            return Ending::Asked;
+        // The row first, before a single call to the agent. `clear_queue` and `abort` do not name a turn
+        // — they reach whatever the session is running *now* — so a climb that is already for a dead
+        // turn must not ask at all. That is the operator's abort pressed for a turn that ended before
+        // the ladder started (ADR-0020).
+        match self.whose(session, turn) {
+            Ok(Whose::Another) => return Ending::Superseded,
+            Ok(Whose::Ended | Whose::Nothing) => return Ending::Asked,
+            Ok(Whose::Mine) => {}
+            // An unreadable row is not a reason to skip rung 1: the ladder cannot learn whose row it is
+            // from a failed read, and rung 2 — the write that must not be somebody else's — is guarded
+            // whatever this answered.
+            Err(error) => tracing::warn!(
+                target: "holosmith::ladder",
+                session = %session.id,
+                %error,
+                "the ladder could not read the session before rung 1"
+            ),
         }
-        if self.rung_two(session, reason).await {
-            Ending::Forced
-        } else {
-            // Rung 2 refused: the turn ended between the last poll and here, which is rung 1
-            // finishing late. The row is the runner's, so nothing was stopped.
-            Ending::Asked
+        if !self.rung_one(session, turn, deadline).await {
+            return Ending::Superseded;
+        }
+        match self.the_turn_ended(session, turn, deadline).await {
+            Whose::Another => Ending::Superseded,
+            Whose::Ended | Whose::Nothing => Ending::Asked,
+            Whose::Mine => self.rung_two(session, turn, reason).await,
         }
     }
 
-    /// Rung 1: drop what the agent has queued, then ask it to stop.
+    /// Rung 1: drop what the agent has queued, then ask it to stop. `false` when the row turned out to
+    /// belong to another turn before the agent was asked.
     ///
     /// Both failures are logged and neither ends the ladder: rung 2 exists precisely because the
     /// agent may not answer. A backend that cannot do either is a backend whose turn cannot stop,
     /// which is what the grace period and the forced rung are for. Each call is bounded by what is
     /// left of the grace, so an RPC that never returns is a spent grace rather than a hung ladder.
-    async fn rung_one(&self, session: &Session, deadline: Instant) {
+    ///
+    /// **The row is read again between the two calls**, because `clear_queue` may spend the whole grace
+    /// and the turn may end and be replaced while it does: the abort itself carries no turn, so the only
+    /// thing that can keep it off the next turn is asking whose row it is first (ADR-0020).
+    async fn rung_one(&self, session: &Session, turn: TurnGeneration, deadline: Instant) -> bool {
         if let Err(error) = bounded(deadline, self.backend.clear_queue(session)).await {
             tracing::warn!(
                 target: "holosmith::ladder",
@@ -178,6 +274,25 @@ impl Ladder {
                 %error,
                 "the agent's queue was not cleared"
             );
+        }
+        match self.whose(session, turn) {
+            Ok(Whose::Another) => {
+                tracing::info!(
+                    target: "holosmith::ladder",
+                    session = %session.id,
+                    turn,
+                    "the row moved to another turn before the agent was asked to abort"
+                );
+                return false;
+            }
+            // Its own turn, or a read the ladder cannot answer from: the abort is still the turn's.
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                target: "holosmith::ladder",
+                session = %session.id,
+                %error,
+                "the ladder could not read the session between the two calls"
+            ),
         }
         if let Err(error) = bounded(deadline, self.backend.abort(session)).await {
             tracing::warn!(
@@ -187,6 +302,7 @@ impl Ladder {
                 "the agent was not asked to abort"
             );
         }
+        true
     }
 
     /// Wait until `deadline` for the turn to end, and say whether it did.
@@ -194,13 +310,22 @@ impl Ladder {
     /// The row is the question, not a flag: the turn runner writes `running -> idle` when the agent
     /// stops, so "the row is no longer `running`" is exactly "rung 1 worked". A row that is gone is
     /// also an ending — there is nothing left to force.
-    async fn the_turn_ended(&self, session: &Session, deadline: Instant) -> bool {
+    ///
+    /// **Whose row it is, is the other half of the question.** A row holding a later generation is another
+    /// turn's, so the turn this climb was asked about is over by definition and the rest of the grace is
+    /// nobody's to spend: the answer is [`Whose::Another`], not "keep waiting" (ADR-0020). `Whose::Mine`
+    /// here means the grace was spent and the turn is still running.
+    async fn the_turn_ended(
+        &self,
+        session: &Session,
+        turn: TurnGeneration,
+        deadline: Instant,
+    ) -> Whose {
         loop {
-            match self.status(&session.id) {
-                Ok(None) => return true,
-                Ok(Some(status)) if status != Status::Running => return true,
-                // Still running, or one unreadable row: keep waiting until the grace is spent.
-                Ok(Some(_)) => {}
+            match self.whose(session, turn) {
+                // Still running: keep waiting until the grace is spent.
+                Ok(Whose::Mine) => {}
+                Ok(answered) => return answered,
                 Err(error) => tracing::warn!(
                     target: "holosmith::ladder",
                     session = %session.id,
@@ -209,36 +334,53 @@ impl Ladder {
                 ),
             }
             if Instant::now() >= deadline {
-                return false;
+                return Whose::Mine;
             }
             tokio::time::sleep(POLL).await;
         }
     }
 
-    /// Rung 2: kill the container, record why, and answer whether it was this rung that stopped the
-    /// session.
+    /// Rung 2: kill the container, record why, and answer how the climb ended.
     ///
     /// The order is the decision (ADR-0020): the row becomes `stopped` before the backend is
-    /// stopped, so no client ever sees `idle` over a dead container. A refused transition means the
-    /// turn ended between the last poll and here, which is rung 1 finishing late — the session is
-    /// then left exactly as the runner left it, and `false` says so.
-    async fn rung_two(&self, session: &Session, reason: &'static str) -> bool {
+    /// stopped, so no client ever sees `idle` over a dead container. The write is **this turn's alone**
+    /// ([`Transitioner::apply_for_turn`]): the table says that `running -> stopped` exists, and the
+    /// generation says whose `running` it is, so a rung that arrives after another turn has taken the row
+    /// is refused rather than stopping a turn nobody aborted. That is [`Ending::Superseded`], and nothing is
+    /// killed. Every other refusal means the turn ended between the last poll and here — rung 1 finishing
+    /// late — so the session is left exactly as the runner left it and [`Ending::Asked`] says so.
+    async fn rung_two(
+        &self,
+        session: &Session,
+        turn: TurnGeneration,
+        reason: &'static str,
+    ) -> Ending {
         match self
             .transitioner()
-            .apply(&session.id, Trigger::AbortLadder, Some(reason))
+            .apply_for_turn(&session.id, Trigger::AbortLadder, Some(reason), turn)
             .await
         {
             Ok(_) => {}
             // The state changed and only the report of it was lost, which means the process is on
             // its way down. The row is already `stopped`, so the container must still be killed.
             Err(StateError::Unreported(_)) => {}
+            Err(error @ StateError::Superseded { .. }) => {
+                tracing::info!(
+                    target: "holosmith::ladder",
+                    session = %session.id,
+                    turn,
+                    %error,
+                    "the forced rung found another turn's row and left it alone"
+                );
+                return Ending::Superseded;
+            }
             Err(StateError::Illegal { .. } | StateError::UnknownSession(_)) => {
                 tracing::debug!(
                     target: "holosmith::ladder",
                     session = %session.id,
                     "the turn ended before the forced rung was needed"
                 );
-                return false;
+                return Ending::Asked;
             }
             Err(error) => {
                 // The row could not be moved, so nothing may be killed: a container stopped behind
@@ -249,7 +391,7 @@ impl Ladder {
                     %error,
                     "the forced rung could not stop the session"
                 );
-                return false;
+                return Ending::Asked;
             }
         }
         // Through the stopper, not the backend: spec item 6's flag is written before the call, so the
@@ -264,7 +406,7 @@ impl Ladder {
                 "the backend did not stop"
             );
         }
-        true
+        Ending::Forced
     }
 
     /// Bring a session the ladder stopped back to `idle`, through the provisioner.
@@ -309,9 +451,22 @@ impl Ladder {
         }
     }
 
-    /// The row's current state, or `None` when there is no such row.
-    fn status(&self, session_id: &str) -> Result<Option<Status>, RepoError> {
-        Ok(self.row(session_id)?.map(|session| session.status))
+    /// The row's answer about `turn`: whose it is, and whether that turn is still running.
+    ///
+    /// One read, one critical section: the state and the generation are one question, and two statements
+    /// would let a prompt land between them (ADR-0020).
+    fn whose(&self, session: &Session, turn: TurnGeneration) -> Result<Whose, RepoError> {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(current) = database.sessions().turn(&session.id)? else {
+            return Ok(Whose::Nothing);
+        };
+        Ok(if current.turn != turn {
+            Whose::Another
+        } else if current.session.status == Status::Running {
+            Whose::Mine
+        } else {
+            Whose::Ended
+        })
     }
 
     /// The row itself: the provisioner is handed the row as it stands after the resume.

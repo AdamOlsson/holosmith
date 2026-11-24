@@ -83,6 +83,7 @@ fn the_table_has_every_column_the_spec_names() {
             "usage_out",
             "last_seq",
             "expected_stop",
+            "turn_generation",
         ],
         "the sessions table is not the one the spec names: {columns:?}"
     );
@@ -113,6 +114,7 @@ fn the_table_has_every_column_the_spec_names() {
         "usage_out",
         "last_seq",
         "expected_stop",
+        "turn_generation",
     ] {
         assert_eq!(text(name), "INTEGER", "{name} is not INTEGER");
     }
@@ -133,6 +135,7 @@ fn the_table_has_every_column_the_spec_names() {
         "usage_out",
         "last_seq",
         "expected_stop",
+        "turn_generation",
     ] {
         assert!(column(name).2, "{name} must be NOT NULL");
     }
@@ -142,8 +145,14 @@ fn the_table_has_every_column_the_spec_names() {
         assert!(!column(name).2, "{name} must be nullable");
     }
     // The spec's three `DEFAULT 0` columns, `network` being the one the acceptance names, plus
-    // the `last_seq`, which makes every earlier row correct without a backfill.
-    for name in ["network", "usage_in", "usage_out", "last_seq"] {
+    // `last_seq` and `turn_generation`, which make every earlier row correct without a backfill.
+    for name in [
+        "network",
+        "usage_in",
+        "usage_out",
+        "last_seq",
+        "turn_generation",
+    ] {
         assert_eq!(
             column(name).3.as_deref(),
             Some("0"),

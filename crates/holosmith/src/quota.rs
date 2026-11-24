@@ -60,7 +60,7 @@ use crate::db::Database;
 use crate::events::{EventWriter, NewEvent};
 use crate::ladder::{Ending, Ladder};
 use crate::sessions::state::{StateError, Transitioner, Trigger};
-use crate::sessions::{Session, Status};
+use crate::sessions::{Session, SessionTurn, Status};
 use crate::stop::Stopper;
 
 /// The cap's one word: the reason a stopped row records, the table's trigger word, and the `code` on the
@@ -369,9 +369,10 @@ impl Quota {
     /// this call — is an `info` line: it is a race with a prompt, a resume or a delete, not a bug.
     async fn stop(&self, session: Session, size_kib: u64) {
         // The row as it stands now, not as the pass read it: a turn that settled between the read and here
-        // has to be stopped as an idle session, and a row that has gone has nothing to stop.
-        let current = match self.row(&session.id) {
-            Ok(Some(current)) => current,
+        // has to be stopped as an idle session, and a row that has gone has nothing to stop. The turn goes
+        // with it, because the ladder is told which turn it is ending (ADR-0020).
+        let row = match self.turn(&session.id) {
+            Ok(Some(row)) => row,
             Ok(None) => return,
             Err(error) => {
                 tracing::warn!(
@@ -383,9 +384,10 @@ impl Quota {
                 return;
             }
         };
+        let current = row.session;
         match current.status {
             Status::Running => {
-                let ending = self.ladder.end_turn(&current, DISK_QUOTA).await;
+                let ending = self.ladder.end_turn(&current, row.turn, DISK_QUOTA).await;
                 if ending == Ending::Forced {
                     // Rung 2 moved the row to `stopped` and stopped the container: the log line and the report
                     // are all that is left, and they happen for a forced stop as much as for an asked one.
@@ -522,6 +524,13 @@ impl Quota {
     fn row(&self, session_id: &str) -> Result<Option<Session>, crate::sessions::RepoError> {
         let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
         database.sessions().get(session_id)
+    }
+
+    /// The row and the turn it is running, in one statement: the stop may only name a turn it read
+    /// together with the state that decided to end it (ADR-0020).
+    fn turn(&self, session_id: &str) -> Result<Option<SessionTurn>, crate::sessions::RepoError> {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        database.sessions().turn(session_id)
     }
 
     /// The one state function, wired to this watchdog's two handles.

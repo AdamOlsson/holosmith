@@ -323,7 +323,7 @@ async fn every_reason_into_stopped_sets_the_clock_and_the_resume_clears_it() {
             .apply(&id, parsed, Some(reason))
             .await
             .expect("the table has this row");
-        assert_eq!(to, Status::Stopped, "{trigger}");
+        assert_eq!(to.status, Status::Stopped, "{trigger}");
         let row = {
             let database = state.database.lock().expect("the lock is not poisoned");
             database

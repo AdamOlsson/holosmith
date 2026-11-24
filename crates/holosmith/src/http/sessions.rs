@@ -38,7 +38,7 @@ use crate::key;
 use crate::ladder;
 use crate::sessions::activity;
 use crate::sessions::state::{StateError, Trigger};
-use crate::sessions::{NewSession, RepoError, Session, Status};
+use crate::sessions::{NewSession, RepoError, Session, SessionTurn, Status, TurnGeneration};
 use crate::worktree::{Refusal, Retained};
 
 /// The header a create's idempotency key travels in.
@@ -742,6 +742,22 @@ fn one_locked(state: &AppState, id: &str) -> Result<Option<Session>, ApiError> {
         .map_err(|error| internal("get", error))
 }
 
+/// The row **and the turn it is running**, read in one statement.
+///
+/// What an abort, a delete or a quota stop needs before it may name a turn: "the session is `running`"
+/// and "which turn" are one question, and two reads would let a prompt land between them and answer
+/// the state of one turn with the identity of the next (ADR-0020).
+fn turn_locked(state: &AppState, id: &str) -> Result<Option<SessionTurn>, ApiError> {
+    let database = state
+        .database
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    database
+        .sessions()
+        .turn(id)
+        .map_err(|error| internal("turn", error))
+}
+
 /// A prompt's body: the one field, non-empty. Anything else — a non-object, a missing or empty
 /// `prompt`, a second field — is `bad_body` (D1).
 fn parse_prompt(bytes: &[u8]) -> Result<String, ApiError> {
@@ -791,9 +807,13 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     if current.status != Status::Idle {
         return ApiError::not_in_state(current.status, NOT_IDLE_PROMPT).into_response();
     }
-    if let Err(error) = apply_prompt(state, id).await {
-        return error.into_response();
-    }
+    // The turn the prompt just took, read from the transitioner's own answer rather than from a second
+    // query: the runner carries it, and it is what keeps the ladder a timeout spawns about this turn
+    // (ADR-0020).
+    let turn = match apply_prompt(state, id).await {
+        Ok(turn) => turn,
+        Err(error) => return error.into_response(),
+    };
     // The row is `running` now, so the turn is started **before** anything else can fail: a refetch
     // that failed would otherwise leave a `running` row whose turn never began. The abort ladder
     //  can end such a row, which is why this order is defensible rather than merely fast.
@@ -805,7 +825,7 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
     if let Ok(Some(row)) = one_locked(state, id) {
         running = row;
     }
-    state.turner().spawn(running.clone(), prompt);
+    state.turner().spawn(running.clone(), prompt, turn);
     (StatusCode::ACCEPTED, Json(running)).into_response()
 }
 
@@ -820,19 +840,25 @@ pub async fn prompt(state: &AppState, id: &str, body: Result<Bytes, BytesRejecti
 /// `session.status` events (spec item 16), and the body is the row as it stands — `running` — not a
 /// promise about the state it will hold. A second abort racing the first is refused by the state
 /// check, or climbs a ladder whose rungs are both already spent.
+///
+/// **The row and its turn are one read**, and the turn is what the climb is asked for: a ladder that
+/// starts after the row has moved on finds that out before it asks the agent anything and does nothing
+/// (ADR-0020).
 pub async fn abort(state: &AppState, id: &str) -> Response {
-    let current = match one_locked(state, id) {
-        Ok(Some(session)) => session,
+    let current = match turn_locked(state, id) {
+        Ok(Some(row)) => row,
         Ok(None) => return ApiError::unknown_session().into_response(),
         Err(error) => return error.into_response(),
     };
-    if current.status != Status::Running {
-        return ApiError::not_in_state(current.status, NOT_RUNNING_ABORT).into_response();
+    if current.session.status != Status::Running {
+        return ApiError::not_in_state(current.session.status, NOT_RUNNING_ABORT).into_response();
     }
     // Spawned after the decision and before the answer is built, so no response ever waits for a
     // grace period — and so a ladder that fired instantly still answers the row it was given.
-    state.ladder().spawn(current.clone(), ladder::FORCED_ABORT);
-    (StatusCode::ACCEPTED, Json(current)).into_response()
+    state
+        .ladder()
+        .spawn(current.session.clone(), current.turn, ladder::FORCED_ABORT);
+    (StatusCode::ACCEPTED, Json(current.session)).into_response()
 }
 
 /// A steer's one field, non-empty after trimming. Anything else — a non-object, a missing or blank
@@ -1071,34 +1097,39 @@ pub(crate) async fn deletion(
     force: bool,
     landed: Option<&str>,
 ) -> Result<DeleteAnswer, ApiError> {
-    let mut current = match one_locked(state, id) {
-        Ok(Some(session)) => session,
+    let mut current = match turn_locked(state, id) {
+        Ok(Some(row)) => row,
         Ok(None) => return Err(ApiError::unknown_session()),
         Err(error) => return Err(error),
     };
-    if current.status == Status::Deleting {
+    if current.session.status == Status::Deleting {
         // Already asked, not yet removed: answer the row the client can see and give the removal
         // another run. No snapshot and no second event — the point of no return was crossed by the
         // request that moved the row here.
-        let retained = retained_for(state, &current, landed).await;
-        state.deleter().spawn(current.clone(), retained.clone());
-        return Ok(DeleteAnswer::of(current, &retained));
+        let retained = retained_for(state, &current.session, landed).await;
+        state
+            .deleter()
+            .spawn(current.session.clone(), retained.clone());
+        return Ok(DeleteAnswer::of(current.session, &retained));
     }
-    if current.status == Status::Running {
-        let ending = state.ladder().end_turn(&current, deleter::DELETED).await;
+    if current.session.status == Status::Running {
+        let ending = state
+            .ladder()
+            .end_turn(&current.session, current.turn, deleter::DELETED)
+            .await;
         tracing::info!(
             target: "holosmith::http::sessions",
             session = id,
-            ending = ?ending,
-            "ended a running turn so the session could be deleted"
+            ending = %ending,
+            "the running turn's ending, asked for before the session is deleted"
         );
         // The row the snapshot and the backend are handed is the one the turn's end left behind,
         // not the `running` row read above: its reason and its state are what the removal is about.
         if let Ok(Some(row)) = one_locked(state, id) {
-            current = row;
+            current.session = row;
         }
     }
-    complete_deletion(state, current, Trigger::Delete, force, landed).await
+    complete_deletion(state, current.session, Trigger::Delete, force, landed).await
 }
 
 /// The delete flow's **second half**, from a row nobody's turn is running to the spawned removal: the
@@ -1257,19 +1288,29 @@ pub(crate) fn force_requested(query: Option<&str>) -> bool {
         .any(|pair| pair == "force=true")
 }
 
-/// Move the row to `running`, or the refusal to answer.
+/// Move the row to `running`, or the refusal to answer, and answer the turn the prompt took.
 ///
 /// The table is the authority (ADR-0016); the read above only chose the fast refusal. A lost race is
 /// retried **once**: if the row is `idle` again, the turn that won has already settled and the
 /// prompt is legal now, so a client is not refused for a session that is idle the instant it asks.
 /// A row that is gone is `not_found`, and any other state is refused with its own code.
-async fn apply_prompt(state: &AppState, id: &str) -> Result<(), ApiError> {
+///
+/// The generation is the transitioner's answer and not a second read: the prompt that moved the row
+/// carries the turn it took, and that number is what the ladder a timeout spawns is about (ADR-0020).
+async fn apply_prompt(state: &AppState, id: &str) -> Result<TurnGeneration, ApiError> {
     for _ in 0..2 {
         match state.transitioner().apply(id, Trigger::Prompt, None).await {
-            Ok(_) => return Ok(()),
+            Ok(applied) => return Ok(applied.turn),
             // The row moved but its event did not reach the writer — a process on its way down.
-            // The row is what a client acts on, so this is the prompt succeeding, not failing.
-            Err(StateError::Unreported(_)) => return Ok(()),
+            // The row is what a client acts on, so this is the prompt succeeding, not failing; the
+            // turn it took is read back, because the answer that would have carried it went with the
+            // event.
+            Err(StateError::Unreported(_)) => {
+                return match turn_locked(state, id)? {
+                    Some(row) => Ok(row.turn),
+                    None => Err(ApiError::unknown_session()),
+                };
+            }
             Err(StateError::Illegal { .. }) => {}
             Err(StateError::UnknownSession(_)) => return Err(ApiError::unknown_session()),
             Err(error) => return Err(internal("prompt", error)),
