@@ -125,12 +125,50 @@ refused transition stays what made it — an error the caller has to be able to 
 the same trade ADR-0019 accepted for a prompt that loses a race to another prompt: the table is the
 authority, and losing a documented race is not a failure.
 
+**Amended by the section below.** That reporting moved into `Transitioner::apply_for_turn_logged`, and a
+refused ending is a `debug` line for all three of the runner's endings — `Illegal` (the ladder moved the row
+first) and `Superseded` (a later turn holds it) alike — because every one of them is a race the runner is
+allowed to lose. The provisioner's and the exit path's `apply_logged` still calls an `Illegal` an error.
+
 The reason on rung 1's ending is `abort_completed` — the trigger's own word — because
 `session.status` has no trigger field (ADR-0016) and the demo's claim is that "the reason says which
 rung fired". A client therefore reads `reason: "abort_completed"` for a clean abort and
 `reason: "forced_abort"` for one that had to kill the container. The row's final state clears it: the
 resume's transition carries no reason, so a session that came back from a forced abort is `idle` with
 `reason: null` and the log is where the history lives.
+
+## The runner ends the turn it was handed, and no other
+
+**Amended: what the ladder may do to a row, the runner obeys as well.** The narrowing above was written for
+the climb, and the runner had the same hole one level down. Its three endings went through the unguarded
+`Transitioner::apply`, and `agent_settled`, `abort_completed` and `unexpected_exit` are all legal from
+`running` whatever turn holds the row — so a runner that outlived its turn wrote its ending onto the next
+turn's row, and the row is the API: "turn 2 ended" is a lie no client can detect.
+
+The case that reaches it is the ladder's own, one answer later. Turn 1 runs past its deadline, the forced
+rung stops the container and resumes the session, a prompt makes the row `running` again for turn 2, and
+only then does turn 1's `start_turn` answer `Aborted` — a backend is free to take its time about that,
+because a container dies when it dies and not when the stop is asked. Turn 1's runner then writes
+`running -> idle` with `abort_completed` on turn 2's row, after turn 2's prompt was accepted. The settle arm
+does the same with `agent_settled`, and it has the worse half: the WIP snapshot it takes first is of the
+worktree turn 2 is writing. The error arm writes `error` the same way.
+
+So the runner obeys the generation the ladder does, and it already held it — `Turn` was handed it by the
+prompt and passed it to `spawn_ladder`, and did not use it for its own ending. All three endings are now
+`Transitioner::apply_for_turn`'s, so a row the runner no longer owns answers `StateError::Superseded` and
+nothing is written, the event included.
+
+**The snapshot is guarded separately, because the order is the spec's.** The WIP snapshot runs *before* the
+ending (item 9), so the ending's compare-and-swap cannot cover it: it asks whether the row is still this
+turn's — the generation alone — and skips the git command otherwise. The status is deliberately not part of
+that question. It is the climb's: there the row must still say `running` for there to be anything left to
+wait for, which is why `Whose::Mine` answers "should I keep waiting". Here the harm is a worktree another
+turn is writing, and the generation alone answers that. A row that left `running` without the generation
+moving is not another turn's at all — the exit classifier writes `pi_exit` or `unexpected_exit` from
+`running`, between the agent's last frame and its `finished` — and that turn's work is exactly what the ref
+exists to mark. A read narrows that window and does not close it; what keeps the *row* right is still the
+ending's CAS, and the residue is a ref of a worktree that stopped being this turn's in the moment between
+the two. That is why this is written as a narrowing and not as an invariant.
 
 ## `409 session_idle` joins the family
 
@@ -159,6 +197,12 @@ and a 202 that does nothing is indistinguishable from a ladder that failed.
   the next turn's container are the two it must not touch.
 - `src/backend/stub.rs` grows one test in three phases: an abort cuts the script short, an ignored
   abort does not, and a stop cuts it either way and leaves no stop request behind.
+- **A runner's ending is its own turn's.** `tests/turn_timeout.rs`'
+  `a_timed_out_turns_runner_does_not_end_the_turn_that_followed_it` drives the interleaving: turn 1's climb
+  forces the stop and resumes the session, turn 2's prompt takes the row, and only then does turn 1's runner
+  answer — turn 2's row is still `running`, with its own generation and no reason, no `session.status` event
+  carries turn 1's ending, and no `Call::Snapshot` is recorded for turn 2's worktree. Both guards are
+  load-bearing: with either one removed the test is red, on the row and on the call list respectively.
 - **The prompt's two statements are one critical section and not one commit.** The status write and the
   generation bump happen under the one `Mutex<Database>` guard, so no in-process reader sees a `running`
   row at the previous generation; a failure of the bump after the status write has committed answers the

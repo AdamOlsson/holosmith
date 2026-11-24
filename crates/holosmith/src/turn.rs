@@ -19,6 +19,11 @@
 //!   outlive a statement and the event writer's commit never waits on this task.
 //! - **This is not a state machine.** This module owns the table and the one function that writes a
 //!   state; the runner asks it for `agent_settled` or `unexpected_exit` and writes nothing itself.
+//! - **It ends the turn it was handed, and no other.** The runner is spawned by a prompt and can outlive
+//!   the turn that prompt took — a backend's answer to a stop arrives when the container dies, not when
+//!   the stop is asked — so all three endings name the generation the prompt gave this task, and a row
+//!   another turn holds is refused rather than moved. The WIP snapshot is guarded the same way, because
+//!   a snapshot of a worktree another turn is writing is the harm (ADR-0020).
 //!
 //! Abort and steer belong to a later change: the script is cut short by the backend's own
 //! `abort`/`stop`, and the ladder that asks for it is [`crate::ladder`].
@@ -53,7 +58,7 @@ use crate::ladder::Ladder;
 use crate::sessions::Session;
 use crate::sessions::TurnGeneration;
 use crate::sessions::activity;
-use crate::sessions::state::{StateError, Transitioner, Trigger};
+use crate::sessions::state::{Transitioner, Trigger};
 
 /// The reason a turn that ended because of an abort records on `running -> idle`.
 ///
@@ -169,6 +174,8 @@ impl Turn {
     ///
     /// `turn` is the row's generation as the prompt left it — the identity this runner hands the ladder
     /// it spawns, so a climb started for this turn is refused once the row is another turn's (ADR-0020).
+    /// Its own ending names it for the same reason: a runner that outlived its turn must not end the one
+    /// that holds the row now.
     ///
     /// The deadline starts here and dies with this task, which is what "the timeout is per turn, not per
     /// session" means: a turn that settles never has a clock to reset, and a steer cannot extend one
@@ -192,7 +199,7 @@ impl Turn {
         loop {
             tokio::select! {
                 ended = &mut the_turn => {
-                    self.finished(&session, ended, fired).await;
+                    self.finished(&session, turn, ended, fired).await;
                     return;
                 }
                 () = until(deadline), if fired.is_none() => {
@@ -300,12 +307,17 @@ impl Turn {
 
     /// How the turn ended, and what the row and the log record about it.
     ///
+    /// `turn` is the row's generation as the prompt left it, and it is what every ending names: the runner
+    /// can outlive its turn, so an ending is applied **only while the row is still this turn's** — a row a
+    /// later prompt holds is refused rather than moved (ADR-0020).
+    ///
     /// `reason` is `Some` only when the *runner* ended the turn for a reason of its own — the timeout —
     /// because an ordinary turn's ending is the agent's and an ordinary abort's reason is
     /// [`ABORT_COMPLETED`].
     async fn finished(
         &self,
         session: &Session,
+        turn: TurnGeneration,
         ended: Result<TurnEnd, BackendError>,
         reason: Option<&'static str>,
     ) {
@@ -322,22 +334,38 @@ impl Turn {
                 // its own shape: a turn that finished after its deadline records `turn_timeout`
                 // even though it stopped by itself. A turn that ended some *other* way keeps that
                 // ending's reason: an operator's abort is not the budget's to relabel.
-                // Every `agent_settled` leaves a WIP ref before the row moves (spec item 9). A snapshot
-                // failure is logged and does not change the turn's ending: the turn did finish, and making a
-                // failed git command turn a completed turn into an `error` row would lose the transcript it
-                // just produced. the delete is where a snapshot failure is a refusal.
-                self.snapshot(session).await;
+                // Every `agent_settled` leaves a WIP ref before the row moves (spec item 9), and only while
+                // the row is still this turn's: a snapshot of a worktree another turn is writing is the harm
+                // the guard exists for. A snapshot failure is logged and does not change the turn's ending:
+                // the turn did finish, and making a failed git command turn a completed turn into an `error`
+                // row would lose the transcript it just produced. the delete is where a snapshot failure is a
+                // refusal.
+                if self.mine(&session.id, turn) {
+                    self.snapshot(session).await;
+                }
                 let reason = match reason {
                     Some(reason) => Some(reason),
                     None => self.settled_over_budget(&session.id).await,
                 };
-                self.transition(session, Trigger::AgentSettled, reason)
+                self.transition(session, turn, Trigger::AgentSettled, reason)
                     .await;
                 self.touch(&session.id);
             }
             Ok(TurnEnd::Aborted) => {
-                self.abort_ended(session, reason.unwrap_or(ABORT_COMPLETED))
-                    .await;
+                // The ladder's second rung exists for a turn that would not stop, so the row is often no
+                // longer `running` — and no longer this turn's — by the time this answer arrives: the refusal
+                // is the ordinary outcome of two owners ending one turn, and `apply_for_turn_logged` logs it
+                // at `debug` for that reason (ADR-0020).
+                //
+                // The reason is the trigger's own word, unless a policy of the runner's asked for the ladder:
+                // an operator's abort is not the timeout's to relabel.
+                self.transition(
+                    session,
+                    turn,
+                    Trigger::AbortCompleted,
+                    Some(reason.unwrap_or(ABORT_COMPLETED)),
+                )
+                .await;
                 self.touch(&session.id);
             }
             Err(error) => {
@@ -350,7 +378,7 @@ impl Turn {
                     %error,
                     "a turn ended with an error"
                 );
-                self.transition(session, Trigger::UnexpectedExit, Some(&reason))
+                self.transition(session, turn, Trigger::UnexpectedExit, Some(&reason))
                     .await;
             }
         }
@@ -368,32 +396,44 @@ impl Turn {
         }
     }
 
-    /// The abort ending: `running -> idle` on `reason`, unless the ladder got there first.
+    /// Whether the row is still this turn's, asked before the WIP snapshot, because a worktree another
+    /// turn is writing must not be snapshotted at all.
     ///
-    /// Two tasks can end one turn (ADR-0020): the ladder's second rung exists exactly for a
-    /// turn that did not stop, so it applies `running -> stopped` and then stops the backend, which
-    /// is what finally makes this turn answer [`TurnEnd::Aborted`]. The row is therefore often no
-    /// longer `running` by the time this runs, and the table refusing the row is the ordinary
-    /// outcome of the two owners rather than a bug — so it is a `debug` line here, and only here.
-    async fn abort_ended(&self, session: &Session, reason: &'static str) {
-        match self
-            .transitioner()
-            .apply(&session.id, Trigger::AbortCompleted, Some(reason))
-            .await
-        {
-            Ok(_) => {}
-            Err(error @ StateError::Illegal { .. }) => tracing::debug!(
-                target: "holosmith::turn",
-                session = %session.id,
-                %error,
-                "the abort ladder ended this turn instead"
-            ),
-            Err(error) => tracing::warn!(
-                target: "holosmith::turn",
-                session = %session.id,
-                %error,
-                "a turn's abort ending did not complete"
-            ),
+    /// **The generation is the whole question, and the state is not part of it.** Only a `prompt` moves the
+    /// generation, and the table admits one only from `idle`, so a row still holding `turn` is a row no later
+    /// turn has taken — whatever state it is in by the time this asks. The ladder asks a second question
+    /// beside it ([`crate::ladder`]'s `Whose::Mine` is "this turn's, **and still `running`**"), but that one
+    /// answers "should I keep waiting for this turn to end", which is a climb's question; the harm here is a
+    /// worktree another turn is writing, and the generation alone answers it. A row leaves `running` without
+    /// the generation moving — [`crate::exit`] writes `pi_exit` and `unexpected_exit` from `running`, between
+    /// the agent's last frame and this ending — and that turn's work is exactly what the ref is for: it is
+    /// what `Retained.wip` and the recovery command name ([`crate::worktree`]), and `stopped`/`error` is the
+    /// state an operator goes looking for it in. Asking the status too would drop the ref for the runner's
+    /// own turn.
+    ///
+    /// **A read narrows that window; the ending closes it.** The snapshot runs before the ending (spec item
+    /// 9's order), so the two cannot be one critical section: what keeps the *row* right is
+    /// [`Transitioner::apply_for_turn`](crate::sessions::state::Transitioner::apply_for_turn), which reads
+    /// the generation, compares it and writes as one compare-and-swap. This is the guard that keeps the git
+    /// command off another turn's worktree, and the residue a lost race can leave is a ref of a worktree that
+    /// stopped being this turn's in the moment between the two.
+    ///
+    /// A row that cannot be read is no evidence that it is ours, so the snapshot is skipped: a ref nobody
+    /// wrote leaves the work in the worktree, and a ref over another turn's worktree is the harm.
+    fn mine(&self, session_id: &str, turn: TurnGeneration) -> bool {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        match database.sessions().turn(session_id) {
+            Ok(Some(current)) => current.turn == turn,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    target: "holosmith::turn",
+                    session = %session_id,
+                    %error,
+                    "the turn's row could not be read, so the WIP snapshot is skipped"
+                );
+                false
+            }
         }
     }
 
@@ -407,14 +447,20 @@ impl Turn {
         activity::touch(&self.database, session_id);
     }
 
-    /// One state change, with a failure logged rather than fatal: the row is the turn's outcome and
-    /// the event is a report of it, so a refused transition (a bug) or a stopped writer must not make
-    /// the task lie about what happened.
-    async fn transition(&self, session: &Session, trigger: Trigger, reason: Option<&str>) {
+    /// One state change, applied only while the row is still this turn's: a refused ending is logged
+    /// rather than fatal, and a row a later turn holds is refused as `Superseded` and logged at `debug`,
+    /// because the row is the turn's outcome and two owners can race for it (ADR-0020).
+    async fn transition(
+        &self,
+        session: &Session,
+        turn: TurnGeneration,
+        trigger: Trigger,
+        reason: Option<&str>,
+    ) {
         // The reporting is the state module's, so this runner and the provisioner cannot drift
         // apart in how they log a refusal.
         self.transitioner()
-            .apply_logged(&session.id, trigger, reason)
+            .apply_for_turn_logged(&session.id, trigger, reason, turn)
             .await;
     }
 

@@ -76,6 +76,14 @@ fn events(state: &AppState, session: &str) -> Vec<(i64, String, Value)> {
         .collect()
 }
 
+/// Every committed `session.status` whose `from` is `running`: one per ended turn, in seq order.
+fn endings(state: &AppState, id: &str) -> Vec<(i64, String, Value)> {
+    events(state, id)
+        .into_iter()
+        .filter(|(_, kind, payload)| kind == "session.status" && payload["from"] == "running")
+        .collect()
+}
+
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + PATIENCE;
     while !condition() {
@@ -365,6 +373,105 @@ async fn a_timed_out_turns_ladder_does_not_end_the_turn_that_followed_it() {
     assert_eq!(
         after.turn, second.turn,
         "the row was handed to another turn"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_turns_runner_does_not_end_the_turn_that_followed_it() {
+    // The test above is the ladder's half of this interleaving and this is the runner's, one level down:
+    // the runner ends its turn with `agent_settled`, `abort_completed` or `unexpected_exit`, and all three
+    // are legal from `running` whatever turn holds the row — so a runner that outlived its turn wrote its
+    // ending onto the next turn's row, after that turn's prompt was accepted, and took its WIP snapshot of
+    // the worktree turn 2 was writing. The generation the prompt gave the runner is what refuses it
+    // (ADR-0020).
+    //
+    // **The order is by construction, not by a clock.** The stub answers a stop at its next frame, so a
+    // turn of the stub's that is in flight cannot outlive the forced rung: the row's trip through the
+    // ladder and back to `running` is what this test drives first, and turn 1's runner answers second by
+    // being awaited second. The climb is the same one the deadline spawns, reason and grace included.
+    let dir = TempDir::new("turn-timeout-runner-superseded");
+    // The hung agent, so rung 2 fires; a frame of 20 ms, so the resumed session's four steps are a beat.
+    let stub = paced(20).ignoring_abort();
+    let state = with_stub(state_in(&dir, Config::default()), stub.clone());
+    let session = running(&state, "timeout-runner-superseded").await;
+    let timed_out = turn(&state, &session.id);
+
+    // Turn 1 runs past its deadline: rung 1 is ignored, so rung 2 records the stop and resumes the session.
+    let ladder = Ladder::new(
+        state.backend.clone(),
+        Arc::clone(&state.database),
+        state.events.clone(),
+        GRACE,
+    );
+    assert_eq!(
+        ladder
+            .climb(&timed_out.session, timed_out.turn, TURN_TIMEOUT)
+            .await,
+        Ending::Forced,
+        "the stub ignored the abort, so the climb had to force the stop"
+    );
+    wait_until("the ladder brought the session back", || {
+        row(&state, &session.id).status == Status::Idle
+    })
+    .await;
+
+    // Turn 2: the operator's prompt takes the row, which makes it a different turn.
+    drive(&state, &session.id, Trigger::Prompt, None).await;
+    let second = turn(&state, &session.id);
+    assert_ne!(
+        second.turn, timed_out.turn,
+        "the prompt did not take a new turn, so nothing here is a superseded runner"
+    );
+    assert_eq!(second.session.status, Status::Running);
+    let ended_before = endings(&state, &session.id).len();
+    let asked = stub.calls().len();
+
+    // Now turn 1's runner answers, with the generation the prompt gave it. Its turn is the stub's to run
+    // — a stop request left by a turn that is over is cleared when the next turn starts — so it settles
+    // over turn 2's row.
+    runner(&state, &stub, None)
+        .run(
+            timed_out.session.clone(),
+            "first".to_string(),
+            timed_out.turn,
+        )
+        .await;
+
+    // The row is still turn 2's, and nothing about turn 1's ending is on it.
+    let after = turn(&state, &session.id);
+    assert_eq!(
+        after.session.status,
+        Status::Running,
+        "turn 1's runner ended the turn that held the row"
+    );
+    assert_eq!(
+        after.session.status_reason, None,
+        "turn 1's ending was written onto turn 2's row"
+    );
+    assert_eq!(
+        after.turn, second.turn,
+        "the row was handed to another turn"
+    );
+
+    // The snapshot is the other half: the git command must not run over the worktree turn 2 is writing.
+    let calls: Vec<Call> = stub.calls()[asked..].to_vec();
+    assert!(
+        calls.contains(&Call::StartTurn),
+        "turn 1's runner never ran its turn, so the snapshot assertion would be vacuous: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&Call::Snapshot),
+        "turn 1's runner snapshotted the worktree turn 2 is writing: {calls:?}"
+    );
+
+    // And no `agent_settled` — no ending at all — reached the log over turn 2's row. The writer commits on
+    // its own tick (ADR-0013), so an ending that had been applied is committed within a few of them.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        endings(&state, &session.id).len(),
+        ended_before,
+        "an event carries turn 1's ending: {:?}",
+        endings(&state, &session.id)
     );
 }
 

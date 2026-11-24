@@ -569,8 +569,9 @@ impl Transitioner {
     ///
     /// A runner's state change reports work that already happened, so a refused transition (a bug)
     /// or a stopped writer must not make the task lie about the outcome. The provisioner and the
-    /// turn runner differ only in what they do *around* this call, so the reporting lives here
-    /// rather than once in each.
+    /// exit path differ only in what they do *around* this call, so the reporting lives here
+    /// rather than once in each. The turn runner's endings are [`Self::apply_for_turn_logged`]'s,
+    /// because a runner that outlived its turn must not move the next turn's row.
     pub async fn apply_logged(&self, session_id: &str, trigger: Trigger, reason: Option<&str>) {
         match self.apply(session_id, trigger, reason).await {
             Ok(_) => {}
@@ -579,6 +580,51 @@ impl Transitioner {
                 session = session_id,
                 %error,
                 "a runner asked for a transition the table does not have"
+            ),
+            Err(error) => tracing::warn!(
+                target: "holosmith::sessions::state",
+                session = session_id,
+                %error,
+                "a runner's state change did not complete"
+            ),
+        }
+    }
+
+    /// Apply one transition **for `turn`** from a background runner: every failure is logged, never
+    /// returned, and a row another turn holds is not a failure at all.
+    ///
+    /// [`Self::apply_logged`]'s sibling, and the difference is the generation. The turn runner's three
+    /// endings — `agent_settled`, `abort_completed`, `unexpected_exit` — are legal from `running`
+    /// whatever turn holds the row, so a runner that outlived its turn would otherwise write its ending
+    /// onto the next turn's row, and the row is the API: "turn 2 ended" is a lie no client can detect.
+    /// [`Self::apply_for_turn`] refuses that as [`StateError::Superseded`] (ADR-0020).
+    ///
+    /// A refusal is a `debug` line for the same reason the abort ending's already was: two owners can end
+    /// one turn, so "the row is a later turn's" and "the ladder moved the row first" are the designed
+    /// outcomes of a race the runner is allowed to lose, not bugs at the caller. Everything else is
+    /// reported the way [`Self::apply_logged`] reports it, because those really are failures.
+    pub async fn apply_for_turn_logged(
+        &self,
+        session_id: &str,
+        trigger: Trigger,
+        reason: Option<&str>,
+        turn: TurnGeneration,
+    ) {
+        match self.apply_for_turn(session_id, trigger, reason, turn).await {
+            Ok(_) => {}
+            Err(error @ StateError::Superseded { .. }) => tracing::debug!(
+                target: "holosmith::sessions::state",
+                session = session_id,
+                trigger = trigger.as_str(),
+                %error,
+                "a runner's ending was refused: a later turn holds the row"
+            ),
+            Err(error @ StateError::Illegal { .. }) => tracing::debug!(
+                target: "holosmith::sessions::state",
+                session = session_id,
+                trigger = trigger.as_str(),
+                %error,
+                "a runner's ending was refused: the row had already left that state"
             ),
             Err(error) => tracing::warn!(
                 target: "holosmith::sessions::state",
