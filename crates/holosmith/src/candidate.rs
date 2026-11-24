@@ -83,6 +83,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::config::Config;
 use crate::worktree::{git_error, git_output};
 
@@ -116,10 +118,12 @@ const DESCRIBE: [&str; 3] = ["describe", "--tags", "--always"];
 
 /// The commit a promotion would make live: a clean checkout's `master`, and the tag it describes itself with.
 ///
-/// [`resolve`] is its only constructor. The fields are `pub` because that is how this crate's values are read, so
-/// the rule is a doc and not a compiler error: a `Candidate` built from a caller's own `rev-parse` is the second
-/// spelling of "what would be promoted" this module exists to prevent, and is a bug.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`resolve`] is its only constructor. The fields are `pub` because that is how this crate's values are read, and
+/// the type serializes because a job's report carries it ([`crate::pass::Report`]): the commit a run promoted is a
+/// fact a caller reads out of a file, and one spelling of it is the point of this module. The rule that a `Candidate`
+/// is only ever [`resolve`]'s answer is a doc and not a compiler error: a value built from a caller's own `rev-parse`
+/// is the second spelling of "what would be promoted" this module exists to prevent, and is a bug.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Candidate {
     /// The checkout `[update] source` names.
     pub source: PathBuf,

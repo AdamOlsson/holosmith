@@ -114,8 +114,16 @@ for target in "${targets[@]}"; do
   mkdir -p "dist/$target"
   cp "target/$target/release/holosmith" "dist/$target/holosmith.tmp"
   mv -f "dist/$target/holosmith.tmp" "dist/$target/holosmith"
+  digest="$(sha256sum "dist/$target/holosmith" | cut -d' ' -f1)"
+  # The digest file beside the artifact, in the shape `holosmith build` writes it (`builder::DIGEST`,
+  # "<digest>  holosmith", what `sha256sum -c` reads): `promote::read_candidate` refuses a candidate
+  # with no sha256sum line beside it, and one artifact layout with two writers is the rule. Written
+  # through a temporary and renamed for the same reason the binary is: a truncated digest file is a
+  # candidate no promotion can read.
+  printf '%s  %s\n' "$digest" "holosmith" > "dist/$target/holosmith.sha256.tmp"
+  mv -f "dist/$target/holosmith.sha256.tmp" "dist/$target/holosmith.sha256"
   printf '%s  %s (%s bytes)\n' \
-    "$(sha256sum "dist/$target/holosmith" | cut -d' ' -f1)" \
+    "$digest" \
     "dist/$target/holosmith" \
     "$(stat -c %s "dist/$target/holosmith")"
 done

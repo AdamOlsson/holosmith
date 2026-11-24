@@ -1162,13 +1162,28 @@ _Avoid_: Source (that is the key, `[update] source`), target (that is a **merge*
 release until it is built)
 
 **Promotion**:
-Moving a candidate **release** to live, as `holosmith upgrade <binary>` performs it: the review gate acknowledged
-(`--acknowledge-review`), a **smoke run**, the two **image builds** when their labels say so, a **drain**, a database
+Moving a candidate **release** to live, as `holosmith update` and `holosmith upgrade <binary>` both perform it once
+its gate has passed — a pass of the **gate** for the first, a human's `--acknowledge-review` for the second: a **smoke
+run**, the two **image builds** when their labels say so, a **drain**, a database
 backup (`VACUUM INTO backups/app-<ts>.db`, five kept), the release directory written, **`current`** switched, the unit
 restarted and a twenty-second `/api/health` poll for a process **younger than the restart** — then, if it does not
 answer, the automatic **rollback**, and if it does, one **prune** of the release tree. Every refusal leaves the machine
 as it found it and says so; a failure *after* the drain leaves it draining, which the sentence names.
 _Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, release
+
+**Update**:
+`holosmith update [--report PATH] [--wait D] [--config PATH] [--root DIR]`: one **promotion**, with a pass of the
+**gate** standing where the **upgrade** verb's `--acknowledge-review` stands. The **candidate** is `[update] source`'s
+clean `master`; the gate is that tree's own `scripts/verify-in-container.sh`, run with
+`HOLOSMITH_VERIFY_IMAGE=agent-image:<the running release's version>` and without `--no-build`, so the artifact its
+`build` phase writes is the artifact promoted; then the pipeline runs on
+`<source>/dist/<this machine's triple>/holosmith`. Ten gigabytes of free space on the candidate tree's filesystem are
+asked for before the gate starts, because that is what it writes. It takes no `--acknowledge-review` — the gate is the
+record — and `--report` writes one JSON object for **every** ending, because a job's caller reads that file and not a
+terminal. Exit 0 only for a candidate that is live, 1 for every other ending. Its machine names are `pass::run`,
+`pass::Report`, `pass::Verdict` and `pass::NEEDED_GB`.
+_Avoid_: Self-update (nothing is downloaded: it promotes this machine's own `[update] source`), rebuild (the gate
+builds, the command promotes), promote (that is the step, not the verb)
 
 **Prune**:
 One promotion's last step: `releases/` is kept at `keep_releases` directories, taking the **live** release and

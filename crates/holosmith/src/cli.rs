@@ -84,12 +84,40 @@ pub enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Update this machine: the whole gate as the verification, then the promotion, as one command.
+    ///
+    /// The candidate is the `master` of the clean checkout `[update] source` names. The verification is that tree's
+    /// own `scripts/verify-in-container.sh`, run in the image the running release deployed, which builds the artifact
+    /// and the candidate's own product images; a green gate is the acknowledgement, so there is no
+    /// `--acknowledge-review` here. The promotion is then `upgrade`'s pipeline run on the artifact the gate left, one
+    /// printed line per step. A gate that fails asks the machine nothing — no smoke run, no drain, no backup.
+    ///
+    /// Exit 0 only when the candidate is live, 1 for every other ending, and `--report` writes one JSON object saying
+    /// which: the candidate, the gate's command and exit code, the artifact and its digest, each step's ending and
+    /// the final state. It is written for every ending, because a job's caller reads that file and not a terminal.
+    Update {
+        /// The file the run's report is written to, as one JSON object, whatever the ending. Absent means nothing is
+        /// written.
+        #[arg(long, value_name = "PATH")]
+        report: Option<PathBuf>,
+        /// How long the drain may wait for the turns that are running (`10m`, `500ms`).
+        #[arg(long, value_name = "DURATION", default_value = "10m", value_parser = parse_wait)]
+        wait: std::time::Duration,
+        /// Promote into this root instead of `HOLOSMITH_ROOT`'s.
+        ///
+        /// The same meaning as `upgrade --root`: the releases and `current` live under it.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
     /// Promote a new version: the whole pipeline, one printed line per step.
     ///
     /// The review gate acknowledged, the host smoke test, the two images when they changed, the drain, a database
     /// backup, the release directory, the `current` symlink, `systemctl --user restart` and a 20-second health poll
     /// that puts the previous release back when the candidate does not answer. Every refusal leaves the machine as it
     /// found it, and says so — except that a failure after the drain leaves it draining, which the sentence names.
+    ///
+    /// The promotion on its own: `holosmith update` is the same pipeline with the gate in front of it and no
+    /// acknowledgement to give.
     Upgrade {
         /// The candidate: the file a promotion is about to make live.
         #[arg(value_name = "BINARY")]

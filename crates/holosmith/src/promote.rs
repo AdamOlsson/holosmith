@@ -1,4 +1,8 @@
-//! `holosmith upgrade <binary>`: spec item 10's promotion pipeline.
+//! Spec item 10's promotion pipeline: the eight steps below, and the lines they print carrying the run's own verb.
+//!
+//! `holosmith upgrade <binary>` is the command an operator hands a file to; `holosmith update` is the one a job runs,
+//! which proves the tree with the gate first and then calls this pipeline ([`crate::pass`]). The pipeline itself is
+//! one, which is what ADR-0082 D1 insists on.
 //!
 //! Item 10's six steps, in the order the acceptance names them, are this module's one function:
 //!
@@ -71,8 +75,12 @@ const UNIT_MODE: u32 = 0o644;
 pub struct Options {
     /// The candidate: the file a promotion is about to make live.
     pub candidate: PathBuf,
-    /// Whether the operator acknowledged item 12's diff review on the command line.
-    pub acknowledge_review: bool,
+    /// What recorded item 12's diff review, which is what lets the pipeline run at all. `None` is the refusal:
+    /// there is no other path in this pipeline to the drain (ADR-0082 D2).
+    pub review: Option<Review>,
+    /// The verb the run is, and the prefix every line the pipeline prints carries: `upgrade` when an operator hands
+    /// this machine a file, `update` when the run is a pass of the gate and then the pipeline ([`crate::pass`]).
+    pub verb: &'static str,
     /// How long the drain may wait for the running turns (the flag's, default `10m`).
     pub wait: Duration,
     /// How long the new version has to answer after a restart: [`WINDOW`] for the command, and a parameter for the
@@ -80,6 +88,40 @@ pub struct Options {
     /// poll gives up would be a test nobody runs.
     pub window: Duration,
 }
+
+/// What recorded item 12's diff review, which is the requirement a promotion stands on.
+///
+/// Two because two things can be the record — a human's word and a machine's proof — and the pipeline's first
+/// printed line says which one this run had. ADR-0110 D2 replaced the first with the second for a promotion the
+/// browser starts; `--acknowledge-review` stays on the operator's own verb, because a human handing this machine a
+/// file is a different act from a pass of the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Review {
+    /// `--acknowledge-review`: a human read the diff and said so, and the flag is the record.
+    Acknowledged,
+    /// A green gate on the tree that built the candidate: the proof is the record (ADR-0110 D2).
+    Verified,
+}
+
+impl Review {
+    /// How the review line names this record: the one thing the two runs say differently.
+    fn record(self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledged on the command line (--acknowledge-review)",
+            Self::Verified => {
+                "recorded by the gate's green run on the tree that built the candidate"
+            }
+        }
+    }
+}
+
+/// The verb the hand path is, and the prefix every line of an `upgrade` run carries.
+///
+/// One spelling for the two places that name it — [`Real::new`]'s prefix and `commands::upgrade`'s
+/// [`Options::verb`] — because a drain line saying `upgrade:` while the pipeline's said something else would be two
+/// words for one run. `update` has a constant of its own ([`crate::pass::VERB`]) rather than sharing this one: the
+/// two are two verbs, and a run the browser started must not have a line that names the operator's act instead.
+pub const VERB: &str = "upgrade";
 
 /// The candidate, as this command read it.
 #[derive(Debug)]
@@ -142,7 +184,15 @@ pub struct Real {
 impl Real {
     /// The promotion's machine: its lines say `upgrade:` and it refuses a drain this request did not start.
     pub fn new(config: &Config) -> Self {
-        Self::named(config, "upgrade", false)
+        Self::named(config, VERB, false)
+    }
+
+    /// A promotion's machine whose printed lines carry `verb` — the run's own word for itself, as
+    /// [`Options::verb`] is: `upgrade` for the hand path, `update` for a pass of the gate and then the pipeline
+    /// ([`crate::pass`]). It refuses a drain this request did not start, exactly as [`Real::new`] does: `update` is a
+    /// promotion, not a rollback.
+    pub fn prefixed(config: &Config, verb: &'static str) -> Self {
+        Self::named(config, verb, false)
     }
 
     /// The rollback verb's machine: its lines say `rollback:`, and it **joins** a drain already in progress.
@@ -270,7 +320,7 @@ pub fn run(config: &Config, root: &Root, options: &Options, steps: &dyn Steps) -
     match execute(config, root, options, steps, &tools) {
         Ok(()) => ExitCode::SUCCESS,
         Err(said) => {
-            eprintln!("holosmith: upgrade: {said}");
+            eprintln!("holosmith: {}: {said}", options.verb);
             ExitCode::FAILURE
         }
     }
@@ -287,8 +337,9 @@ pub fn execute(
     // 0. The candidate, and the two facts that can refuse a promotion before anything is asked of the machine: it is
     //    not this machine's build, or its schema is older than the database's.
     let candidate = read_candidate(&options.candidate)?;
+    let verb = options.verb;
     println!(
-        "upgrade: candidate: {} (sha256 {}, {} ({}), schema {})",
+        "{verb}: candidate: {} (sha256 {}, {} ({}), schema {})",
         candidate.path.display(),
         &candidate.digest[..12],
         candidate.info.version,
@@ -306,19 +357,20 @@ pub fn execute(
         "build the release from the current tree (`holosmith build`), or restore a database this candidate understands",
     )?;
 
-    // 1. The review gate. Item 12's review is the human gate; this flag is the record of it, and the promotion has no
-    //    other path to the drain.
-    if !options.acknowledge_review {
+    // 1. The review gate. Item 12's review is the human gate, and what records it is the difference between the two
+    //    runs: a flag on the operator's own verb, or a green gate on the tree that built the candidate (ADR-0110 D2).
+    //    Either way the promotion has no other path to the drain.
+    let Some(review) = options.review else {
         return Err(format!(
             "the review gate was not acknowledged: item 12's diff review is the real gate, and this command takes its \
              acknowledgement as `--acknowledge-review` (the candidate is {} at {}, sha256 {}) — nothing was drained, \
              backed up or switched",
             candidate.info.version, candidate.info.git_tag, candidate.digest
         ));
-    }
+    };
     println!(
-        "upgrade: review: acknowledged on the command line (--acknowledge-review), for {} sha256 {}: item 12's diff \
-         review is the gate, and this flag is the record of it",
+        "{verb}: review: {}, for {} sha256 {}: item 12's diff review is the gate, and this is the record of it",
+        review.record(),
         candidate.info.git_tag,
         &candidate.digest[..12]
     );
@@ -326,12 +378,12 @@ pub fn execute(
     // 2. The smoke test, in process, while this machine still serves the version being replaced.
     let smoke_root = config.data_root.join("smoke");
     println!(
-        "upgrade: smoke: {} --root {}",
+        "{verb}: smoke: {} --root {}",
         candidate.path.display(),
         smoke_root.display()
     );
     match steps.smoke(&candidate.path, &smoke_root) {
-        smoke::Outcome::Passed => println!("upgrade: smoke: passed"),
+        smoke::Outcome::Passed => println!("{verb}: smoke: passed"),
         smoke::Outcome::Failed(sentence) => {
             return Err(format!(
                 "the candidate failed its smoke test, so the promotion stopped before the drain: nothing was drained, \
@@ -348,7 +400,7 @@ pub fn execute(
     // 3. The two images, for the candidate's version and from the candidate's bytes.
     //
     // The sink is the silent one, and the label names this pipeline's step rather than a deploy's: a promotion prints
-    // a line per step of its own as it goes (`upgrade: images: …`), so a build's two lines would be a second spelling
+    // a line per step of its own as it goes (`<verb>: images: …`), so a build's two lines would be a second spelling
     // of one progress stream — `install` is the verb whose silence the sink exists for (ADR-0092).
     let pending = images::outstanding(steps.images(), config, &candidate.info, &candidate.digest);
     match images::ensure(
@@ -361,7 +413,7 @@ pub fn execute(
         "images",
         &mut progress::Silent,
     ) {
-        Ok(sentence) => println!("upgrade: images: {sentence}"),
+        Ok(sentence) => println!("{verb}: images: {sentence}"),
         Err(sentence) => {
             return Err(format!(
                 "the images the candidate's version needs were not built, so nothing was drained: {sentence}"
@@ -371,7 +423,7 @@ pub fn execute(
 
     // 4. The drain.
     match steps.drain(&crate::config::admin_dir(&config.data_root), options.wait) {
-        DrainAnswer::Drained => println!("upgrade: drain: drained"),
+        DrainAnswer::Drained => println!("{verb}: drain: drained"),
         DrainAnswer::Already => {
             return Err(format!(
                 "this machine is already draining (the drain answered `state: already draining`), so nothing was \
@@ -401,7 +453,7 @@ pub fn execute(
     //    `draining`).
     let backup = take_backup(config).map_err(draining)?;
     println!(
-        "upgrade: backup: {} ({} kept)",
+        "{verb}: backup: {} ({} kept)",
         backup.display(),
         backup::KEEP_SNAPSHOTS
     );
@@ -409,12 +461,12 @@ pub fn execute(
     // 6. The release, the unit and the switch. Each of these can refuse on a tree an operator has to look at, so
     //    each refusal carries the state the drain left the machine in.
     let release = Release::of(root);
-    let previous = previous_release(&release, root).map_err(draining)?;
-    write_release(&release, &candidate).map_err(draining)?;
-    write_unit(root, config, &release, "upgrade").map_err(draining)?;
+    let previous = previous_release(&release, root, verb).map_err(draining)?;
+    write_release(&release, &candidate, verb).map_err(draining)?;
+    write_unit(root, config, &release, verb).map_err(draining)?;
     release.switch(&candidate.info.git_tag).map_err(draining)?;
     println!(
-        "upgrade: current: -> releases/{} (was {})",
+        "{verb}: current: -> releases/{} (was {})",
         candidate.info.git_tag,
         previous
             .tag
@@ -433,6 +485,7 @@ pub fn execute(
         options.window,
         &backup,
         &previous,
+        verb,
     )
 }
 
@@ -441,7 +494,8 @@ pub fn execute(
 fn read_candidate(path: &Path) -> Result<Candidate, String> {
     let bytes = std::fs::read(path).map_err(|error| {
         format!(
-            "the candidate, {}, could not be read ({error}): `upgrade` promotes a file this machine can run",
+            "the candidate, {}, could not be read ({error}): a promotion makes the candidate the binary systemd \
+             starts, so a candidate has to be a file this machine can run",
             path.display()
         )
     })?;
@@ -649,7 +703,7 @@ struct Previous {
 /// A machine that has never promoted has no `current`, and the previous release is the one systemd is running: this
 /// reads the unit's `ExecStart=`, copies that binary into `releases/<its tag>/` and points `current` at it **before**
 /// the candidate's release is written — so the rollback target exists before the switch that may need it.
-fn previous_release(release: &Release, root: &Root) -> Result<Previous, String> {
+fn previous_release(release: &Release, root: &Root, verb: &str) -> Result<Previous, String> {
     if let Some(link) = release.link() {
         let tag = release.tag_of(&link).ok_or_else(|| {
             format!(
@@ -709,7 +763,7 @@ fn previous_release(release: &Release, root: &Root) -> Result<Previous, String> 
     release.write(&info.git_tag, &bytes, &digest)?;
     release.switch(&info.git_tag)?;
     println!(
-        "upgrade: release: seeded releases/{} from {} ({} ({}), the binary the unit runs)",
+        "{verb}: release: seeded releases/{} from {} ({} ({}), the binary the unit runs)",
         info.git_tag,
         exe.display(),
         info.version,
@@ -723,12 +777,12 @@ fn previous_release(release: &Release, root: &Root) -> Result<Previous, String> 
 }
 
 /// Write the candidate's release directory: its bytes and its digest, the two files `holosmith build` writes.
-fn write_release(release: &Release, candidate: &Candidate) -> Result<(), String> {
+fn write_release(release: &Release, candidate: &Candidate, verb: &str) -> Result<(), String> {
     if release.binary(&candidate.info.git_tag) == candidate.path {
         // The candidate is already the release: a promotion run from `releases/<tag>/holosmith` itself. Nothing to
         // copy, and the switch below is all that is left.
         println!(
-            "upgrade: release: {} is the candidate (sha256 {})",
+            "{verb}: release: {} is the candidate (sha256 {})",
             candidate.path.display(),
             &candidate.digest[..12]
         );
@@ -736,7 +790,7 @@ fn write_release(release: &Release, candidate: &Candidate) -> Result<(), String>
     }
     release.write(&candidate.info.git_tag, &candidate.bytes, &candidate.digest)?;
     println!(
-        "upgrade: release: {} (sha256 {})",
+        "{verb}: release: {} (sha256 {})",
         release.binary(&candidate.info.git_tag).display(),
         &candidate.digest[..12]
     );
@@ -799,6 +853,7 @@ fn serve_with(
     window: Duration,
     backup: &Path,
     previous: &Previous,
+    verb: &str,
 ) -> Result<(), String> {
     // The clock starts **before** the restart is asked for: the poll accepts only an answer from a process younger
     // than this instant, which is what separates the candidate from the version it replaced.
@@ -808,16 +863,16 @@ fn serve_with(
         tools,
         Some(candidate.version.as_str()),
         window,
-        "upgrade",
+        verb,
     );
     if let Some(answer) = attempt.answered {
         println!(
-            "upgrade: health: {} answered {:.1}s after the restart",
+            "{verb}: health: {} answered {:.1}s after the restart",
             answer.version,
             attempt.started.elapsed().as_secs_f32()
         );
         println!(
-            "upgrade: live: {} ({}), backup {}",
+            "{verb}: live: {} ({}), backup {}",
             candidate.version,
             candidate.git_tag,
             backup.display()
@@ -825,13 +880,13 @@ fn serve_with(
         // Step 8, and the only place a prune runs: the candidate is live, so the tree may shed what it no longer
         // needs. A promotion that failed before here, or whose candidate never answered, removes nothing — that tree
         // is what an operator reads while diagnosing it, and the rollback target is in it.
-        prune(&Release::of(root), config.keep_releases);
+        prune(&Release::of(root), config.keep_releases, verb);
         return Ok(());
     }
     // The rollback: the same switch in reverse, the same restart, and the same poll -- and **no database restore**,
     // because expand/contract is what makes switching back safe (ADR-0047). A restore would delete the work of every
     // session since the backup.
-    rollback(config, root, steps, tools, window, backup, previous)
+    rollback(config, root, steps, tools, window, backup, previous, verb)
 }
 
 /// Step 8: keep the newest `keep_releases`, and never the live release or the one behind it.
@@ -840,7 +895,7 @@ fn serve_with(
 /// directory it could not delete leaves a tree with one release too many — a fact to print, not a reason to tell an
 /// operator that a healthy promotion failed (which would read as "roll back"). The sentence says what was removed
 /// before it stopped, because a half-done prune is the state a second run has to be able to read.
-fn prune(release: &Release, keep: u32) {
+fn prune(release: &Release, keep: u32, verb: &str) {
     let held = release.history().len();
     match release.prune(keep) {
         Ok(done) => {
@@ -854,15 +909,16 @@ fn prune(release: &Release, keep: u32) {
                     .join(", ")
             };
             println!(
-                "upgrade: prune: kept {} of {held} (keep_releases = {keep}); removed: {removed}",
+                "{verb}: prune: kept {} of {held} (keep_releases = {keep}); removed: {removed}",
                 done.kept.len()
             );
         }
-        Err(said) => eprintln!("holosmith: warning: upgrade: prune: {said}"),
+        Err(said) => eprintln!("holosmith: warning: {verb}: prune: {said}"),
     }
 }
 
 /// Put the previous link target back, restart, and say what is live now -- the promotion's failure ending.
+#[allow(clippy::too_many_arguments)]
 fn rollback(
     config: &Config,
     root: &Root,
@@ -871,6 +927,7 @@ fn rollback(
     window: Duration,
     backup: &Path,
     previous: &Previous,
+    verb: &str,
 ) -> Result<(), String> {
     let release = Release::of(root);
     release.restore(&previous.link).map_err(|error| {
@@ -883,22 +940,23 @@ fn rollback(
             backup.display()
         )
     })?;
-    println!("upgrade: rollback: current -> {}", previous.link.display());
+    println!("{verb}: rollback: current -> {}", previous.link.display());
     // The previous release's own version, for the poll and for the last line: read from the binary that is now
     // `current`, which is the one a rollback made live.
     let version = previous
         .tag
         .as_ref()
         .and_then(|tag| ask_version(&release.binary(tag)).ok());
+    let switch_back = format!("{verb}: rollback");
     let attempt = restart_and_poll(
         config,
         steps,
         tools,
         version.as_ref().map(|info| info.version.as_str()),
         window,
-        // The automatic switch-back's own lines sit under `upgrade: rollback:` — it is the promotion's rollback, and
-        // the verb prints its identical sequence under `rollback:`.
-        "upgrade: rollback",
+        // The automatic switch-back's own lines sit under `<verb>: rollback:` — it is the promotion's rollback, and
+        // the `rollback` verb prints its identical sequence under `rollback:`.
+        &switch_back,
     );
     let answered = attempt.answered;
     let live = match &version {
@@ -907,7 +965,7 @@ fn rollback(
     };
     if let Some(answer) = answered {
         println!(
-            "upgrade: rollback: {} answered {:.1}s after the restart",
+            "{verb}: rollback: {} answered {:.1}s after the restart",
             answer.version,
             attempt.started.elapsed().as_secs_f32()
         );
@@ -915,7 +973,7 @@ fn rollback(
         // release directory's name is a promotion's own choice (`releases/<tag>`), and the binary inside reports the
         // tag it was built from — which a hand-seeded directory need not share.
         println!(
-            "upgrade: live: {} ({live}) (the candidate was not made live), backup {}",
+            "{verb}: live: {} ({live}) (the candidate was not made live), backup {}",
             previous.link.display(),
             backup.display()
         );
@@ -927,9 +985,9 @@ fn rollback(
             backup.display()
         ));
     }
-    println!("upgrade: rollback: {live} did not answer either");
+    println!("{verb}: rollback: {live} did not answer either");
     println!(
-        "upgrade: live: {} ({live}) could not be confirmed, backup {}",
+        "{verb}: live: {} ({live}) could not be confirmed, backup {}",
         previous.link.display(),
         backup.display()
     );

@@ -55,7 +55,10 @@ pub fn run(args: UpgradeArgs) -> ExitCode {
     let root = Root::resolve(args.root.clone(), args.config.clone());
     let options = Options {
         candidate: args.binary,
-        acknowledge_review: args.acknowledge_review,
+        review: args
+            .acknowledge_review
+            .then_some(promote::Review::Acknowledged),
+        verb: promote::VERB,
         wait: args.wait,
         window: crate::promote::WINDOW,
     };

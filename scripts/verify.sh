@@ -10,6 +10,12 @@
 # cleanup. The pass kills only what carries a *dead* run's marker and removes `target/verify-*-<pid>` whose pid is
 # gone; it warns and never fails this gate.
 #
+# Then, still before the first phase, the crate set: `scripts/check-crate-set.sh` compares this tree's `Cargo.lock`
+# with the one the agent image vendored and answers **3** when they differ, which is a stale `agent-image` and an
+# image rebuild rather than a code fix. It is a precondition and not a phase, so the count below stays true; it prints
+# nothing when it passes (on a host there is no marker at all) and one sentence when it does not, and **3 is its
+# answer, not a phase's** — no phase ran.
+#
 # Nine phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
 # cargo test, `cargo test --test schema_previous` (the expand/contract rule), `case_gate_quick` (the worker
 # gate's own contract — its names, its refusals, its footer, and one real run of it), `case_gate_cleanup` (the
@@ -16245,6 +16251,19 @@ phase_serve() {
 
 command -v cargo >/dev/null 2>&1 ||
   fail "cargo/path" "cargo is not on PATH: . ~/.pi/toolchains/env.sh first (AGENTS.md)"
+
+# The crate set, after the toolchain and before any phase. After it, because a session whose image carries no
+# toolchain answers that sentence first and the two name the same rebuild. Before the phases, because a candidate
+# whose `Cargo.lock` the image does not vendor fails every one of the later ones with `could not be found in registry
+# index` — a sentence about the registry for a fact about the image — and because this gate is what a promotion's
+# acknowledgement is, so the wrong diagnosis is exactly what it may not hand back. The check's own endings are 0 and
+# 3, and the status reaches the caller unchanged, so nothing here can invent a 2 (this invocation was wrong) or a 1
+# (the tree is not proven). It prints its own sentence, and nothing here repeats it.
+crate_set_rc=0
+"$repo_root/scripts/check-crate-set.sh" || crate_set_rc=$?
+if [ "$crate_set_rc" -ne 0 ]; then
+  exit "$crate_set_rc"
+fi
 
 run_phase fmt "${GATE_FMT[@]}"
 run_phase clippy "${GATE_CLIPPY[@]}"

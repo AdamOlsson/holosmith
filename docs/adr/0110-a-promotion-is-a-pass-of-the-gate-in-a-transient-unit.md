@@ -20,9 +20,12 @@ of the source tree, and nothing else** (D3); **the job is a transient user unit,
 section: verification is a **correctness** gate, not a safety gate, because it runs the candidate's own code with the
 operator's authority.
 
-Nothing here is implemented. The route, the unit it starts, the free-space check and one line in `scripts/build.sh`
-are a later change's; this ADR is the shape that change has to take, and where a section answers a question that
-change owns it says so rather than pretending the tree already does.
+**What has landed since, and what has not.** The candidate resolver (`candidate::resolve`, `[update] source`), the
+launcher (`update::start`, the transient user unit), the verb (`holosmith update`, which is one pass of the gate and
+then `promote`'s pipeline, with the free-space check in front of it and one JSON report behind it) and the digest line
+in `scripts/build.sh` are in the tree. The route, the page and the button are not: nothing on the wire can promote yet,
+so D1's authority is still exercised by a terminal, and the sections below that answer questions those changes own
+still say so rather than pretending the tree already does.
 
 ## Superseded in part: ADR-0060 D2, and ADR-0082 D2's review gate
 
@@ -337,6 +340,15 @@ the crate set, the running release's image vendors another, and a host has to bu
 candidate tree before this machine can verify it. A gate that exits 3 instead would read as a broken registry — the
 exact misreading `scripts/check-crate-set.sh`'s own header exists to prevent.
 
+**Of that, one half has landed and one has not.** The gate now answers 3: `scripts/verify.sh` runs
+`scripts/check-crate-set.sh` as a precondition before its first phase and exits the check's own status, so a candidate
+whose lock the running release's image does not vendor reaches `holosmith update` as **3** in the run's opening
+seconds rather than as a red `FAIL` — `case_agent_toolchain`'s `vendor/lock` assertion minutes in, or `could not be
+found in registry index` out of the offline build well after it — and `crates/holosmith/src/pass.rs`'s
+`Verdict::StaleCrateSet` turns that code into the host-act sentence above, so the misreading does not survive into the
+report a caller reads. What is still owed is the *before*: nothing refuses such a candidate before the gate is spawned,
+so the repair is read once the gate has started rather than instead of it.
+
 ## What a promotion costs, and what the operator has to act on
 
 - **The run.** About three quarters of an hour, one log file, nothing else (D2). The unit is the only handle: its name,
@@ -384,10 +396,14 @@ exact misreading `scripts/check-crate-set.sh`'s own header exists to prevent.
 - **The Docker behaviour behind "a running container holds its layers."** `case_server_images` untagging the image the
   gate itself runs in has not happened in a promotion yet; it happens in every in-container gate whose candidate shares
   the running release's version, and a run that finishes is what would measure it.
-- **The source tree's config key.** No key names a source tree today: `docs/config.md`'s releases table holds
-  `keep_releases` and nothing else, and `crates/holosmith/src/config/mod.rs` has no field for one. D3's `<source>` is
-  therefore a name the later change gives a key and a reader; the candidate resolution is decided, and where the tree's
-  path comes from is the part with nothing behind it yet.
+- **The source tree's config key.** `[update] source` names the checkout now, with a validator and a row in
+  `docs/config.md`, and `candidate::resolve` is its one reader. What is still unmeasured is the transition the route
+  makes between a page that rendered a commit and a press that promotes it: the staleness comparison is a unit test's,
+  because no route carries a commit over the wire yet.
+- **A pass of the gate end to end.** `holosmith update` is measured by a fixture tree whose `scripts/verify-in-container.sh`
+  records its argv and answers the exit code the test chooses, so the four steps, the exit-code translation and the
+  report are facts about the command — and the run that is the point of D2, a green gate on a real machine promoting the
+  artifact its own build phase wrote, has not happened yet. The gate itself is measured separately (ADR-0109).
 
 ## Consequences
 
@@ -398,9 +414,7 @@ exact misreading `scripts/check-crate-set.sh`'s own header exists to prevent.
   rather than of `holosmith build`'s — one artifact layout with two writers.
 - The product tags become a promotion's business during the run: a green gate leaves them the candidate's, a dead one
   leaves them absent, and `server deploy` is the repair both times.
-- `GLOSSARY.md`'s **Promotion** entry is now wrong in one clause: it says a promotion is "the review gate acknowledged
-  (`--acknowledge-review`)" first. The rest of the entry — the smoke run, the image builds, the drain, the backup, the
-  release directory, `current`, the restart and the poll — is exactly the pipeline this route runs, so the entry needs
-  one clause changed, to the verification pass, and that is a follow-up's edit made when the route lands and when
-  `--acknowledge-review`'s life on `holosmith upgrade` is settled. Recorded here so that a reader who finds the glossary
-  first knows which of the two is current.
+- `GLOSSARY.md`'s **Promotion** entry said a promotion is "the review gate acknowledged (`--acknowledge-review`)" first.
+  That clause is now the pass of the gate, and an **Update** entry names the verb — the entry was waiting for this change
+  both because the route had not landed and because `--acknowledge-review`'s life on `holosmith upgrade` was unsettled;
+  it stays, as the hand path's word, while `holosmith update` never takes it.
