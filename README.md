@@ -4,7 +4,7 @@ Holosmith runs coding agents in isolated Docker containers on a machine you own,
 the same page on a laptop and on a phone. Each agent gets its own git worktree, its own network and its own
 transcript; you review the diff and land it. Provider keys never enter a container.
 
-Requirements: Linux with systemd, Docker, git 2.38 or newer, and a provider key —
+Requirements: Linux with systemd (240 or newer for a promotion's job), Docker, git 2.38 or newer, and a provider key —
 [what each one is for](docs/requirements.md).
 
 ## Quick start
