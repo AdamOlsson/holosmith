@@ -665,6 +665,7 @@ serve_cases=(
   case_smoke
   case_upgrade
   case_rollback
+  case_web_update
   case_releases
   case_server_deploy
   case_install
@@ -8924,6 +8925,77 @@ s.close()
 PY
 }
 
+# fake_product_images <bin dir> <argv log> <state dir>: the `docker` a promotion's **two product images** are read and
+# built through, and nothing else. Every other question — the smoke run's own image, that session's container and
+# network — is `exec`'d to the real daemon, so a promotion under this stand-in still runs the real smoke test. The
+# labels it remembers are the `--build-arg` pairs it was given, which is how a *second* promotion reads those images as
+# current: "only when the binary or a pinned version changed", in both directions.
+#
+# A function rather than a heredoc in each case because two cases promote (`case_upgrade` and `case_web_update`) and a
+# second copy of forty lines of shim is a second thing to keep right. The three parameters are the names those cases
+# already have: the directory the shim is written into, the file it records its argv to, and the directory it keeps the
+# faked label bodies in.
+fake_product_images() {
+  local bin="$1" docker_log="$2" state="$3"
+  mkdir -p "$state"
+  cat >"$bin/docker" <<SHIM
+#!/bin/sh
+{
+  printf 'docker'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$docker_log"
+case "\$1" in
+  build)
+    tag=""
+    previous=""
+    json=""
+    for argument in "\$@"; do
+      [ "\$previous" = "-t" ] && tag="\$argument"
+      previous="\$argument"
+      case "\$argument" in
+        HOLOSMITH_VERSION=*) json="\$json\"org.holosmith.version\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_GIT_TAG=*) json="\$json\"org.holosmith.git-tag\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_PI_VERSION=*) json="\$json\"org.holosmith.pi-version\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_BINARY_SHA256=*) json="\$json\"org.holosmith.binary-sha256\":\"\${argument#*=}\"," ;;
+        HOLOSMITH_TOOLCHAINS=*) json="\$json\"org.holosmith.toolchains\":\"\${argument#*=}\"," ;;
+      esac
+    done
+    case "\$tag" in
+      holosmith-proxy:*|agent-image:*)
+        cat >/dev/null
+        printf '{%s"faked":"yes"}' "\$json" >"$state/\$tag.json"
+        printf 'faked the build of %s\n' "\$tag"
+        exit 0
+        ;;
+    esac
+    ;;
+  image)
+    tag=""
+    format=""
+    for argument in "\$@"; do
+      case "\$argument" in
+        holosmith-proxy:*|agent-image:*) tag="\$argument" ;;
+        *Config.Labels*) format="\$argument" ;;
+      esac
+    done
+    case "\$tag" in
+      holosmith-proxy:*|agent-image:*)
+        [ -f "$state/\$tag.json" ] || exit 1
+        case "\$format" in
+          "") printf 'sha256:faked\n' ;;
+          *) cat "$state/\$tag.json" ;;
+        esac
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exec "$(command -v docker)" "\$@"
+SHIM
+  chmod 0755 "$bin/docker"
+}
+
 # the proof from the artifact: the worktree step is host git, so a create makes `.worktrees/<id>` on
 # branch `agent/<id>` from the repository's HEAD, records both on the row, and — because the *next* step is
 # the session's network, which runs `docker network create` against the socket this case answers
@@ -12440,65 +12512,9 @@ PY
   printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\nkeep_releases = 3\ndata_root = "%s"\n' \
     "$owner" "$port" "$port" "$projects" "$data" >"$config"
 
-  # The stand-ins. `docker` fakes the **two product images** and nothing else: every other question — the smoke run's
-  # own image, its session's container and network — goes to the real daemon, so the real smoke test still runs. The
-  # labels it remembers are the `--build-arg` pairs it was given, which is how the *second* promotion reads the images
-  # as current: acceptance bullet 4's "only when the binary or a pinned version changed", in both directions.
-  cat >"$bin/docker" <<SHIM
-#!/bin/sh
-{
-  printf 'docker'
-  for argument in "\$@"; do printf ' %s' "\$argument"; done
-  printf '\n'
-} >>"$docker_log"
-case "\$1" in
-  build)
-    tag=""
-    previous=""
-    json=""
-    for argument in "\$@"; do
-      [ "\$previous" = "-t" ] && tag="\$argument"
-      previous="\$argument"
-      case "\$argument" in
-        HOLOSMITH_VERSION=*) json="\$json\"org.holosmith.version\":\"\${argument#*=}\"," ;;
-        HOLOSMITH_GIT_TAG=*) json="\$json\"org.holosmith.git-tag\":\"\${argument#*=}\"," ;;
-        HOLOSMITH_PI_VERSION=*) json="\$json\"org.holosmith.pi-version\":\"\${argument#*=}\"," ;;
-        HOLOSMITH_BINARY_SHA256=*) json="\$json\"org.holosmith.binary-sha256\":\"\${argument#*=}\"," ;;
-        HOLOSMITH_TOOLCHAINS=*) json="\$json\"org.holosmith.toolchains\":\"\${argument#*=}\"," ;;
-      esac
-    done
-    case "\$tag" in
-      holosmith-proxy:*|agent-image:*)
-        cat >/dev/null
-        printf '{%s"faked":"yes"}' "\$json" >"$state/\$tag.json"
-        printf 'faked the build of %s\n' "\$tag"
-        exit 0
-        ;;
-    esac
-    ;;
-  image)
-    tag=""
-    format=""
-    for argument in "\$@"; do
-      case "\$argument" in
-        holosmith-proxy:*|agent-image:*) tag="\$argument" ;;
-        *Config.Labels*) format="\$argument" ;;
-      esac
-    done
-    case "\$tag" in
-      holosmith-proxy:*|agent-image:*)
-        [ -f "$state/\$tag.json" ] || exit 1
-        case "\$format" in
-          "") printf 'sha256:faked\n' ;;
-          *) cat "$state/\$tag.json" ;;
-        esac
-        exit 0
-        ;;
-    esac
-    ;;
-esac
-exec "$(command -v docker)" "\$@"
-SHIM
+  # The stand-ins. `docker` is the one two cases share (`fake_product_images`), and `systemctl` is the manager this
+  # case's own unit answers to.
+  fake_product_images "$bin" "$docker_log" "$state"
   # `systemctl` is what systemd would be: on `restart` it stops what is running and starts the binary the unit's
   # `ExecStart` names — read through `current`, which is the whole point of the layout. \`HS_BREAK_FIRST\` is the
   # failure the rollback arm injects: the first restart starts a `serve` with no config, so nothing answers the
@@ -12991,6 +13007,396 @@ PY
   kill "$extra_pid" 2>/dev/null || true
   extra_pid=""
   rm -rf "$root" "$WORK/$name"
+}
+
+# the update route, end to end, over the artifact and a stand-in `systemd-run`: the two routes, the job the route
+# starts **outside** the service it replaces, the restart that job performs, and the report read back out of the data
+# root by a process that did not start it (ADR-0110).
+#
+# `case_upgrade` already promotes a real release over a real drain socket and watches a candidate that never answers
+# get the previous release back; `case_rollback` measures the verb. What neither can show is the route pair: a `POST`
+# that answers `202` and starts a transient unit, a `GET` that keeps answering *after* the restart the job performs, and
+# a process answering `/api/health` that is the one the promotion switched to. So this case measures only those, and it
+# must not run a real gate: `[update] source` points at a fixture checkout whose `scripts/verify-in-container.sh` records
+# its argv and exits 0, which is the one thing about a promotion's gate that would otherwise cost three quarters of an
+# hour.
+#
+# **Both arms promote the same artifact, and no version difference is asserted.** `/api/health`'s `version` is
+# `env!("CARGO_PKG_VERSION")`, a compile-time constant, and both releases this machine holds are one build of one tree —
+# a gate has exactly one artifact, so a second version would be a second build. Patching the literal is not an option
+# either, and the reason is measured: a release build is thin-LTO'd, so rustc materialises that five-byte constant as
+# split movabs immediates rather than one .rodata blob (`strings -a` finds no `^0\.1\.0$` at all), and a byte
+# substitution cannot reach it. So what this case measures instead is the release **directory** the process answering the
+# port runs from — `readlink /proc/<pid>/exe`, which names `releases/old/holosmith` after a rollback and
+# `releases/<tag>/holosmith` after a promotion. That is a stronger fact than comparing two strings, and the version each
+# of them reports is asserted beside it so the pair cannot drift.
+case_web_update() {
+  local name=case_web_update root="$repo_root/target/verify-web-$$"
+  # The data root stays under the checkout because `promote` puts the smoke run's root at `<data root>/smoke`, and a
+  # smoke root is a **container mount source** — the smoke session mounts its worktree and its `pi-home` from under it
+  # — so it has to be a path the daemon can see. The drain socket that follows from it is the checkout's too (`serve`
+  # binds `<data root>/run/drain.sock` and the promotion dials `admin_dir(&config.data_root)` with no flag of its own),
+  # which is why the length guard below audits it; the root's own name is short for that reason — `verify-web-` and the
+  # run's pid, so eleven bytes plus the pid's digits against the 107 an `AF_UNIX` path gets.
+  local data="$root/data" admin="$root/data/run" projects="$root/projects" config="$root/config.toml"
+  local source="$root/source" candidate bin="$root/bin" state="$root/state"
+  local runner_log="$root/systemd-run.argv" systemctl_log="$root/systemctl.argv" docker_log="$root/docker.argv"
+  local serve_log="$root/serve.log" pid_file="$root/serve.pid" broken="$root/break"
+  local recorder="$root/gate.argv"
+  local version tag digest port session commit report_state live_version uptime pressed_at now
+  local accepted report_since
+
+  # The guards, before anything is written: a machine without one of these cannot measure what this case is about, and a
+  # `SKIP` that left a tree behind would be the next run's problem.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to pick a free port, and the promotion polls the port its config names (free_port)\n' "$name"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1 || ! timeout 60 docker version >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers, and no promotion skips the smoke run it cannot run (case_upgrade measures the pipeline over a real daemon)\n' \
+      "$name"
+    return 0
+  fi
+  unix_socket_fits "$name" "$admin/drain.sock" || return 0
+  if ! command -v setsid >/dev/null 2>&1; then
+    printf 'SKIP %s: no setsid to start the job outside the service it restarts, which is the whole of what the stand-in launcher measures\n' \
+      "$name"
+    return 0
+  fi
+
+  version="$("$artifact" version | sed -n 's/^version //p')"
+  tag="$("$artifact" version | sed -n 's/^git_tag //p')"
+  [ -n "$version" ] && [ -n "$tag" ] || fail "$name/version" "the artifact reports no version or tag"
+
+  rm -rf "$root"
+  mkdir -p "$bin" "$data" "$admin" "$projects" "$state" "$source/scripts" "$source/dist/$host_target"
+  # The two files a green gate's build phase leaves, seeded by hand because no gate runs here: the artifact and the digest
+  # beside it, which is what `pass`'s `built()` reads. A **copy**, because the tree `[update] source` names is the
+  # candidate's and `releases/old` is this machine's, and the two are one build of one tree (see the note above).
+  candidate="$source/dist/$host_target/holosmith"
+  cp "$artifact" "$candidate"
+  digest="$(sha256sum "$candidate" | cut -d' ' -f1)"
+  printf '%s  holosmith\n' "$digest" >"$candidate.sha256"
+
+  # The fixture checkout `[update] source` names: a real repository on `master` with one commit, and a gate that records
+  # what it was given and exits 0. The recorder is **outside** the tree, so a gate run cannot leave it dirty for the
+  # `candidate::resolve` the route runs before the press and the job runs again.
+  cat >"$source/scripts/verify-in-container.sh" <<SHIM
+#!/bin/sh
+{
+  printf 'image %s\n' "\${HOLOSMITH_VERIFY_IMAGE-<unset>}"
+  printf 'args %s\n' "\$*"
+  printf 'cwd %s\n' "\$PWD"
+} >>"$recorder"
+printf 'case_fixture: the gate is this stand-in, and every arm here is a green one\n'
+printf 'SKIP case_fixture: the fixture gate measured nothing\n'
+exit 0
+SHIM
+  chmod 0755 "$source/scripts/verify-in-container.sh"
+  # `dist/` is ignored, so the artifact a real gate's build phase leaves there cannot make the tree dirty — ADR-0110 D3's
+  # precondition, read from the other side. The candidate above is that artifact, hand-made, and the gate above copies
+  # nothing: what a promotion promotes here is exactly the file this case seeded.
+  printf 'dist/\ntarget/\n' >"$source/.gitignore"
+  git -C "$source" init --quiet -b master || fail "$name/git" "git init did not work in $source"
+  git -C "$source" -c user.name=verify -c user.email="$owner" add -A ||
+    fail "$name/git" "git add did not work in $source"
+  git -C "$source" -c user.name=verify -c user.email="$owner" commit --quiet -m "the tree and its gate" ||
+    fail "$name/git" "git commit did not work in $source"
+  commit="$(git -C "$source" rev-parse HEAD)" || fail "$name/git" "git rev-parse did not work in $source"
+
+  # One port, spelled into the config as the listener *and* the origin: a config's port does not re-derive its origin
+  # (`--port 0` does), and both the case's requests and the restarted releases have to agree with it. Nothing here
+  # writes the unit: a promotion does, beside this file (ADR-0088), and it makes the directory it lands in.
+  port="$(free_port)"
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "stub"\nrole = "server"\ncontrol_listen = "127.0.0.1:%s"\ncontrol_origin = "http://127.0.0.1:%s"\nprojects_root = "%s"\nmin_free_gb = 0\nsession_disk_soft_gb = 0\nidle_stop_min = 0\npreview_listen = "127.0.0.1:0"\ndata_root = "%s"\n[update]\nenabled = true\nsource = "%s"\n' \
+    "$owner" "$port" "$port" "$projects" "$data" "$source" >"$config"
+
+  # A machine that has promoted before: one release, `current` on it. It is the promotion's previous release and the
+  # binary `/api/health` answers `$version` with until this case makes the candidate live — and the one a rollback goes
+  # back to.
+  mkdir -p "$root/releases/old"
+  cp "$artifact" "$root/releases/old/holosmith"
+  ln -s releases/old "$root/current"
+
+  fake_product_images "$bin" "$docker_log" "$state"
+  # `systemd-run` is what a transient unit would be: it records its argv, reads the two `--property=` values it needs, and
+  # starts the job **in a session of its own**, which is the whole point — a promotion outlives the restart it performs,
+  # and a child of the process being restarted would be killed with it (ADR-0110 D4). `>>` on the log is the `append:`
+  # the argv asked for, so the job's output is the file `GET /api/update` reads afterwards.
+  cat >"$bin/systemd-run" <<SHIM
+#!/bin/sh
+{
+  printf 'systemd-run'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$runner_log"
+log=""
+directory=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --property=StandardOutput=append:*) log="\${1#--property=StandardOutput=append:}" ;;
+    --property=WorkingDirectory=*) directory="\${1#--property=WorkingDirectory=}" ;;
+    --) shift; break ;;
+  esac
+  shift
+done
+[ -n "\$log" ] || { printf 'systemd-run: no StandardOutput=append: in the argv\n' >&2; exit 1; }
+cd "\$directory" || exit 1
+setsid "\$@" >>"\$log" 2>&1 </dev/null &
+exit 0
+SHIM
+  # `systemctl` is what systemd would be for this unit: on `restart` it stops what runs and starts the binary `current`
+  # names. The marker file is the rollback arm's injection — while it is there the first restart starts a `serve` with no
+  # config, so nothing answers the candidate's health poll and the promotion has to put the previous release back by
+  # itself — and it removes the marker, so the rollback's own restart is healthy. The verbs ask the **user** manager
+  # (ADR-0088 D2), so `--user` is recorded above and dropped here: this stand-in already is that manager.
+  cat >"$bin/systemctl" <<SHIM
+#!/bin/sh
+{
+  printf 'systemctl'
+  for argument in "\$@"; do printf ' %s' "\$argument"; done
+  printf '\n'
+} >>"$systemctl_log"
+[ "\$1" = "--user" ] && shift
+case "\$1" in
+  daemon-reload) exit 0 ;;
+  restart)
+    if [ -f "$pid_file" ]; then
+      old="\$(cat "$pid_file")"
+      kill "\$old" 2>/dev/null || true
+      for _ in \$(seq 1 100); do kill -0 "\$old" 2>/dev/null || break; sleep 0.05; done
+    fi
+    exe="\$(readlink -f "$root/current")/holosmith"
+    if [ -f "$broken" ]; then
+      rm -f "$broken"
+      "\$exe" serve --config /nonexistent/holosmith.toml >>"$serve_log" 2>&1 &
+    else
+      "\$exe" serve --config "$config" --admin-dir "$admin" >>"$serve_log" 2>&1 &
+    fi
+    printf '%s\n' "\$!" >"$pid_file"
+    exit 0
+    ;;
+esac
+exit 0
+SHIM
+  chmod 0755 "$bin/systemd-run" "$bin/systemctl"
+
+  # The machine, serving. `HOLOSMITH_ROOT` is how a `serve` is told which install tree it serves from — it has no
+  # `--root` flag — and this case's `PATH` is what puts the three stand-ins where the route, the job and the restarted
+  # release look for them. Both are inherited by every child below, the restarts included.
+  HOLOSMITH_ROOT="$root" PATH="$bin:$PATH" "$artifact" serve --config "$config" --admin-dir "$admin" \
+    >>"$serve_log" 2>&1 &
+  extra_pid=$!
+  printf '%s\n' "$extra_pid" >"$pid_file"
+  for _ in $(seq 1 200); do
+    (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null && break
+    kill -0 "$extra_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  # The **admin socket** is bound after the banner and after the startup reconcile, so the control port answering is not
+  # the same fact: a press that arrived before it would be a promotion whose drain cannot connect. `drain::listen` creates
+  # the file when it binds, so the file is what this waits for.
+  for _ in $(seq 1 400); do
+    [ -S "$admin/drain.sock" ] && break
+    sleep 0.05
+  done
+  [ -S "$admin/drain.sock" ] ||
+    fail "$name/drain_socket" "the server never bound $admin/drain.sock, so a promotion could not ask this machine anything: $(tail -5 "$serve_log")"
+  # One idle session, which the drain stops and the boot after each restart has to bring back.
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"holosmith","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1:$port" "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-web-update-1" ||
+    fail "$name/create" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  session="$(sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p' "$WORK/responses/${name}_create.body")"
+  [ -n "$session" ] || fail "$name/create/id" "the response names no id: $(cat "$WORK/responses/${name}_create.body")"
+  for _ in $(seq 1 400); do
+    fetch "${name}_idle" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_idle")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_idle")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/idle" "the session never reached idle: $(cat "$WORK/responses/${name}_idle.body")" ;;
+  esac
+
+  # ---- 1. the rollback: the candidate never answers, so the previous release comes back ------------------------
+  : >"$broken"
+  fetch_body "${name}_press_a" POST /api/update "{\"commit\":\"$commit\"}" \
+    "Host: 127.0.0.1:$port" "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" || fail "$name/press_a" "POST /api/update did not answer"
+  expect_status "${name}_press_a" "$(answer "${name}_press_a")" 202
+  case "$(answer "${name}_press_a")" in
+    *'"job":"holosmith-update"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/press_a/body" "the acceptance does not name the unit it started: $(cat "$WORK/responses/${name}_press_a.body")" ;;
+  esac
+  # The instant this machine accepted the press. A report dated before it belongs to the **previous** promotion: the job
+  # has not written its seed yet, which is the window the route's own header names, and a poll that read the old ending
+  # there would call this run finished before it started.
+  accepted="$(sed -n 's/.*"since":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_press_a.body")"
+  [ -n "$accepted" ] || fail "$name/press_a/since" "the acceptance carries no `since`: $(cat "$WORK/responses/${name}_press_a.body")"
+
+  # The job runs in a session of its own and performs the restart it is measured by, so what it came to is read out of
+  # the report: `GET /api/update` is polled until the state is one of the endings, and a listener that is not there
+  # between the broken restart and the rollback's is a wait rather than a failure. The budget is ten minutes because the
+  # first arm builds the smoke image for these bytes.
+  report_state=""
+  for _ in $(seq 1 2400); do
+    report_state=""
+    if fetch "${name}_report_a" GET /api/update "Host: 127.0.0.1:$port"; then
+      report_state="$(sed -n 's/.*"state":"\([a-z][a-z-]*\)".*/\1/p' "$WORK/responses/${name}_report_a.body")"
+      report_since="$(sed -n 's/.*"since":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_report_a.body")"
+      if [ -z "$report_since" ] || [ "$report_since" -lt "$accepted" ]; then
+        report_state=""
+      fi
+    fi
+    case "$report_state" in
+      running|"") sleep 0.25 ;;
+      *) break ;;
+    esac
+  done
+  check "$name/report_a/state" "failed" "$report_state"
+  if [ -f "$pid_file" ]; then extra_pid="$(cat "$pid_file")"; fi
+  case "$(cat "$WORK/responses/${name}_report_a.body")" in
+    *"rolled back"*"is live again"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/report_a/sentence" "the report does not say the previous release came back: $(cat "$WORK/responses/${name}_report_a.body")" ;;
+  esac
+  # The report is the job's own file, and it names what the run was about: the fixture tree's commit and the gate it ran.
+  grep -qF "\"commit\":\"$commit\"" "$WORK/responses/${name}_report_a.body" ||
+    fail "$name/report_a/commit" "the report's candidate is not the commit the press carried: $(cat "$WORK/responses/${name}_report_a.body")"
+  grep -qF "\"command\":\"$source/scripts/verify-in-container.sh\"" "$WORK/responses/${name}_report_a.body" ||
+    fail "$name/report_a/command" "the report does not name the fixture tree's own gate: $(cat "$WORK/responses/${name}_report_a.body")"
+  grep -qF "\"path\":\"$candidate\"" "$WORK/responses/${name}_report_a.body" ||
+    fail "$name/report_a/artifact" "the report does not name the artifact the gate left: $(cat "$WORK/responses/${name}_report_a.body")"
+  grep -qF "\"image\":\"agent-image:$version\"" "$WORK/responses/${name}_report_a.body" ||
+    fail "$name/report_a/image" "the gate did not run in agent-image:$version, the image the running release deployed: $(cat "$WORK/responses/${name}_report_a.body")"
+  assertions=$((assertions + 4))
+  # The gate's own record, which is this case's side of "the full gate, and never `--no-build`" (ADR-0110 D2): the
+  # promotion handed the fixture's wrapper `agent-image:$version` — the image the running release deployed, the same
+  # fact the report above carries — and no argument that would skip its build phase. Arm 2 runs the gate again and
+  # appends the same lines, so the image is matched line-wise (`-x`, some line of the file) and the flag is counted
+  # rather than sampled: neither becomes a fact about one run, and a third press in a later arm cannot turn a true
+  # assertion red.
+  grep -qx "image agent-image:$version" "$recorder" ||
+    fail "$name/gate/image" "the gate was not given agent-image:$version, the image the running release deployed: $(cat "$recorder")"
+  [ "$(grep -c '^args .*--no-build' "$recorder")" -eq 0 ] ||
+    fail "$name/gate/no-build" "the gate was asked to skip its build phase, so the full gate is not what this promotion ran: $(cat "$recorder")"
+  assertions=$((assertions + 2))
+  # The link is where it started, and the release `/api/health` answers from is the artifact again.
+  check "$name/report_a/current" "releases/old" "$(readlink "$root/current")"
+  fetch "${name}_health_a" GET /api/health "Host: 127.0.0.1:$port" ||
+    fail "$name/health_a" "the release the rollback switched back to is not answering"
+  expect_status "${name}_health_a" "$(answer "${name}_health_a")" 200
+  case "$(answer "${name}_health_a")" in
+    *"\"version\":\"$version\""*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/health_a/version" "the live release does not report $version: $(cat "$WORK/responses/${name}_health_a.body")" ;;
+  esac
+  # The process answering that port is the release the rollback switched back to, and it is named by its **path**:
+  # `/proc/<pid>/exe` is what the stand-in's last `restart` started, so a rollback that put the link back without
+  # restarting — leaving the candidate running, or nothing at all — is a different answer here. Both sides are resolved
+  # because `repo_root` is `pwd`'s **logical** path while `/proc` and the stand-in's `readlink -f` are physical: on a
+  # checkout reached through a symlink a raw comparison would fail here for a reason that is not the rollback's. So the
+  # expected side is resolved here, and in the two comparisons below, rather than `repo_root` being computed `pwd -P`:
+  # every case derives its paths from that value, and a physical one would name a different install tree.
+  check "$name/report_a/exe" "$(readlink -f "$root/releases/old/holosmith")" "$(readlink "/proc/$(cat "$pid_file")/exe" 2>/dev/null)"
+  # The candidate's own directory is on the tree with the bytes it never made live, which is what a rollback leaves.
+  [ -f "$root/releases/$tag/holosmith" ] ||
+    fail "$name/report_a/release" "the candidate's release directory is not on the tree: $(ls "$root/releases")"
+  [ "$(grep -c '^systemctl --user restart holosmith.service$' "$systemctl_log")" -eq 2 ] ||
+    fail "$name/report_a/restarts" "the rollback did not restart the service twice (the broken one and its own): $(cat "$systemctl_log")"
+  assertions=$((assertions + 2))
+  # The session the drain stopped came back with the release that was switched back to.
+  for _ in $(seq 1 400); do
+    fetch "${name}_resumed" GET "/api/sessions/$session" "Host: 127.0.0.1:$port" || true
+    case "$(answer "${name}_resumed")" in
+      *'"status":"idle"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  case "$(answer "${name}_resumed")" in
+    *'"status":"idle"'*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/resumed" "the session the drain stopped did not come back idle: $(cat "$WORK/responses/${name}_resumed.body")" ;;
+  esac
+
+  # ---- 2. the promotion: a healthy restart, and a `GET` that answers after it ---------------------------------
+  pressed_at="$(date +%s)"
+  fetch_body "${name}_press_b" POST /api/update "{\"commit\":\"$commit\"}" \
+    "Host: 127.0.0.1:$port" "Origin: http://127.0.0.1:$port" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" || fail "$name/press_b" "POST /api/update did not answer"
+  expect_status "${name}_press_b" "$(answer "${name}_press_b")" 202
+  accepted="$(sed -n 's/.*"since":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_press_b.body")"
+  [ -n "$accepted" ] || fail "$name/press_b/since" "the acceptance carries no `since`: $(cat "$WORK/responses/${name}_press_b.body")"
+  # The launcher was asked for one transient unit, and for this job: the unit's name, the two properties that make the
+  # output a file, `--collect`, and the words after `--`. **This arm's own record is the subject**, because the log is
+  # appended to and arm 1's press is already in it: that line names the artifact, since the first `serve` was started
+  # from it, while this press is served by the release the rollback's `restart` started — which is what makes "the
+  # *restarted* release starts the job" the fact measured here. So the count is exactly two, one per press, and the job's
+  # words are read off the **last** line rather than matched anywhere in the file.
+  [ "$(grep -c '^systemd-run --user --unit=holosmith-update --collect --property=StandardOutput=append:' "$runner_log")" -eq 2 ] ||
+    fail "$name/launch" "the launcher was not asked for a transient unit appending to the log once per press: $(cat "$runner_log")"
+  # The program is `current_exe()`'s, so it is the resolved path of the release `current` named at that restart — the
+  # same both-sides-resolved comparison as `/proc/<pid>/exe` above, for the same reason.
+  tail -n 1 "$runner_log" |
+    grep -qF -- "--property=StandardError=append:$data/update.log --property=WorkingDirectory=$source -- $(readlink -f "$root/releases/old/holosmith") update --config $config --root $root --report $data/update.json" ||
+    fail "$name/launch/job" "the job the launcher was asked for is not this machine's own update of the fixture tree, started by the release the rollback restarted into: $(cat "$runner_log")"
+  assertions=$((assertions + 2))
+
+  report_state=""
+  for _ in $(seq 1 1200); do
+    report_state=""
+    if fetch "${name}_report_b" GET /api/update "Host: 127.0.0.1:$port"; then
+      report_state="$(sed -n 's/.*"state":"\([a-z][a-z-]*\)".*/\1/p' "$WORK/responses/${name}_report_b.body")"
+      report_since="$(sed -n 's/.*"since":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_report_b.body")"
+      if [ -z "$report_since" ] || [ "$report_since" -lt "$accepted" ]; then
+        report_state=""
+      fi
+    fi
+    case "$report_state" in
+      running|"") sleep 0.25 ;;
+      *) break ;;
+    esac
+  done
+  # The `GET` above is the answer a **restarted** process gave: the promotion replaced the `serve` that took the press,
+  # and the report is read out of the data root either way — which is the one thing this case exists to measure.
+  check "$name/report_b/state" "live" "$report_state"
+  if [ -f "$pid_file" ]; then extra_pid="$(cat "$pid_file")"; fi
+  check "$name/report_b/current" "releases/$tag" "$(readlink "$root/current")"
+  grep -qF "\"log\":{\"lines\":[" "$WORK/responses/${name}_report_b.body" ||
+    fail "$name/report_b/log" "the answer carries no log, so a client has nothing to read while a run is under way: $(cat "$WORK/responses/${name}_report_b.body")"
+  # The promotion made the candidate live, so the process answering the port is that release and no other: named by the
+  # path `/proc/<pid>/exe` gives, which is what the stand-in's `restart` started through `current`. This is the fact a
+  # version comparison would be a proxy for, and it is the **directory** rather than a string inside the binary.
+  check "$name/report_b/exe" "$(readlink -f "$root/releases/$tag/holosmith")" "$(readlink "/proc/$(cat "$pid_file")/exe" 2>/dev/null)"
+  # Its version, read from the file `current` names rather than from the artifact: a promotion that switched the link to
+  # bytes this case did not seed would show up here before `/api/health` was asked.
+  live_version="$("$root/current/holosmith" version | sed -n 's/^version //p')"
+  check "$name/report_b/live_version" "$version" "$live_version"
+  fetch "${name}_health_b" GET /api/health "Host: 127.0.0.1:$port" ||
+    fail "$name/health_b" "the candidate is not answering after the restart it performed"
+  expect_status "${name}_health_b" "$(answer "${name}_health_b")" 200
+  case "$(answer "${name}_health_b")" in
+    *"\"version\":\"$live_version\""*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/health_b/version" "the live release does not report $live_version: $(cat "$WORK/responses/${name}_health_b.body")" ;;
+  esac
+  # The promotion's own poll criterion, on the other side of the restart: a process that started after this arm's press.
+  # An uptime larger than the time since it means the answer came from the process the restart replaced.
+  uptime="$(sed -n 's/.*"uptime_s":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_health_b.body")"
+  now="$(date +%s)"
+  if [ -n "$uptime" ] && [ "$uptime" -le "$((now - pressed_at + 1))" ]; then
+    assertions=$((assertions + 1))
+  else
+    fail "$name/health_b/uptime" "the answer came from a process older than this arm's press (uptime '${uptime}s' against $((now - pressed_at))s): $(cat "$WORK/responses/${name}_health_b.body")"
+  fi
+  [ "$(grep -c '^systemctl --user restart holosmith.service$' "$systemctl_log")" -eq 3 ] ||
+    fail "$name/report_b/restarts" "the promotion did not restart the service once more: $(cat "$systemctl_log")"
+  assertions=$((assertions + 1))
+
+  kill "$extra_pid" 2>/dev/null || true
+  extra_pid=""
+  rm -rf "$root"
 }
 
 # what the release layout *means* once there is more than one release in it. No daemon, no database, no
