@@ -1208,6 +1208,17 @@ terminal. Exit 0 only for a candidate that is live, 1 for every other ending. It
 _Avoid_: Self-update (nothing is downloaded: it promotes this machine's own `[update] source`), rebuild (the gate
 builds, the command promotes), promote (that is the step, not the verb)
 
+**Could not verify**:
+The word for a gate run that reached **no verdict about the tree** — `pass::Verdict::Unverified`, and the report's
+`state: could-not-verify` — and it is a word with its own next act rather than a synonym for a failure: nothing was
+promoted, and what is wrong is the machine or the run rather than a file to change. The gate's own statuses that end it
+are 2 (the wrapper refused to start), 125 (`docker run` failed), 126 and 127 (a command in the container missing or not
+executable) and 137 (the kernel killed it); and beside those, **4**, which is a build that could not fetch a source it
+pins: the two recipes download the musl cross toolchains from `musl.cc` while the image builds, so that host being away
+is `server deploy`'s step 3 failing with 4, `scripts/verify.sh` printing `UNREACHABLE <case>` and exiting 4, and this
+word here. A `SKIP` is not it: a skipped case leaves the gate green, and this one measured nothing at all (ADR-0111).
+_Avoid_: Refused (a verdict about the tree), failed, skipped, unverified (the adjective this noun is not)
+
 **Prune**:
 One promotion's last step: `releases/` is kept at `keep_releases` directories, taking the **live** release and
 the one behind it — the **rollback** target — first, then the newest of the rest. It runs only when the candidate is

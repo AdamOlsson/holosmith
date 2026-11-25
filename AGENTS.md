@@ -85,7 +85,10 @@ is not proven. The two tiers are therefore recorded here and not in an ADR — A
 there is one gate, which is the cost of keeping the rule where an agent will read it.
 Both gates also exit 3 when the image's vendored crate set came from another `Cargo.lock`
 (`scripts/check-crate-set.sh`, which both run as a precondition before their first phase), which is a stale
-`agent-image` and an image rebuild rather than a code fix.
+`agent-image` and an image rebuild rather than a code fix. `scripts/verify.sh` also exits 4 when a case could not
+measure because a build could not fetch a source it pins — the case prints `UNREACHABLE <case>` at column 0 and stops
+the run (ADR-0111). That one is a host that did not answer and not a red tree: a `FAIL` there would make `holosmith
+update` record a gate refusal nobody made, which is why `server deploy`'s image step answers 4 as well.
 
 `scripts/verify.sh` runs those three, then `scripts/build.sh` (which builds the web app and checks what
 the artifact ships), `scripts/check-embed.sh`, and a boot of `dist/<host-triple>/holosmith` — the

@@ -58,11 +58,22 @@ RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 # the checksum is the pin. `x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc` are what `.cargo/config.toml` names
 # as the linkers and what the `cc` crate finds for the bundled SQLite, exactly as `~/.pi/toolchains/env.sh` provides
 # them on a development machine.
-RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz \
+#
+# **The tarballs are fetched here, at build time, and the artifact cannot carry them.** This recipe is
+# `include_str!`ed into the binary and a build runs on a machine that has the artifact and a daemon, so a tarball can
+# only be inside the artifact — 230 MB of someone else's binaries in a static binary — or fetched now (ADR-0111). The
+# pin is what makes the fetch safe; the flags are what make it survive an outage. `--retry-all-errors` is not a second
+# spelling of `--retry`: `--retry` retries a timeout and an HTTP 5xx and not the refused connection or the name that
+# did not resolve, which is what musl.cc being away looks like from in here. A host that stays away is still a failed
+# build, and the sentence `images::failure` writes for it says the fetch did not answer rather than that the recipe is
+# wrong: `holosmith build` prints it and stops (ADR-0111).
+RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
+      https://musl.cc/x86_64-linux-musl-cross.tgz \
  && echo "c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea  /tmp/musl.tgz" | sha256sum -c - \
  && tar -C /opt -xzf /tmp/musl.tgz \
  && rm /tmp/musl.tgz
-RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/aarch64-linux-musl-cross.tgz \
+RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
+      https://musl.cc/aarch64-linux-musl-cross.tgz \
  && echo "c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38  /tmp/musl.tgz" | sha256sum -c - \
  && tar -C /opt -xzf /tmp/musl.tgz \
  && rm /tmp/musl.tgz

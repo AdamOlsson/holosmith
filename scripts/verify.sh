@@ -16,6 +16,12 @@
 # nothing when it passes (on a host there is no marker at all) and one sentence when it does not, and **3 is its
 # answer, not a phase's** — no phase ran.
 #
+# A case that cannot measure what it is about stops the run with **4** and a `UNREACHABLE <case>` line, never with a
+# `FAIL` and never with a `SKIP`: the source a build fetches did not answer (`https://musl.cc/`, for the two pinned
+# cross toolchains), so the images were never built and nothing about the tree was measured (ADR-0111). A `SKIP` would
+# be a green run over a build that never happened, and a `FAIL` is what `holosmith update` records as a candidate the
+# gate refused — in the report and on the app's Service screen, about a tree nobody refused.
+#
 # Nine phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
 # cargo test, `cargo test --test schema_previous` (the expand/contract rule), `case_gate_quick` (the worker
 # gate's own contract — its names, its refusals, its footer, and one real run of it), `case_gate_cleanup` (the
@@ -61,7 +67,10 @@
 # and a `kill -9` left `running` comes back `idle · interrupted`, and the new process is not draining), the
 # release build in a case of its own (`case_build`: the orchestration measured through a `docker` stand-in
 # whose artifact is this tree's own binary and whose `cargo`/`rustc` stand-ins must never fire, plus the real
-# container build when this machine already has the builder image), the smoke run in three arms and with
+# container build when this machine already has the builder image), the two product images' own build against the
+# daemon and — with no daemon and no network at all — the one failure that is not a verdict about the tree
+# (`case_server_images`; `case_image_fetch`: a `docker` stand-in whose `build` prints musl.cc gone, so the deploy must
+# answer 4, name the fetch and tag nothing), the smoke run in three arms and with
 # no skip (`case_smoke`: the artifact's own `container fake-pi` over two pipes, a `docker` stand-in that refuses the
 # smoke image and must be exit 1 with the smoke config on disk, and the real run — a session whose turn is asserted,
 # then deleted, with the machine's three proxies compared by id before and after), the promotion in four arms
@@ -302,6 +311,22 @@ fail() {
   printf 'FAIL %s\n' "$assertion" >&2
   [ -z "$detail" ] || printf '     %s\n' "$detail" >&2
   exit 1
+}
+
+# unreachable <case> [detail]: a case that could not measure because a source a build fetches did not answer.
+#
+# **4, not 1 and not a `SKIP`.** `fail` would exit 1, which every caller reads as "the tree is not proven" — and
+# `holosmith update` records that as a candidate the gate refused, about a tree no case ever judged. `SKIP` would exit
+# 0, which is a green gate over a run that never built the product images. So the line carries one marker token at
+# column 0 — the `SKIP ` line's discipline, a word this script writes and nothing parses out of English — and the run
+# ends with **4**, its own code, which is also the code `holosmith server deploy` answers when step 3's pinned
+# capture did not answer (`deploy::FETCH_UNANSWERED`): one fact, one spelling, from the command to the gate to
+# `holosmith update`'s `could not verify` (ADR-0111).
+unreachable() {
+  local name="$1" detail="${2:-}"
+  printf 'UNREACHABLE %s\n' "$name" >&2
+  [ -z "$detail" ] || printf '            %s\n' "$detail" >&2
+  exit 4
 }
 
 # A phase, named in the assertion it fails under, so a broken build says FAIL build/failed.
@@ -632,6 +657,7 @@ serve_cases=(
   case_doctor_tool_key
   case_disk_floor
   case_disk_quota
+  case_image_fetch
   case_server_images
   case_agent_toolchain
   case_build
@@ -11544,6 +11570,154 @@ case_disk_quota() {
   start_serve
 }
 
+# The one image-build failure that is not a verdict about the tree, measured with **no daemon and no network**.
+#
+# Both recipes fetch their two musl cross toolchains from musl.cc while the image builds, so a minute of that host being
+# away is a build that failed. Recorded as a `FAIL`, that is a gate run which exits 1 — and `holosmith update` turns
+# exit 1 into `Verdict::Refused`/`State::Refused`, so the report and the app's Service screen say the gate refused a
+# candidate nobody refused. The classification lives where the build's log is (`images::fetch_did_not_answer`), the code
+# is `server deploy`'s (`deploy::FETCH_UNANSWERED`, 4), and this case measures the facts that make them worth having
+# through a `docker` stand-in whose `build` prints musl.cc gone:
+#
+#   exit      the deploy answers 4, not 1 — the code `unreachable` above and `holosmith update`'s `could not verify` are
+#             about.
+#   sentence  step 3's line names the fetch, says the tree is not what failed, and says no new image was tagged; an
+#             operator reads a host that did not answer rather than a broken recipe.
+#   nothing   exactly one build was asked for — the proxy, which step 4 would need — and the run stopped there, so the
+#             two product tags are the absent state `case_server_images` wants rather than one built from a half answer.
+#
+# It needs python3 (one `_ping` socket and two ports), the shipped artifact and nothing else: no daemon answers, nothing
+# is fetched, and the `docker` on `PATH` is the stand-in. `tests/deploy.rs` drives the same classification over its fake,
+# so a machine without python3 prints one SKIP rather than passing quietly.
+case_image_fetch() {
+  local name=case_image_fetch root="$repo_root/target/verify-fetch-$$"
+  # The `_ping` stand-in is a host process talking to a host process, so its socket lives in `$WORK` and its name is
+  # audited like every other one (`unix_socket_fits`), whatever the checkout's depth.
+  local sock="$WORK/docker-fetch.sock"
+  local bin="$root/bin" control preview status line asked version
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP %s: no python3 to answer `_ping` and pick two ports (tests/deploy.rs covers the classification)\n' "$name"
+    return 0
+  fi
+  unix_socket_fits "$name" "$sock" || return 0
+  rm -rf "$root"
+  mkdir -p "$bin"
+  control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
+  preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
+  socket_pid="$(fake_docker_ping "$sock")"
+  for _ in $(seq 1 100); do
+    [ -S "$sock" ] && break
+    sleep 0.05
+  done
+  [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+  deploy_config "$WORK/config-fetch.toml" "$control" "$preview" "unix://$sock" \
+    "${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
+  version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
+  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
+
+  # The stand-in: the daemon's architecture this binary can build for, no image on the machine, and a `build` whose
+  # output is the shape BuildKit prints when a `RUN` could not reach musl.cc. Every argv is one line of the log, so
+  # "which builds were asked for" is a file rather than a claim. The archive on stdin is drained, as a real daemon
+  # reads it.
+  cat >"$bin/docker" <<'SHIM'
+#!/bin/sh
+if [ "${1:-}" = "-H" ]; then shift 2; fi
+{
+  printf 'docker'
+  for arg in "$@"; do printf ' %s' "$arg"; done
+  printf '\n'
+} >>"$HS_FETCH_LOG"
+case "${1:-} ${2:-}" in
+  "version --format")
+    case "$(uname -m)" in
+      aarch64 | arm64) printf 'arm64\n' ;;
+      *) printf 'amd64\n' ;;
+    esac
+    ;;
+  "image inspect") exit 1 ;;
+  "build -t")
+    cat >/dev/null
+    printf '%s\n' \
+      '#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz' \
+      "#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server" \
+      '#8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.' \
+      '------' \
+      ' > [4/9] RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:' \
+      '0.512 curl: (28) Connection timed out after 300000 milliseconds' \
+      '------' \
+      'Dockerfile:76' \
+      '--------------------' \
+      '  76 | >>> RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz' \
+      '--------------------' \
+      'ERROR: failed to build: failed to solve: process "/bin/sh -c curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz" did not complete successfully: exit code: 28'
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod 0755 "$bin/docker"
+  asked="$root/docker.argv"
+  : >"$asked"
+
+  status=0
+  PATH="$bin:$PATH" HS_FETCH_LOG="$asked" "$artifact" server deploy --verbose --root "$root/install" \
+    --config "$WORK/config-fetch.toml" >"$WORK/$name.deploy.out" 2>&1 || status=$?
+  # 1. The code. 4 is the whole point: 1 is a tree that failed the gate, and this one was never judged.
+  check "$name/exit" 4 "$status"
+
+  # 2. The step, and the sentence: the fetch, the tree that is not at fault, and the tag that was not made.
+  line="$(grep '^3\. images: failed: ' "$WORK/$name.deploy.out" || true)"
+  [ -n "$line" ] || fail "$name/step3" "step 3 is not the step that failed: $(cat "$WORK/$name.deploy.out")"
+  assertions=$((assertions + 1))
+  for needle in 'https://musl.cc/' 'did not answer' 'not a recipe or a tree that is wrong' \
+    "no new image was tagged holosmith-proxy:$version"; do
+    case "$line" in
+      *"$needle"*) assertions=$((assertions + 1)) ;;
+      *) fail "$name/sentence" "step 3's failure does not name '$needle': $line" ;;
+    esac
+  done
+  if grep -q '^4\. ' "$WORK/$name.deploy.out"; then
+    fail "$name/stop" "a run that failed at step 3 evaluated step 4: $(cat "$WORK/$name.deploy.out")"
+  fi
+  assertions=$((assertions + 1))
+
+  # 3. What was asked of the daemon: one build, the proxy first, and nothing after it — the absent state the labels
+  # case wants, reached without a daemon to leave anything behind.
+  check "$name/builds" 1 "$(grep -c '^docker build ' "$asked" || true)"
+  grep -q -- " build -t holosmith-proxy:$version " "$asked" ||
+    fail "$name/build/proxy" "the build that failed was not the proxy image: $(cat "$asked")"
+  assertions=$((assertions + 1))
+
+  # Neither tag is on this machine as far as the deploy could tell, and the run says so: a `changed` line over a build
+  # that never happened would be the report lying about a machine.
+  if grep -q '^3\. images: \(changed\|satisfied\): ' "$WORK/$name.deploy.out"; then
+    fail "$name/report" "step 3 reports an image it never built: $(cat "$WORK/$name.deploy.out")"
+  fi
+  assertions=$((assertions + 1))
+
+  # 4. The helper itself, measured where it costs nothing: a command substitution, so its `exit` is a status this case
+  # reads rather than the end of the run. **4 and the marker line are the contract** `scripts/verify-in-container.sh`
+  # forwards untouched and `holosmith update` turns into `could not verify`, so the one case that knows what a fetch
+  # that did not answer is, is the place a change to either would show.
+  local helper_status=0 helper_said
+  helper_said="$(unreachable "$name" "the deploy answered 4" 2>&1)" || helper_status=$?
+  check "$name/unreachable/exit" 4 "$helper_status"
+  case "$helper_said" in
+    "UNREACHABLE $name"*) assertions=$((assertions + 1)) ;;
+    *) fail "$name/unreachable/line" "the marker is not at column 0: $helper_said" ;;
+  esac
+
+  # The gate's own line says **which of the two answers this is**: the fetch is still there and its ending is
+  # classified. The other one — the build stops fetching and the toolchains come from the tree — is the answer this
+  # change refused (ADR-0111), so a run that says this is the measurement of the answer that exists.
+  printf '%s: the classification is what this measured: exit 4 and the fetch named, no daemon and no network\n' "$name"
+
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+  socket_pid=""
+  rm -rf "$root"
+}
+
 # the step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
 #
 # This is the one case whose subject is the *build*: `holosmith-proxy:<version>` and `agent-image:<version>` are what
@@ -11636,6 +11810,12 @@ case_server_images() {
   status=0
   PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.deploy.out" 2>&1 || status=$?
+  # `4` is step 3's own answer for a build whose pinned musl.cc fetch did not answer: nothing was built, so this case
+  # measured nothing and says so with its own marker and code instead of failing a tree that is not at fault. The
+  # classification itself is measured with no daemon and no network by `case_image_fetch`.
+  if [ "$status" -eq 4 ]; then
+    unreachable "$name" "the deploy could not fetch the musl toolchains (exit 4), so no image was built: $(tail -2 "$WORK/$name.deploy.out")"
+  fi
   [ "$status" -eq 0 ] ||
     fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
   assertions=$((assertions + 1))
