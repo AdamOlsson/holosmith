@@ -441,7 +441,9 @@ pub fn daemon_problem(docker: &Docker) -> Option<String> {
 /// The image is **built locally, never pulled**: it is this program's own recipe, and a registry would be a second
 /// supply chain for the one step that must not run foreign code. A cold machine needs the network for the two bases,
 /// the musl.cc tarballs, cargo's registry and npm's — which is why a failure here is a sentence about the network
-/// rather than a wrong Dockerfile.
+/// rather than a wrong Dockerfile. The sentence itself is [`images::failure`]'s, so a pinned fetch that did not answer
+/// is named as one instead of as a broken recipe (ADR-0111); `holosmith build` still answers exit 1 for it, because
+/// the gate reads `server deploy`'s code and not this command's.
 pub fn ensure_image(docker: &Docker) -> Result<String, String> {
     let image = image();
     let wanted = recipe();

@@ -414,9 +414,11 @@ pub fn execute(
         &mut progress::Silent,
     ) {
         Ok(sentence) => println!("{verb}: images: {sentence}"),
-        Err(sentence) => {
+        // The step's sentence, and a failed build is not this pipeline's exit-code question: a promotion that could not
+        // fetch what it builds from is a promotion that did not run, and `upgrade`/`update` report it as one (ADR-0111).
+        Err(error) => {
             return Err(format!(
-                "the images the candidate's version needs were not built, so nothing was drained: {sentence}"
+                "the images the candidate's version needs were not built, so nothing was drained: {error}"
             ));
         }
     }

@@ -21,10 +21,10 @@
 //!
 //! The gate's exit codes keep the meanings `scripts/verify-in-container.sh`'s header gives them, and [`verdict`] is
 //! the one place that translation happens: 0 verified; 1 a refusal (the gate's own `FAIL` line is in the output this
-//! command forwards); 2, 125, 126, 127 and 137 are "could not verify", with the sentence the gate or Docker wrote;
-//! and 3 is `scripts/check-crate-set.sh`'s own answer, reached through `scripts/verify.sh`'s preflight before its
-//! first phase — a **host act** rather than a broken registry, and the refusal [`Verdict::StaleCrateSet`] produces
-//! names the repair.
+//! command forwards); 4 a build that could not fetch a pinned source, so no image was built and the tree was never
+//! judged; 2, 125, 126, 127 and 137 are "could not verify", with the sentence the gate or Docker wrote; and 3 is
+//! `scripts/check-crate-set.sh`'s own answer, reached through `scripts/verify.sh`'s preflight before its first phase —
+//! a **host act** rather than a broken registry, and the refusal [`Verdict::StaleCrateSet`] produces names the repair.
 //! A `SKIP ` line inside the gate measures nothing, so it is counted and the report carries how many there were —
 //! a green run with skips is still green, and saying so is the difference between a proof and a claim.
 //!
@@ -356,6 +356,10 @@ impl Verdict {
 pub enum RunFailure {
     /// 2: the wrapper refused to start, or `scripts/verify.sh` was handed an argument it does not know.
     Wrapper,
+    /// 4: a build in the gate could not fetch a source it pins, so the images were never built and nothing about the
+    /// tree was measured. The one ending that is the network's and not the tree's — a `SKIP` would be green and a
+    /// `FAIL` would record a refusal nobody made, which is why it has a code of its own (ADR-0111).
+    Fetch,
     /// 125: `docker run` itself failed.
     Docker,
     /// 126: a command inside the container is not executable.
@@ -377,6 +381,12 @@ impl fmt::Display for RunFailure {
                 "`scripts/verify-in-container.sh` refused to start, or `scripts/verify.sh` was handed an argument it \
                  does not know (exit 2), and the gate's own line says which",
             ),
+            Self::Fetch => f.write_str(
+                "a build in the gate could not fetch a source it pins (exit 4): the machine did not reach the host \
+                 that serves the two musl cross toolchains, so the product images were never built and no case ever \
+                 judged this tree. This is a host that did not answer and not a tree that failed — run it again when \
+                 that host answers, and nothing here asks an operator to change a file",
+            ),
             Self::Docker => f.write_str("`docker run` itself failed (exit 125), so no container ran the gate"),
             Self::NotExecutable => {
                 f.write_str("a command the gate's container runs is not executable (exit 126)")
@@ -391,7 +401,7 @@ impl fmt::Display for RunFailure {
             }
             Self::Other(code) => write!(
                 f,
-                "the gate answered {code}, which is none of 0, 1, 2, 3, 125, 126, 127 or 137, so it reached no \
+                "the gate answered {code}, which is none of 0, 1, 2, 3, 4, 125, 126, 127 or 137, so it reached no \
                  verdict this command can read"
             ),
         }
@@ -405,6 +415,9 @@ pub fn verdict(code: Option<i32>) -> Verdict {
         Some(1) => Verdict::Refused,
         Some(3) => Verdict::StaleCrateSet,
         Some(2) => Verdict::Unverified(RunFailure::Wrapper),
+        // The gate's own answer for a pinned fetch that did not answer (`scripts/verify.sh`'s marker line, exit 4): a
+        // case that could not measure, and never a refusal of the tree (ADR-0111).
+        Some(4) => Verdict::Unverified(RunFailure::Fetch),
         Some(125) => Verdict::Unverified(RunFailure::Docker),
         Some(126) => Verdict::Unverified(RunFailure::NotExecutable),
         Some(127) => Verdict::Unverified(RunFailure::NotFound),
@@ -860,6 +873,9 @@ mod tests {
         assert_eq!(verdict(Some(3)), Verdict::StaleCrateSet);
         for (code, failure) in [
             (2, RunFailure::Wrapper),
+            // The gate's own answer for a pinned fetch that did not answer: a case that could not measure, and the one
+            // code `scripts/verify.sh` writes itself (`scripts/verify-in-container.sh` passes it through untouched).
+            (4, RunFailure::Fetch),
             (125, RunFailure::Docker),
             (126, RunFailure::NotExecutable),
             (127, RunFailure::NotFound),

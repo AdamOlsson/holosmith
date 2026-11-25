@@ -10,9 +10,10 @@
 # a 2 as a red tree — and 3 is `scripts/check-crate-set.sh`'s answer, reached through `scripts/verify.sh`'s preflight
 # before its first phase and passed through this script unchanged: the image vendored another `Cargo.lock`, so a crate
 # this tree needs is missing from it and the repair is a rebuilt `agent-image`, which is no verdict about the tree
-# either — and 125, 126, 127 and 137 are `docker run`'s own codes, for docker failing, a container command
-# that is not executable, one that is not there, and a container the kernel killed, so none of those is the gate's
-# verdict either.
+# either — and 4 is a build that could not fetch a source it pins (`scripts/verify.sh`'s `UNREACHABLE` line, passed
+# through unchanged), which is a host that did not answer rather than a tree nobody passed — and 125, 126, 127 and 137
+# are `docker run`'s own codes, for docker failing, a container command that is not executable, one that is not there,
+# and a container the kernel killed, so none of those is the gate's verdict either.
 #
 # Seven facts about the `docker run` below are not preferences; each is the one shape that measures, and each was
 # measured on this host (Docker 29.9.2, Ubuntu 24.04) — the first six here, and `TMPDIR`'s directory in its own

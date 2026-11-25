@@ -488,7 +488,7 @@ fn a_red_gate_asks_the_machine_nothing_at_all() {
 
 #[test]
 fn every_gate_exit_code_keeps_the_meaning_its_wrappers_header_gives_it() {
-    // The header's table: 1 is the tree's verdict, and 2, 3, 125, 126, 127 and 137 are not verdicts at all. The gate
+    // The header's table: 1 is the tree's verdict, and 2, 3, 4, 125, 126, 127 and 137 are not verdicts at all. The gate
     // step's own ending names the code's meaning — 3 says `stale crate set` where the run's state says
     // `could-not-verify`, because the image is the subject and not the tree.
     for (code, state, needle, ending) in [
@@ -500,6 +500,7 @@ fn every_gate_exit_code_keeps_the_meaning_its_wrappers_header_gives_it() {
             "could not verify",
         ),
         (3, "could-not-verify", "`Cargo.lock`", "stale crate set"),
+        (4, "could-not-verify", "could not fetch", "could not verify"),
         (
             125,
             "could-not-verify",
@@ -550,8 +551,8 @@ fn every_gate_exit_code_keeps_the_meaning_its_wrappers_header_gives_it() {
 
     // Exit 3 is a **host act** and not a broken registry: a candidate whose `Cargo.lock` moves the crate set cannot be
     // verified in the running release's image, and the repair is to build and deploy that image from the candidate.
-    let world = world("update-exit-3-host-act", 3);
-    let (_, report) = world.run(&Recorder::new("0.1.0"));
+    let host_act = world("update-exit-3-host-act", 3);
+    let (_, report) = host_act.run(&Recorder::new("0.1.0"));
     let said = detail(&report);
     assert!(said.contains("host act"), "{said}");
     assert!(said.contains("cargo fetch --locked"), "{said}");
@@ -562,6 +563,29 @@ fn every_gate_exit_code_keeps_the_meaning_its_wrappers_header_gives_it() {
     assert!(
         !said.contains("not found in the registry index"),
         "the refusal repeats the misreading it exists to prevent: {said}"
+    );
+
+    // Exit 4 is the network's and not the tree's: `server deploy` answers it when a build could not fetch a pinned
+    // toolchain, and `scripts/verify.sh` turns that into a marker line and the same code. The defect this code exists
+    // for is a report — and a Service screen — telling an operator that a tree was refused when no case ever judged it,
+    // so the assertions are the word `could not verify`, the fetch the detail names, and **no `refused` anywhere**
+    // (ADR-0111).
+    let fetched = world("update-exit-4-fetch", 4);
+    let (_, report) = fetched.run(&Recorder::new("0.1.0"));
+    let said = detail(&report);
+    for fact in ["could not verify", "could not fetch", "musl"] {
+        assert!(
+            said.contains(fact),
+            "exit 4's detail does not name {fact}: {said}"
+        );
+    }
+    assert!(
+        !said.contains("refused"),
+        "exit 4 is recorded as a refusal of the tree: {said}"
+    );
+    assert!(
+        !report.to_string().contains("refused"),
+        "a step or a state of exit 4's report says `refused`: {report}"
     );
 }
 

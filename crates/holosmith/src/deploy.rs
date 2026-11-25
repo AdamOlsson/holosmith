@@ -57,7 +57,7 @@ use std::io::{ErrorKind, Write as _};
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,6 +101,15 @@ pub const HEALTH_WAIT: Duration = Duration::from_secs(60);
 /// How often that wait asks again. A serving unit answers in milliseconds; the interval is what a wait costs the
 /// command, and 250 ms is four asks a second for a minute.
 pub const HEALTH_POLL: Duration = Duration::from_millis(250);
+
+/// The exit code `server deploy` answers when step 3 failed because a **pinned fetch did not answer**.
+///
+/// `4`, because 0, 1, 2 and 3 are spoken for: 1 is a run that failed, 2 is a gate invoked wrongly, and 3 is
+/// `scripts/check-crate-set.sh`'s stale image. The code exists so that a caller can tell an outage from a verdict,
+/// which is what it is for in this product: `scripts/verify.sh` prints a line that measured nothing and exits the same
+/// 4 rather than a `FAIL` a `holosmith update` would record as a refusal, and [`Report::exit_code`] is the one place
+/// a report becomes it (ADR-0111).
+pub const FETCH_UNANSWERED: u8 = 4;
 
 /// One path made absolute, or kept verbatim when the kernel cannot answer.
 ///
@@ -424,6 +433,10 @@ pub struct Report {
     pub lines: Vec<Line>,
     /// The step whose line is `failed`, which is the exit code and the resume command.
     pub failed: Option<DeployStep>,
+    /// Whether the step that stopped the run failed because a **pinned fetch did not answer** — step 3's build of an
+    /// image whose toolchain download never arrived, which is a machine that could not reach a host rather than a tree
+    /// that is wrong. [`Report::exit_code`] is the one reader (ADR-0111).
+    pub unanswered: bool,
     pub dry_run: bool,
     /// [`Root::describe`]: which tree this run installed into.
     ///
@@ -437,6 +450,21 @@ impl Report {
     /// Whether a step failed, which is exactly what the exit code says.
     pub fn failed(&self) -> bool {
         self.failed.is_some()
+    }
+
+    /// The exit code this report earns: [`FETCH_UNANSWERED`] when a fetch that did not answer is what stopped the run,
+    /// `FAILURE` for every other failed step, and success for a report that failed nowhere.
+    ///
+    /// A failed build is normally the tree's or the machine's business and exit 1 is right for it — a compile error, a
+    /// `COPY` of a file the context does not carry, a tarball that failed the digest the recipe pins. The one failure
+    /// that is not a verdict about the tree is step 3's build whose pinned download never arrived, and giving it its own
+    /// code is what lets `scripts/verify.sh` print a case that could not measure instead of a `FAIL` (ADR-0111).
+    pub fn exit_code(&self) -> ExitCode {
+        match self.failed {
+            Some(_) if self.unanswered => ExitCode::from(FETCH_UNANSWERED),
+            Some(_) => ExitCode::FAILURE,
+            None => ExitCode::SUCCESS,
+        }
     }
 
     /// Put `fallback` on the failed step's [`Line::fix`] when the step itself named no repair: the run's own resume
@@ -844,6 +872,7 @@ pub fn run_as_with(
     let mut report = Report {
         lines: Vec::new(),
         failed: None,
+        unanswered: false,
         dry_run,
         root: root.describe(),
     };
@@ -868,7 +897,13 @@ pub fn run_as_with(
         let line = match step {
             DeployStep::Preflight => preflight(&checked, &doctor_tools, machine),
             DeployStep::Files => files(&installed, root, tools, dry_run, kind),
-            DeployStep::Images => images_line(&installed, machine, dry_run, progress),
+            // Step 3 is the one step whose failure can be the machine's network rather than the tree, so its line and
+            // that one bit travel together ([`Report::exit_code`]).
+            DeployStep::Images => {
+                let (line, unanswered) = images_line(&installed, machine, dry_run, progress);
+                report.unanswered = unanswered;
+                line
+            }
             DeployStep::Proxies => proxies_line(&installed, machine, dry_run),
             DeployStep::Service => service(&installed, root, tools, dry_run),
             DeployStep::Health => health(&checked, &doctor_tools, tools, machine, dry_run),
@@ -1732,6 +1767,10 @@ fn failed_with_fix(step: DeployStep, sentence: String, fix: String) -> Line {
 
 /// Step 3: the two images, built from the Dockerfiles embedded in this binary (ADR-0057).
 ///
+/// The answer is the step's line **and** whether the build that stopped it could not fetch a pinned source: that second
+/// bit is the one failure here that is not a verdict about the tree, and [`Report::unanswered`] carries it to
+/// [`Report::exit_code`] (ADR-0111).
+///
 /// The read is each image's **labels**, compared with what this binary would build: not the tag, which any
 /// `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of those labels
 /// is a digest of the binary the build copies, because the git tag cannot tell two builds of the same commit (or
@@ -1745,13 +1784,13 @@ fn images_line(
     machine: &dyn Machine,
     dry_run: bool,
     progress: &mut dyn Progress,
-) -> Line {
+) -> (Line, bool) {
     // The digest of *this* binary, hashed once: it is the label that makes a rebuilt artifact a rebuild, and the
     // read needs it as much as the apply does — a read that skipped it would answer `satisfied` over an image
     // holding the previous program (the review found exactly that before this line existed).
     let digest = match images::own_digest() {
         Ok(digest) => digest,
-        Err(sentence) => return failed(DeployStep::Images, sentence),
+        Err(sentence) => return (failed(DeployStep::Images, sentence), false),
     };
     // Both expectations up front, so the loop below and the `satisfied` sentence read the same two values.
     //
@@ -1767,41 +1806,50 @@ fn images_line(
         // the proxy installs no toolchain — so the sentence gives the shared four one clause and the agent's list
         // its own. The digest is clipped: a line an operator reads with 64 hex characters in it is a line nobody
         // finishes, and the twelve characters it does carry are enough to see two builds differ.
-        return Line {
-            step: DeployStep::Images,
-            word: Word::Satisfied,
-            sentence: format!(
-                "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, and \
-                 the agent image's toolchains {}{remark}",
-                ImageKind::Proxy.image(),
-                ImageKind::Agent.image(),
-                agent.version,
-                agent.git_tag,
-                agent.pi_version,
-                &agent.binary[..12],
-                agent.toolchains.unwrap_or_default().join(" ")
-            ),
-            fix: None,
-        };
+        return (
+            Line {
+                step: DeployStep::Images,
+                word: Word::Satisfied,
+                sentence: format!(
+                    "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, and \
+                     the agent image's toolchains {}{remark}",
+                    ImageKind::Proxy.image(),
+                    ImageKind::Agent.image(),
+                    agent.version,
+                    agent.git_tag,
+                    agent.pi_version,
+                    &agent.binary[..12],
+                    agent.toolchains.unwrap_or_default().join(" ")
+                ),
+                fix: None,
+            },
+            false,
+        );
     }
     let reasons: Vec<String> = pending.iter().map(|(_, reason)| reason.clone()).collect();
     if dry_run {
-        return Line {
-            step: DeployStep::Images,
-            word: Word::Needs,
-            sentence: counted(&reasons, &remark),
-            fix: None,
-        };
+        return (
+            Line {
+                step: DeployStep::Images,
+                word: Word::Needs,
+                sentence: counted(&reasons, &remark),
+                fix: None,
+            },
+            false,
+        );
     }
     let binary = match std::env::current_exe() {
         Ok(binary) => binary,
         Err(error) => {
-            return failed(
-                DeployStep::Images,
-                format!(
-                    "no image was built: this process's own path could not be read ({error}), and the build's \
-                     context is an archive holding the Dockerfile and this program"
+            return (
+                failed(
+                    DeployStep::Images,
+                    format!(
+                        "no image was built: this process's own path could not be read ({error}), and the build's \
+                         context is an archive holding the Dockerfile and this program"
+                    ),
                 ),
+                false,
             );
         }
     };
@@ -1809,13 +1857,21 @@ fn images_line(
     match images::ensure(
         machine, &binary, &digest, &release, config, &pending, &label, progress,
     ) {
-        Ok(sentence) => Line {
-            step: DeployStep::Images,
-            word: Word::Changed,
-            sentence: format!("{sentence}{remark}"),
-            fix: None,
-        },
-        Err(sentence) => failed(DeployStep::Images, sentence),
+        Ok(sentence) => (
+            Line {
+                step: DeployStep::Images,
+                word: Word::Changed,
+                sentence: format!("{sentence}{remark}"),
+                fix: None,
+            },
+            false,
+        ),
+        // The bit is the log's own answer, read where the log was (`images::fetch_did_not_answer`): a compile error or
+        // a tarball that failed its digest is a `false` and stays exit 1.
+        Err(error) => (
+            failed(DeployStep::Images, error.sentence),
+            error.fetch_did_not_answer,
+        ),
     }
 }
 

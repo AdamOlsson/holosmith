@@ -100,7 +100,10 @@ pub fn run(args: DeployArgs) -> ExitCode {
         if args.verbose {
             println!("{}", resume(&args));
         }
-        return ExitCode::FAILURE;
+        // [`deploy::Report::exit_code`] rather than a flat 1: step 3's build whose pinned fetch did not answer is exit
+        // 4, because a caller that reads it as a refusal would report a tree nobody refused (ADR-0111). Over ssh this
+        // code is the target's own, propagated by [`run_over_ssh`] unchanged.
+        return report.exit_code();
     }
     let role = deploy::union(loaded.config.role, args.kind);
     println!(

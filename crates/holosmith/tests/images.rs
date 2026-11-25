@@ -64,6 +64,125 @@ Dockerfile:2
 --------------------
 ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref ehjfon54b506ntqgmkhofaoke::557hwsb5b5gxwia0u2z24s8xh: \"/missing-file\": not found";
 
+/// The shape a build takes when musl.cc does not answer: the layer, curl's own diagnostic for a connection that never
+/// opened and its retry warning, the instruction with the whole `RUN` around it, and the exit status.
+const MUSL_FETCH_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+#8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.
+------
+ > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz:
+0.512 curl: (28) Connection timed out after 300000 milliseconds
+------
+Dockerfile:76
+--------------------
+  76 | >>> RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \\
+  77 |       https://musl.cc/x86_64-linux-musl-cross.tgz \\
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 28";
+
+/// The tarball arrived and was not the pinned one: the failure the pin exists for, and the one a fetch classification
+/// may never excuse. It carries a retried attempt's connection error as well, which is what makes the digest the thing
+/// this arm is about.
+const DIGEST_MISMATCH: &str = "#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+------
+ > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
+0.512 /tmp/musl.tgz: FAILED
+0.512 sha256sum: WARNING: 1 computed checksum did NOT match
+------
+Dockerfile:76
+--------------------
+  76 | >>> RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz \\
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 1";
+
+/// The name that did not resolve: the log ADR-0111 D1 quotes from a real `docker build` under `--network none`, five
+/// attempts two seconds apart and the child's own status 6.
+const MUSL_NAME_UNRESOLVED: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.166 curl: (6) Could not resolve host: musl.cc
+#8 2.170 curl: (6) Could not resolve host: musl.cc
+#8 ERROR: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 6
+------
+ > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
+0.166 curl: (6) Could not resolve host: musl.cc
+------
+Dockerfile:76
+--------------------
+  76 | >>> RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \\
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 6";
+
+/// The host answering an HTTP 5xx: curl's `-f` status 22, and the one 22 that is the host declining rather than the
+/// recipe naming a tarball that is not there.
+const MUSL_HTTP_DECLINED: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.412 curl: (22) The requested URL returned error: 503
+#8 2.412 curl: (22) The requested URL returned error: 503
+#8 ERROR: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 22
+------
+ > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
+0.412 curl: (22) The requested URL returned error: 503
+------
+Dockerfile:76
+--------------------
+  76 | >>> RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \\
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 22";
+
+/// The same 22 with a 404 behind it: the recipe asking for a tarball that host does not serve, which is this tree's
+/// defect and must stay one.
+const MUSL_TARBALL_NOT_FOUND: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.412 curl: (22) The requested URL returned error: 404
+#8 ERROR: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 22
+------
+ > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
+0.412 curl: (22) The requested URL returned error: 404
+------
+Dockerfile:76
+--------------------
+  76 | >>> RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \\
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 22";
+
+/// Half of a build log this classification has to ignore: the fetch retried, printed curl's two diagnostics per attempt,
+/// and then **got its bytes** (`#8 DONE`). `--retry-all-errors` makes that an ordinary shape on a day the host is away,
+/// which is why the rule reads the build's final status rather than searching the log's text.
+const MUSL_RETRY_THEN_SUCCEEDED: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+#8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.
+#8 2.700 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+#8 2.700 Warning: Transient problem: connection refused Will retry in 2 seconds. 3 retries left.
+#8 DONE 9.4s";
+
+/// That same fetch, and then the layer that really failed: a `RUN` whose rustc error is the tree's own defect, ending
+/// with the status that says so. Before the rule was anchored on that status this log read as an outage.
+const MUSL_RETRIED_THEN_COMPILE_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+#8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.
+#8 DONE 9.4s
+#9 [5/9] RUN cargo build --release --locked
+#9 1.204 error[E0425]: cannot find value `missing` in this scope
+#9 ERROR: process \"/bin/sh -c cargo build --release --locked\" did not complete successfully: exit code: 1
+------
+ > [5/9] RUN cargo build --release --locked:
+1.204 error[E0425]: cannot find value `missing` in this scope
+------
+Dockerfile:82
+--------------------
+  82 | >>> RUN cargo build --release --locked
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c cargo build --release --locked\" did not complete successfully: exit code: 1";
+
+/// `curl` failing inside an image that is not fetching this build's pinned tarballs: that image's own failure, which
+/// this classification exists not to excuse.
+const OTHER_CURL_FAILURE: &str = "------
+ > [2/2] RUN curl -fsSL https://registry.example/thing.json:
+0.512 curl: (6) Could not resolve host: registry.example
+------
+Dockerfile:2
+--------------------
+   2 | >>> RUN curl -fsSL https://registry.example/thing.json
+--------------------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL https://registry.example/thing.json\" did not complete successfully: exit code: 6";
+
 // ---- the two files, and the names built from them ------------------------------------------
 
 #[test]
@@ -311,6 +430,46 @@ fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
         npm_env.contains("npm_config_logs_dir=/tmp/npm-logs"),
         "npm's logs directory is the read-only cache: {npm_env}"
     );
+}
+
+#[test]
+fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
+    // The two musl cross toolchains are fetched from musl.cc while each image builds, so an image build is only as
+    // available as that host (ADR-0111). A bounded retry is the whole of the recipe's half, and `--retry` alone is not
+    // it: `--retry` retries a timeout and an HTTP 5xx and not the refused connection or the name that did not resolve,
+    // which is what an outage looks like from inside a build. An edit that dropped one of the four words would put the
+    // gate back to recording a network blip as a tree nobody passed, so both files are read and both downloads are
+    // asserted — with the digest check that stays the pin beside them.
+    for (name, recipe) in [
+        ("agent.Dockerfile", images::AGENT_DOCKERFILE),
+        ("builder.Dockerfile", holosmith::builder::DOCKERFILE),
+    ] {
+        let blocks = instructions(recipe);
+        let downloads: Vec<&str> = blocks
+            .iter()
+            .map(String::as_str)
+            .filter(|block| block.starts_with("RUN curl "))
+            .collect();
+        assert_eq!(
+            downloads.len(),
+            2,
+            "{name} does not fetch exactly two tarballs: {downloads:?}"
+        );
+        for download in downloads {
+            for word in [
+                "--retry 4",
+                "--retry-delay 2",
+                "--retry-all-errors",
+                "https://musl.cc/",
+                "| sha256sum -c -",
+            ] {
+                assert!(
+                    download.contains(word),
+                    "{name}'s download does not carry `{word}`: {download}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -721,7 +880,6 @@ fn an_archive_of_a_missing_binary_is_a_sentence_before_the_daemon_is_asked() {
 }
 
 // ---- the failure sentence ------------------------------------------------------------------
-
 #[test]
 fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said() {
     let run = images::failure("holosmith-proxy:0.1.0", RUN_FAILURE);
@@ -775,6 +933,93 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
     assert!(nothing.contains("agent-image:0.1.0"), "{nothing}");
     assert!(nothing.contains("printed nothing"), "{nothing}");
     assert!(nothing.contains("no new image was tagged"), "{nothing}");
+}
+
+#[test]
+fn a_build_whose_pinned_fetch_did_not_answer_is_not_a_verdict_about_the_tree() {
+    // The recipes fetch both musl cross toolchains while the image builds, so musl.cc being away is a build that never
+    // started. `server deploy` exits 4 for it and the gate prints a line that measured nothing (ADR-0111), and both of
+    // those rest on this classification: one log read for two facts — was it a fetch, and what does the sentence say.
+    //
+    // The endings curl itself can produce for a transfer that never arrived: the wait that timed out, the name that did
+    // not resolve (the shape ADR-0111 D1 quotes from a real build), and an HTTP 5xx, which is the host declining rather
+    // than the recipe naming a tarball that is not there.
+    for (said, log) in [
+        ("a connection that timed out", MUSL_FETCH_FAILURE),
+        ("a name that did not resolve", MUSL_NAME_UNRESOLVED),
+        ("an HTTP 503 from the host", MUSL_HTTP_DECLINED),
+    ] {
+        assert!(
+            images::fetch_did_not_answer(log),
+            "{said} is not a fetch that did not answer"
+        );
+    }
+    let sentence = images::failure("agent-image:0.1.0", MUSL_FETCH_FAILURE);
+    for fact in [
+        "agent-image:0.1.0",
+        "musl.cc",
+        "did not answer",
+        "not a recipe or a tree that is wrong",
+        "no new image was tagged",
+        "exit code: 28",
+    ] {
+        assert!(
+            sentence.contains(fact),
+            "the sentence does not name {fact}: {sentence}"
+        );
+    }
+    assert!(
+        sentence.lines().count() <= 3,
+        "the sentence is more than a sentence: {sentence}"
+    );
+
+    // The failures that are the tree's own, each of which must stay a plain exit 1: a package that is not there, a
+    // `COPY` of a file the context does not carry, a tarball that arrived and was not the pinned one (the one this
+    // classification exists **not** to excuse, because a digest mismatch is what the pin is for), a 404 behind curl's
+    // 22, and — the log this rule is anchored for — a fetch that retried, printed curl's diagnostics and **got its
+    // bytes**, followed by a layer whose rustc error is the defect.
+    for (said, log) in [
+        ("a missing package", RUN_FAILURE),
+        ("a missing context file", COPY_FAILURE),
+        ("a tarball that failed its digest", DIGEST_MISMATCH),
+        ("a tarball the host does not have", MUSL_TARBALL_NOT_FOUND),
+        (
+            "a retried fetch and then a compile error",
+            MUSL_RETRIED_THEN_COMPILE_FAILURE,
+        ),
+    ] {
+        assert!(
+            !images::fetch_did_not_answer(log),
+            "{said} reads as a fetch that did not answer"
+        );
+        assert!(
+            !images::failure("agent-image:0.1.0", log).contains("did not answer"),
+            "{said} is reported as a host that did not answer: {}",
+            images::failure("agent-image:0.1.0", log)
+        );
+    }
+
+    // The same retried fetch in front of a `COPY` of a file the archive does not carry, which is the commonest way a
+    // build fails after a fetch that retried. BuildKit's status for that one names no exit code at all, so the log has
+    // no final status to find: a build the recipe failed is not a fetch.
+    let after_copy = format!("{MUSL_RETRY_THEN_SUCCEEDED}\n{COPY_FAILURE}");
+    assert!(
+        !images::fetch_did_not_answer(&after_copy),
+        "a retried fetch excused a COPY of a file the context does not carry: {after_copy}"
+    );
+
+    // And `curl` failing inside an image that fetches something of its own is that image's failure: the host's name has
+    // to be in the log as well as the status, or every network failure anywhere would be excused here.
+    assert!(
+        !images::fetch_did_not_answer(OTHER_CURL_FAILURE),
+        "a fetch of another host reads as this build's pinned toolchain download"
+    );
+    // A build whose fetch succeeded is not a fetch that did not answer, whatever it printed on the way.
+    assert!(
+        !images::fetch_did_not_answer(MUSL_RETRY_THEN_SUCCEEDED),
+        "a retried fetch that got its bytes reads as one that did not answer"
+    );
+    assert!(!images::fetch_did_not_answer(""));
 }
 
 // ---- the read, over a fake -----------------------------------------------------------------

@@ -24,6 +24,7 @@
 //! what a build asks, and a test drives the whole read-and-build path through a fake without a daemon.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -688,6 +689,10 @@ pub fn build_arguments(tag: &str, expectation: &Expectation) -> Vec<String> {
 ///
 /// Empty input still answers usefully: a daemon that said nothing is a build that failed without a reason, and
 /// the sentence says so rather than starting with a colon.
+///
+/// A log [`fetch_did_not_answer`] reads as a pinned download that never arrived gets its own sentence, with the host's
+/// name and the fact that the tree is not what failed — the words `server deploy`'s exit 4 and the gate's own line are
+/// about (ADR-0111).
 pub fn failure(image: &str, text: &str) -> String {
     let layer = text
         .lines()
@@ -719,7 +724,128 @@ pub fn failure(image: &str, text: &str) -> String {
             "the build of {image} failed{at} and printed nothing, so no new image was tagged {image}"
         );
     }
+    if fetch_did_not_answer(text) {
+        return format!(
+            "the build of {image} failed{at} because a download it makes did not answer ({MUSL_HOST} serves the two \
+             pinned cross toolchains): this is a machine that could not reach that host and not a recipe or a tree \
+             that is wrong, and no new image was tagged {image} — run it again when that host answers: {last}"
+        );
+    }
     format!("the build of {image} failed{at}, and no new image was tagged {image}: {last}")
+}
+
+/// The host both recipes fetch their two cross toolchains from.
+///
+/// It is what ties a build's log to *this* build's two pinned downloads: an image whose own `curl` could not reach its
+/// own host is that image's failure, and reading it as this one's would excuse a broken recipe as an outage.
+const MUSL_HOST: &str = "musl.cc";
+
+/// curl's own exit statuses for a transfer that never arrived: 6 the name, 7 the connection, 28 the wait, 35 the TLS
+/// handshake, 52 an empty reply, 56 a broken one.
+///
+/// These are *statuses* rather than log text because [`fetch_did_not_answer`] reads the failing child's own code, which
+/// is the one fact in a build's log that cannot also be a retried attempt's: [`MUSL_HOST`]'s away time makes curl print
+/// a diagnostic and then carry on, so a fetch that retried and succeeded leaves `curl: (7) …` behind. A proxy refusal
+/// (`5`) is absent: an image build here sets no proxy, so that ending cannot occur, and a fixture for it would invent a
+/// log shape.
+const CURL_DID_NOT_ANSWER: [u8; 6] = [6, 7, 28, 35, 52, 56];
+
+/// curl's `-f` status for an HTTP error: the host answered with a code, which is a fetch that did not answer only when
+/// that code was a 5xx — the host declining (see [`CURL_DECLINED`]).
+///
+/// **404 is deliberately not here.** `returned error: 404` is the recipe asking for a tarball the host does not have,
+/// which is this tree's defect and must stay one: the classification exists to tell a build that never got its bytes
+/// from a build whose recipe names a file that is not there.
+const CURL_HTTP_ERROR: u8 = 22;
+
+/// curl's `-f` message for an HTTP 5xx (`returned error: 503`): the half of [`CURL_HTTP_ERROR`] that is the host's, as
+/// opposed to the recipe's.
+const CURL_DECLINED: &str = "returned error: 5";
+
+/// Whether a failed build's log says the **pinned fetch did not answer**, rather than that the tarball it got was not
+/// the one the recipe pinned or that anything the recipe compiles is wrong.
+///
+/// The recipes fetch both musl cross toolchains from musl.cc while the image builds (ADR-0111), so an image build is
+/// only as available as that host: a minute of it being away is a build that failed, and a gate that read that as a
+/// tree nobody passed would record a refusal nobody made. Two things have to be in the log at once — the host's name,
+/// and a final status that is [`CURL_DID_NOT_ANSWER`] — because either alone is a false positive: a compile error can
+/// quote a URL, and `curl` failing in an image is that image's own question.
+///
+/// **The status is the build's own, read from its last line, and never a diagnostic anywhere in the log.**
+/// `Docker::run_captured` hands over every layer's stdout and stderr in one text, and `--retry-all-errors` makes a
+/// fetch that retried and then *succeeded* leave curl's diagnostics in it: a later layer that fails for a reason the
+/// tree owns — a compile error, a `COPY` of a file the archive does not carry, a crate the vendored set does not hold —
+/// would otherwise be excused as an outage, and a reproducible tree defect would go unreported while the host is flaky.
+/// A log whose final status is `exit code: 1` is the tree's, whatever a retried attempt printed earlier.
+///
+/// A **digest that did not match is a real defect** and is excluded even when a retried attempt printed a connection
+/// error first: the bytes arrived and were not the pinned ones, which is what the pin is for.
+pub fn fetch_did_not_answer(text: &str) -> bool {
+    if text.contains("did NOT match") {
+        return false;
+    }
+    if !text.contains(MUSL_HOST) {
+        return false;
+    }
+    match final_exit_code(text) {
+        Some(code) if CURL_DID_NOT_ANSWER.contains(&code) => true,
+        Some(CURL_HTTP_ERROR) => text.contains(CURL_DECLINED),
+        _ => false,
+    }
+}
+
+/// The exit status of the child the build stopped at: `N` from the **last** `did not complete successfully: exit
+/// code: N` line in `text`, which BuildKit prints on a failed build's last line.
+///
+/// The last one because the log is every layer's, so an earlier layer can carry a status of its own (`#8 ERROR: process
+/// …`). `None` is a failure that names no status at all — a `COPY` of a file the context does not carry is one — and
+/// that is a build the recipe or the tree failed, not a fetch.
+fn final_exit_code(text: &str) -> Option<u8> {
+    text.lines()
+        .filter_map(|line| line.split_once("did not complete successfully: exit code: "))
+        .filter_map(|(_, rest)| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .next_back()
+}
+
+/// Why an image build the step asked for left no image: the sentence to print, and whether the thing that failed was a
+/// **pinned fetch that did not answer** rather than the recipe or the tree.
+///
+/// The second field is what `server deploy` turns into [`crate::deploy::FETCH_UNANSWERED`] and `scripts/verify.sh` into
+/// a line that measured nothing (ADR-0111). It is `false` for every failure that is the tree's — a compile error, a
+/// `COPY` of a file the context does not carry, a tarball that failed its digest, a daemon that would not build —
+/// because those are exit 1's, and a caller that could not tell them apart would excuse a broken recipe as an outage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildError {
+    pub sentence: String,
+    pub fetch_did_not_answer: bool,
+}
+
+impl BuildError {
+    /// The sentence alone, with no fetch implicated: the shape every arm that is not a failed build needs.
+    fn of(sentence: String) -> Self {
+        Self {
+            sentence,
+            fetch_did_not_answer: false,
+        }
+    }
+}
+
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.sentence)
+    }
+}
+
+impl From<String> for BuildError {
+    fn from(sentence: String) -> Self {
+        Self::of(sentence)
+    }
 }
 
 /// `text` cut to `limit` characters, with an ellipsis when it was longer.
@@ -866,6 +992,10 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// The two of them are two parameters rather than one because a sink outlives a step — `install`'s is one for the whole
 /// run and this module is handed it for the length of a step — which is also what takes this signature past the count
 /// clippy wants.
+///
+/// `Err` is a [`BuildError`]: the sentence, and whether a pin's host did not answer — the one failure here that is the
+/// machine's network rather than the tree's ([`fetch_did_not_answer`] reads it out of the log, and
+/// [`crate::deploy::Report::exit_code`] is where it becomes an exit code).
 #[allow(clippy::too_many_arguments)]
 pub fn ensure(
     images: &dyn Images,
@@ -876,7 +1006,7 @@ pub fn ensure(
     pending: &[(Kind, String)],
     label: &str,
     progress: &mut dyn Progress,
-) -> Result<String, String> {
+) -> Result<String, BuildError> {
     if pending.is_empty() {
         return Ok("no image needed building".to_string());
     }
@@ -902,7 +1032,12 @@ pub fn ensure(
             Log {
                 success: false,
                 text,
-            } => return Err(failure(&tag, &text)),
+            } => {
+                return Err(BuildError {
+                    sentence: failure(&tag, &text),
+                    fetch_did_not_answer: fetch_did_not_answer(&text),
+                });
+            }
         }
     }
     let tags: Vec<String> = pending

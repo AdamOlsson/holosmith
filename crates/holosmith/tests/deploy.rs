@@ -718,6 +718,7 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             },
         ],
         failed: Some(DeployStep::Health),
+        unanswered: false,
         dry_run: false,
         root: "/var/lib/holosmith".to_string(),
     };
@@ -772,6 +773,7 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             },
         ],
         failed: None,
+        unanswered: false,
         dry_run: true,
         root: "/var/lib/holosmith".to_string(),
     };
@@ -834,6 +836,7 @@ fn five_words() -> Report {
             },
         ],
         failed: Some(DeployStep::Health),
+        unanswered: false,
         dry_run: false,
         root: "/var/lib/holosmith".to_string(),
     }
@@ -884,6 +887,7 @@ fn a_failed_step_without_a_repair_of_its_own_gets_the_runs_resume_command() {
             fix: None,
         }],
         failed: Some(DeployStep::Preflight),
+        unanswered: false,
         dry_run: false,
         root: "/var/lib/holosmith".to_string(),
     };
@@ -1534,6 +1538,37 @@ const COPY_FAILURE: &str = "#3 [2/3] COPY missing-file /x
 ------
 ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref \"/missing-file\": not found";
 
+/// The shape a build takes when musl.cc does not answer — the one step 3 failure that is the machine's network and
+/// not a verdict about the tree (ADR-0111).
+const FETCH_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+------
+ > [4/9] RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
+0.512 curl: (28) Connection timed out after 300000 milliseconds
+------
+   2 | >>> RUN curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 28";
+
+/// That same fetch on a day musl.cc was slow, followed by the layer that really failed: curl retried and got its bytes
+/// (`#8 DONE`), and a later `RUN`'s rustc error is the tree's own defect. It is the log that made the classification read
+/// the build's final status rather than search the whole text — `--retry-all-errors` leaves the two diagnostics behind
+/// either way — and it must stay exit 1.
+const RETRIED_FETCH_THEN_COMPILE_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
+#8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.
+#8 DONE 9.4s
+#9 [5/9] RUN cargo build --release --locked
+#9 1.204 error[E0425]: cannot find value `missing` in this scope
+#9 ERROR: process \"/bin/sh -c cargo build --release --locked\" did not complete successfully: exit code: 1
+------
+ > [5/9] RUN cargo build --release --locked:
+1.204 error[E0425]: cannot find value `missing` in this scope
+------
+   2 | >>> RUN cargo build --release --locked
+------
+ERROR: failed to build: failed to solve: process \"/bin/sh -c cargo build --release --locked\" did not complete successfully: exit code: 1";
+
 #[test]
 fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     // The first deploy on a machine that has never built either image: the read is two "not on this machine"
@@ -1836,6 +1871,86 @@ fn a_failed_build_is_step_threes_own_sentence_and_stops_the_run() {
         "a failed build did not stop the run:\n{}",
         report.render()
     );
+}
+
+#[test]
+fn a_build_whose_pinned_fetch_did_not_answer_is_its_own_exit_code() {
+    // The defect this classification exists for: the recipes fetch both musl cross toolchains at build time, so a minute
+    // of musl.cc being away is a build that failed — and a gate that recorded that as a tree nobody passed would refuse
+    // a candidate nobody refused. Step 3's failure therefore carries whether the log says the fetch did not answer, and
+    // the report's exit code turns into 4 for it and stays 1 for every failure that is the tree's (ADR-0111).
+    //
+    // The third row is the one that shapes the rule: this build's fetch retried and succeeded, and the layer after it
+    // failed at the tree's own defect, so a log searched for curl's diagnostics would answer 4 for a tree nobody could
+    // build. The status at the end of the log is what says which of the two this is.
+    let _serial = one_at_a_time();
+    for (label, log, code, instruction) in [
+        ("deploy-images-fetch", FETCH_FAILURE, 4, None),
+        (
+            "deploy-images-copy",
+            COPY_FAILURE,
+            1,
+            Some("COPY missing-file /x"),
+        ),
+        (
+            "deploy-images-fetch-then-failure",
+            RETRIED_FETCH_THEN_COMPILE_FAILURE,
+            1,
+            Some("cargo build --release --locked"),
+        ),
+    ] {
+        let dir = TempDir::new(label);
+        let socket = dir.file("docker.sock");
+        fake_daemon(&socket);
+        let config = config(Some(format!("unix://{}", socket.display())));
+        let root = rooted(&dir, "root");
+        let deployed = root.config(&config);
+        let machine = Fake::new().with_failing_build(log);
+
+        let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
+
+        assert_eq!(
+            report.failed,
+            Some(DeployStep::Images),
+            "{label}: {}",
+            report.render()
+        );
+        assert_eq!(
+            report.exit_code(),
+            std::process::ExitCode::from(code),
+            "{label}: {}",
+            report.render()
+        );
+        assert_eq!(report.unanswered, code == 4, "{label}");
+        let sentence = &line(&report, DeployStep::Images).sentence;
+        if code == 4 {
+            // The sentence names the host and says the tree is not what failed, which is what an operator reads
+            // instead of a refusal.
+            for fact in [
+                "musl.cc",
+                "did not answer",
+                "not a recipe or a tree that is wrong",
+            ] {
+                assert!(
+                    sentence.contains(fact),
+                    "{label}: the failure does not name {fact}: {sentence}"
+                );
+            }
+        } else {
+            // And a build whose fetch retried and got its bytes says nothing about a host: the failing instruction is
+            // the sentence's subject, as it is for every other failure of the tree.
+            assert!(
+                !sentence.contains("did not answer"),
+                "{label}: a tree's own failure is reported as a host that did not answer: {sentence}"
+            );
+            if let Some(named) = instruction {
+                assert!(
+                    sentence.contains(named),
+                    "{label}: the failure does not name {named}: {sentence}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
