@@ -362,7 +362,7 @@ async fn the_probe_reads_a_real_answer_and_refuses_anything_that_is_not_a_health
     assert_eq!(local_row["reach"], "reachable");
     assert_eq!(
         local_row["version"],
-        env!("CARGO_PKG_VERSION"),
+        holosmith::VERSION,
         "the local row reports this build's version"
     );
 }

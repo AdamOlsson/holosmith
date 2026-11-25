@@ -1,5 +1,15 @@
 //! The Holosmith binary: hub, server, proxies, container helpers and deploy tool.
 
+/// The version this binary reports: `/api/health`'s `version`, `holosmith version`, and the tag on every image this
+/// build names.
+///
+/// **`VERSION` at the repository root is the only copy of it.** `build.rs` reads that file and puts it here, so a
+/// bump is one line and one commit — and, because the value is in no manifest, it is in no `Cargo.lock` either:
+/// `scripts/check-crate-set.sh` digests that lock, and a version living in it would make every bump read as a stale
+/// agent image. Nothing in this crate may read Cargo's `CARGO_PKG_VERSION`, which answers the placeholder that
+/// `Cargo.toml`'s `[workspace.package]` carries; `tests/version_single_source.rs` is what says so.
+pub const VERSION: &str = env!("HOLOSMITH_VERSION");
+
 pub mod agent;
 pub mod backend;
 pub mod backup;

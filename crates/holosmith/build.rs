@@ -10,6 +10,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/web_embed.rs");
     println!("cargo:rerun-if-changed=../../pins/pi.txt");
+    // The version is a file outside the manifests, for the reason `version()` gives.
+    println!("cargo:rerun-if-changed=../../VERSION");
     // Without this line a new migration file is silently left out of the binary (ADR-0009).
     println!("cargo:rerun-if-changed=migrations");
     // The two Dockerfiles `src/images.rs` embeds: a reworded one is a different binary.
@@ -22,6 +24,7 @@ fn main() {
         std::env::var("TARGET").expect("cargo sets TARGET for every build script")
     );
     println!("cargo:rustc-env=HOLOSMITH_GIT_TAG={}", git_tag());
+    println!("cargo:rustc-env=HOLOSMITH_VERSION={}", version());
     let web_dir = write_web_dir(web_dir());
     println!("cargo:rustc-env=HOLOSMITH_WEB_DIR={}", web_dir.display());
 }
@@ -99,6 +102,41 @@ fn write_placeholder() -> PathBuf {
         std::process::exit(1);
     }
     out
+}
+
+/// The version this build reports, read out of `VERSION` at the repository root — the one copy of it.
+///
+/// `Cargo.toml` carries `0.0.0` as a placeholder instead, and that is load-bearing rather than tidy: a real version
+/// there lands in `Cargo.lock`, whose digest `scripts/check-crate-set.sh` compares with the crate set the agent image
+/// vendors — so a bump would read as a stale image and become the one edit this tree cannot promote. A file of its
+/// own is in nobody's digest.
+///
+/// The two refusals are the two ways a value here would reach a tag that cannot exist: no file at all (a source copy
+/// that dropped it), and a file holding anything but one token (a newline would reach `version --json` and
+/// `agent-image:<version>`). Both stop the build, because the alternative is a binary that reports a version nothing
+/// agrees with.
+fn version() -> String {
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR")
+            .expect("cargo sets CARGO_MANIFEST_DIR for every build script"),
+    )
+    .join("../../VERSION");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        println!(
+            "cargo::error={} cannot be read ({error}): it is the one copy of the version this build reports",
+            path.display()
+        );
+        std::process::exit(1);
+    });
+    let version = text.trim();
+    if version.is_empty() || version.split_whitespace().count() != 1 {
+        println!(
+            "cargo::error={} must hold one version on one line, and holds {text:?}",
+            path.display()
+        );
+        std::process::exit(1);
+    }
+    version.to_string()
 }
 
 /// `HOLOSMITH_GIT_TAG` wins (scripts/build.sh sets it, and builder containers have no

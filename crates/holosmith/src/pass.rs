@@ -84,7 +84,7 @@ pub const NEEDED_GB: u64 = 10;
 /// The variable the gate's wrapper reads to pick the image it runs in.
 ///
 /// `scripts/verify-in-container.sh`'s own knob, named here because this command sets it and the gate does not read it
-/// from anywhere else: its default is the tag of the tree's `Cargo.toml`, which in a candidate tree names the
+/// from anywhere else: its default is the tag of the tree's `VERSION`, which in a candidate tree names the
 /// *candidate's* version — and the candidate's image is the one thing that cannot exist before the candidate does.
 const IMAGE: &str = "HOLOSMITH_VERIFY_IMAGE";
 

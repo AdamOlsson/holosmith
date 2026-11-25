@@ -81,7 +81,7 @@ impl Health {
     pub fn of(config: &Config, runtime: &Runtime, drain: &Control) -> Self {
         Self {
             name: NAME,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::VERSION.to_string(),
             role: config.role,
             uptime_s: runtime.uptime_s(),
             preview_origin: config.preview_origin.as_str().to_string(),
@@ -235,7 +235,7 @@ mod tests {
                 .expect("eight fields always serialise"),
             format!(
                 r#"{{"name":"holosmith","version":"{}","role":"hub","uptime_s":0,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local","draining":false}}"#,
-                env!("CARGO_PKG_VERSION")
+                crate::VERSION
             )
         );
     }
@@ -264,7 +264,7 @@ mod tests {
         // and "not draining" is the only reading of a machine that cannot say (expand/contract, applied to a body).
         let previous = format!(
             r#"{{"name":"holosmith","version":"{}","role":"server","uptime_s":12,"preview_origin":"http://localhost:8081","application_server_key":null,"machine_name":"local"}}"#,
-            env!("CARGO_PKG_VERSION")
+            crate::VERSION
         );
         let answer = parse_answer(&previous).expect("a seven-key payload still parses");
         assert!(!answer.draining, "a payload with no such key is {previous}");

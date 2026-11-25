@@ -31,7 +31,7 @@ fn version_prints_five_key_value_lines_and_exits_zero() {
     let stdout = stdout_of(&holosmith(&["version"]));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 5, "expected five lines, got {stdout:?}");
-    assert_eq!(lines[0], format!("version {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(lines[0], format!("version {}", holosmith::VERSION));
     assert!(
         lines[1]
             .strip_prefix("git_tag ")
@@ -83,10 +83,7 @@ fn json_prints_one_line_with_the_contract_keys() {
         serde_json::Value::Null,
         "a binary outside a release directory reports no release, and the key is still there"
     );
-    assert_eq!(
-        object["version"],
-        serde_json::json!(env!("CARGO_PKG_VERSION"))
-    );
+    assert_eq!(object["version"], serde_json::json!(holosmith::VERSION));
     assert_eq!(object["pi_version"], serde_json::json!(pin_file().trim()));
     assert_eq!(
         object["schema_version"],

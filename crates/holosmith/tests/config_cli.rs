@@ -18,14 +18,18 @@ fn default_config_path() -> String {
     holosmith::config::config_path().display().to_string()
 }
 
-/// The golden file with the two paths the account decides filled in.
+/// The golden file with the values this build and the account decide filled in.
 ///
-/// Every other byte is the independent copy of the key set; `data_root` and `projects_root` are the two values
-/// that depend on the home, so the test supplies them from the same place the binary derives them. The golden
-/// spells them as `<root>/data` and `<root>/projects`.
+/// Every other byte is the independent copy of the key set; `data_root` and `projects_root` are the two values that
+/// depend on the home, so the test supplies them from the same place the binary derives them. The golden spells them
+/// as `<root>/data` and `<root>/projects`. `<version>` is the same substitution `config::render`'s own golden test
+/// makes: the default `agent_image` tag carries this binary's version, and a fixture holding the number would be a
+/// second file every bump had to edit.
 fn golden() -> String {
     let root = holosmith::config::default_root();
-    include_str!("golden/config-default.toml").replace("<root>", &root.display().to_string())
+    include_str!("golden/config-default.toml")
+        .replace("<root>", &root.display().to_string())
+        .replace("<version>", holosmith::VERSION)
 }
 
 /// A directory that removes itself, so the tests leave nothing in `/tmp`.

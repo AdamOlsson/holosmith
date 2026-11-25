@@ -478,11 +478,11 @@ fn the_image_names_carry_this_binarys_version() {
     // read, and a test that restated the format string would pass over a name nobody installs.
     assert_eq!(
         images::proxy_image(),
-        format!("holosmith-proxy:{}", env!("CARGO_PKG_VERSION"))
+        format!("holosmith-proxy:{}", holosmith::VERSION)
     );
     assert_eq!(
         images::agent_image(),
-        format!("agent-image:{}", env!("CARGO_PKG_VERSION"))
+        format!("agent-image:{}", holosmith::VERSION)
     );
     assert_eq!(images::BINARY_IN_IMAGE, "/usr/local/bin/holosmith");
     assert_eq!(
@@ -566,7 +566,7 @@ fn a_mismatch_names_the_key_and_both_values() {
         [
             (
                 "HOLOSMITH_VERSION".to_string(),
-                env!("CARGO_PKG_VERSION").to_string()
+                holosmith::VERSION.to_string()
             ),
             (
                 "HOLOSMITH_GIT_TAG".to_string(),
@@ -614,7 +614,7 @@ fn a_mismatch_names_the_key_and_both_values() {
         sentences[0]
     );
     assert!(
-        sentences[0].contains(env!("CARGO_PKG_VERSION")),
+        sentences[0].contains(holosmith::VERSION),
         "the sentence does not say what this binary's value is: {}",
         sentences[0]
     );

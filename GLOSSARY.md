@@ -1107,7 +1107,7 @@ different binary for the same tag is refused with both digests named. Safe, not 
 _Avoid_: Build script, host build (that is `scripts/build.sh`, the development path), compile step
 
 **Version**:
-The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one.
+The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one. Kept in `VERSION` at the repository root and nowhere else: `build.rs` reads it into the binary, and both manifests hold `0.0.0` so that a bump never moves `Cargo.lock`, whose digest a promotion's crate-set check compares against the agent image's.
 _Avoid_: Release, build, build number
 
 **Git tag**:

@@ -129,12 +129,18 @@ mod tests {
         render(config).expect("a config read from a file renders")
     }
 
-    /// The golden file with the two paths the account decides filled in: `<root>` is the state directory the
-    /// defaults derive from, and every other byte is the independent copy of the key set.
+    /// The golden file with the two values this build and the account decide filled in: `<root>` is the state
+    /// directory the defaults derive from, and `<version>` is this binary's version, which the default `agent_image`
+    /// tag carries. Every other byte is the independent copy of the key set.
+    ///
+    /// The version is substituted rather than written out for the reason `VERSION` exists: a bump is one line in one
+    /// file, and a fixture holding the number would be a second file a bump had to edit — the thing that made a bump
+    /// touch a test.
     fn golden() -> String {
         let root = crate::config::default_root();
         include_str!("../../tests/golden/config-default.toml")
             .replace("<root>", &root.display().to_string())
+            .replace("<version>", crate::VERSION)
     }
 
     #[test]

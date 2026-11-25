@@ -1087,7 +1087,7 @@ fn full_compares_the_agent_images_labels_with_this_binarys() {
     assert_eq!(image.outcome, Outcome::Pass, "{}", says(image));
     for fact in [
         config.agent_image.clone(),
-        env!("CARGO_PKG_VERSION").to_string(),
+        holosmith::VERSION.to_string(),
         holosmith::pins::pi_version().to_string(),
         "python3 ripgrep".to_string(),
     ] {

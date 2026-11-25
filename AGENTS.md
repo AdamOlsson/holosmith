@@ -97,11 +97,11 @@ artifact the `build` phase just produced, never `target/debug`. Do not invent a 
 phases are the build.
 
 `scripts/verify-in-container.sh [<verify.sh argument>...]` runs that same gate **in a container** on this
-machine's daemon (ADR-0109): `agent-image:<the Cargo.toml version>` by default, the tree and its git dirs at their
+machine's daemon (ADR-0109): `agent-image:<the version in VERSION>` by default, the tree and its git dirs at their
 own absolute paths, the invoking uid, `--network host`, and the host's `docker` CLI and socket mounted in for the
 run. It parses no argument of its own — every argument and every exit status is `scripts/verify.sh`'s, so `--help`
 there is the gate's usage — and it needs no host toolchain, because the image's is the gate's. Its refusals (root,
-no `docker` CLI, a `DOCKER_CONTEXT` with no `DOCKER_HOST`, no daemon, no image, no workspace version, a tree the
+no `docker` CLI, a `DOCKER_CONTEXT` with no `DOCKER_HOST`, no daemon, no image, no `VERSION` file, a tree the
 daemon cannot see) are exit 2 with one sentence naming the fix. A failed run's work dir is under
 `target/tmp-verify-in-container`, and the gate's own `kept work dir:` line prints the container path
 `/verify-work/tmp.XXXX`, which is that directory's `tmp.XXXX`.
@@ -457,6 +457,13 @@ next boot resumes them.
   target, and cargo silently ignores `target.*.rustflags` when that variable is set — the build would ship a
   static-PIE binary with no error. `scripts/check-static.sh` asserts `statically linked` and an empty
   `readelf -d`, so the mistake fails loudly instead.
+- **The version is `VERSION`, and `Cargo.toml` says `0.0.0`.** `build.rs` reads the file into `holosmith::VERSION`
+  (the version `version`, `/api/health` and every image tag report), and the placeholder in `[workspace.package]` is
+  what keeps a bump out of `Cargo.lock` — whose digest `scripts/check-crate-set.sh` compares against the crate set
+  the agent image vendors, so a version living in the lock would make every bump read as a stale image and be the
+  one edit a tree could not promote. Never read `env!("CARGO_PKG_VERSION")`: it answers the placeholder, and
+  `tests/version_single_source.rs` fails on it. The golden config fixture and the two tests that read it substitute
+  `<version>`, so a bump edits one file.
 - **The git tag** is `HOLOSMITH_GIT_TAG`, else `git describe --tags --always --dirty`, else `unknown`.
   `scripts/build.sh` sets it; a bare `cargo build` does not, and because `build.rs`'s `rerun-if-changed` lines opt
   out of cargo's default rerun, a new tag on an unchanged tree leaves the old value in place: only

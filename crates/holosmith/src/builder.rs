@@ -85,7 +85,7 @@ pub const AARCH64: &str = "aarch64-unknown-linux-musl";
 
 /// `holosmith-builder:<version>`: the image a release build runs in.
 pub fn image() -> String {
-    format!("{IMAGE_NAME}:{}", env!("CARGO_PKG_VERSION"))
+    format!("{IMAGE_NAME}:{}", crate::VERSION)
 }
 
 /// The recipe's digest: the SHA-256 of the Dockerfile and the entry script, which is what the image's label carries.

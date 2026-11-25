@@ -349,7 +349,7 @@ pub fn is_local(url: &Origin, control_origin: &Origin) -> bool {
 
 /// This build's version: what a row naming this machine reports, and what every other row's probe compares.
 pub fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    crate::VERSION.to_string()
 }
 
 /// One row's facts, as `holosmith status` and `holosmith hub host list` both print them.

@@ -38,7 +38,7 @@ impl VersionInfo {
     pub fn current() -> Self {
         let exe = std::env::current_exe().ok();
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::VERSION.to_string(),
             git_tag: env!("HOLOSMITH_GIT_TAG").to_string(),
             release: exe.as_deref().and_then(crate::release::running_tag),
             pi_version: pins::pi_version().to_string(),

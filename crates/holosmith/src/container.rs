@@ -1578,7 +1578,7 @@ mod tests {
         let proxy = EgressProxy::of(&config);
         assert_eq!(
             proxy.image,
-            format!("holosmith-proxy:{}", env!("CARGO_PKG_VERSION")),
+            format!("holosmith-proxy:{}", crate::VERSION),
             "the proxy image is this binary's own version, not the configured agent image"
         );
         assert_eq!(proxy.allow, ["crates.io"]);

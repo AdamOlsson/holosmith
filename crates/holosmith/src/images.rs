@@ -87,7 +87,7 @@ const AGENT_CONTEXT: [(&str, &str); 6] = [
 
 /// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke`.
 pub fn smoke_image() -> String {
-    format!("holosmith-smoke:{}", env!("CARGO_PKG_VERSION"))
+    format!("holosmith-smoke:{}", crate::VERSION)
 }
 
 /// Where the binary lives inside both images (`--entrypoint`, and `holosmith container snapshot`).
@@ -131,12 +131,12 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(2400);
 /// The version rather than `latest`: an upgraded binary must build and name a different image, and a tag an
 /// operator can read back is the one fact `docker image ls` shows of what a deploy installed.
 pub fn proxy_image() -> String {
-    Kind::Proxy.image_of(env!("CARGO_PKG_VERSION"))
+    Kind::Proxy.image_of(crate::VERSION)
 }
 
 /// `agent-image:<version>`: the image a session's container runs, the same name `agent_image` defaults to.
 pub fn agent_image() -> String {
-    Kind::Agent.image_of(env!("CARGO_PKG_VERSION"))
+    Kind::Agent.image_of(crate::VERSION)
 }
 
 /// Which of the two images.
@@ -170,13 +170,13 @@ impl Kind {
 
     /// The name this binary builds and tags it by.
     pub fn image(self) -> String {
-        self.image_of(env!("CARGO_PKG_VERSION"))
+        self.image_of(crate::VERSION)
     }
 
     /// The same name for **another release's** version, which is the tag a promotion builds and then reads.
     ///
     /// One format string per kind, because the tag a promotion creates and the tag the *new* binary will ask for at
-    /// its next boot have to be the same string: the boot composes it from its own `CARGO_PKG_VERSION`, and a
+    /// its next boot have to be the same string: the boot composes it from its own `VERSION`, and a
     /// promotion composes it from the candidate's `version --json`.
     pub fn image_of(self, version: &str) -> String {
         match self {

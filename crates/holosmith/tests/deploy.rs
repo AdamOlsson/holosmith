@@ -1629,8 +1629,8 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     assert_eq!(args.first().map(String::as_str), Some("build"));
     assert_eq!(args.last().map(String::as_str), Some("-"));
     assert!(
-        args.iter().any(|argument| argument
-            == &format!("HOLOSMITH_VERSION={}", env!("CARGO_PKG_VERSION"))),
+        args.iter()
+            .any(|argument| argument == &format!("HOLOSMITH_VERSION={}", holosmith::VERSION)),
         "the build carries no version argument: {args:?}"
     );
     assert!(
@@ -1674,7 +1674,7 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
     for fact in [
         images::proxy_image(),
         images::agent_image(),
-        env!("CARGO_PKG_VERSION").to_string(),
+        holosmith::VERSION.to_string(),
         holosmith::pins::pi_version().to_string(),
         "python3 ripgrep".to_string(),
     ] {

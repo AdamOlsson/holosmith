@@ -6,7 +6,7 @@
 # Every argument and every status is the gate's own: `--keep`, `--no-build`, `--help` and an unknown flag all reach
 # `scripts/verify.sh` verbatim, so `--help` prints the gate's usage and this script parses nothing. Exit 0 is a green
 # gate, 1 a red one, and 2 is a misuse: this script refusing to start (root, no `docker` CLI, no daemon, no image, no
-# workspace version, a tree the daemon cannot see), or `scripts/verify.sh`'s own unknown argument. No operator may read
+# `VERSION` file, a tree the daemon cannot see), or `scripts/verify.sh`'s own unknown argument. No operator may read
 # a 2 as a red tree — and 3 is `scripts/check-crate-set.sh`'s answer, reached through `scripts/verify.sh`'s preflight
 # before its first phase and passed through this script unchanged: the image vendored another `Cargo.lock`, so a crate
 # this tree needs is missing from it and the repair is a rebuilt `agent-image`, which is no verdict about the tree
@@ -71,7 +71,7 @@
 # or flag from outside changes what the gate in there decides.
 #
 # Two knobs are this script's own: `HOLOSMITH_VERIFY_IMAGE` names the image to run in, defaulting to
-# `agent-image:<the version in Cargo.toml>` — the tag `server deploy` builds — and `DOCKER_HOST` is the one way the
+# `agent-image:<the version in VERSION>` — the tag `server deploy` builds — and `DOCKER_HOST` is the one way the
 # daemon is named, defaulting to `unix:///var/run/docker.sock`. `DOCKER_CONTEXT` is refused rather than resolved: it
 # names a daemon by context, and this script has no socket to mount for one, so the container would measure the default
 # socket while the checks here measured the context's — the silent wrong answer the paragraph above exists to prevent.
@@ -109,11 +109,12 @@ docker_host="${DOCKER_HOST:-unix:///var/run/docker.sock}"
 docker info >/dev/null 2>&1 ||
   refuse "no Docker daemon answers at $docker_host: start it, or point DOCKER_HOST at the one the gate should measure against"
 
-# The image's tag is the workspace version, because that is what `server deploy` builds (`images::agent_image`,
-# `agent-image:<version>`) — read from the file rather than from the artifact, which need not exist yet.
-version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+# The image's tag is the version, because that is what `server deploy` builds (`images::agent_image`,
+# `agent-image:<version>`) — read from `VERSION` rather than from the artifact, which need not exist yet, and not from
+# `Cargo.toml`, whose version is the `0.0.0` placeholder that file carries so that a bump never moves `Cargo.lock`.
+version="$(head -n 1 VERSION 2>/dev/null | tr -d '[:space:]')"
 [ -n "$version" ] ||
-  refuse "Cargo.toml names no workspace version, so there is no agent-image tag to default to: set HOLOSMITH_VERIFY_IMAGE to the image the gate should run in"
+  refuse "VERSION names no version, so there is no agent-image tag to default to: set HOLOSMITH_VERIFY_IMAGE to the image the gate should run in"
 image="${HOLOSMITH_VERIFY_IMAGE:-agent-image:$version}"
 docker image inspect "$image" >/dev/null 2>&1 ||
   refuse "the image $image is not on this daemon: run 'holosmith server deploy' to build it, or set HOLOSMITH_VERIFY_IMAGE to the one the gate should run in"
