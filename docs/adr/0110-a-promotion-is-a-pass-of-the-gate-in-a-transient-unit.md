@@ -276,6 +276,13 @@ under a live name, so two presses are one promotion and the second answers a ref
 `--collect` is what makes the name usable again once the unit has exited — including a failed one — so the name is
 transient and not a reservation.
 
+**The launcher's environment is the unit's, and it needs no `--setenv`.** `systemd-run --user` has to reach the
+operator's user manager from inside `holosmith.service`, and a unit carrying neither `XDG_RUNTIME_DIR` nor
+`DBUS_SESSION_BUS_ADDRESS` cannot — `Failed to connect to bus: No medium found`, exit 1. The unit measured below
+carried both, and either one reaches the manager on its own, which is why `deploy::unit_text` gains no `Environment=`
+line. Which of the two a **linger-only**, headless machine's units carry is the one shape that measurement does not
+reach, and **What is not measured here** says so.
+
 **What the later change owns.** The route's own answer (an accepted start, the unit's name, the log's path), the
 file the output goes to, and the exact `systemd-run` argv. This ADR decides the mechanism and the naming rule, because
 they are what the cgroup fact forces.
@@ -399,16 +406,186 @@ so the repair is read once the gate has started rather than instead of it.
 - **Where the update log lives and how long it is kept.** A file under the data root is the shape; a rotation is the
   backups' question (ADR-0082 D9) and not this one's.
 
+## Measured on a real machine: the launcher, the log and the restart
+
+The three facts below are the whole mechanism and not a detail of it, and no case in this tree can give them a real
+systemd: the gate runs in a container, which has no manager at all, and no case could own the operator's own user
+manager even on a machine that runs one — so every case puts a script that records its argv where `systemctl` and
+`systemd-run` would be. They were measured **by hand**, on a machine whose systemd is real: Ubuntu 24.04 on
+`adamolsson-WRT-WX9`, **systemd 255 (255.4-1ubuntu8.18)**, with one live user unit `holosmith.service` (MainPID 2686, a
+release that predates the update route — `/api/update` answers `404 no such endpoint` there). Nothing about that service
+was touched: no deploy, no restart, no release moved.
+
+The probe was a **transient** unit of its own, `holosmith-probe.service`, carrying the deployed `[Service]` section's
+stop properties and its sandbox — `Type=simple`, `UMask=0077`, `NoNewPrivileges=yes`, `LockPersonality=yes`,
+`RestrictSUIDSGID=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes`, `SystemCallFilter=@system-service`,
+`KillMode=mixed` and `TimeoutStopSec=30s` — with the four lines that aim the section at a release absent and replaced
+by the probe's own (`ExecStart=`, `ExecStartPre=`, `Restart=`, `RestartSec=`), started with the environment read out of
+`/proc/2686/environ`; its `ExecStart` ran the launcher's own argv (`update::argv`'s, word for word):
+
+```text
+systemd-run --user --unit=holosmith-update --collect \
+  --property=StandardOutput=append:<data>/update.log \
+  --property=StandardError=append:<data>/update.log \
+  --property=WorkingDirectory=<source tree> \
+  -- <program> <argument>...
+```
+
+The job behind it did what a promotion does in miniature: it wrote both streams, asked the manager about itself, ran
+`systemctl --user restart holosmith-probe.service` — the restart a promotion performs, aimed at the unit that started
+it — then slept ten seconds and recorded that it was still alive.
+
+**Fact 1 — `systemd-run --user` from inside the unit reaches the operator's user manager.** From inside a unit of the
+deployed service's own shape, in a cgroup of `…/app.slice/holosmith-probe.service` and with the environment read out of
+`/proc/2686/environ` — `XDG_RUNTIME_DIR=/run/user/1000`, `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus` —
+the launcher answered:
+
+```text
+Running as unit: holosmith-update.service; invocation ID: 90f12ada299b4db091f188698a8177d9
+systemd-run exit=0
+is-active exit=0 said=active
+```
+
+The job landed in a cgroup of its own — `…/app.slice/holosmith-update.service`, not the service's — and the
+`systemctl --user restart` it ran, from inside the transient unit and aimed at the unit that started it, answered
+`restart exit=0` at `2026-11-25T14:32:24+01:00`: `promote`'s step 6 reaching the manager from the one place D4 puts it.
+Which of the two variables a unit needs was measured in three further transient units, one per remaining cell of the
+matrix:
+
+```text
+=== arm 1: XDG_RUNTIME_DIR set, DBUS_SESSION_BUS_ADDRESS unset ===
+Running as unit: holosmith-update.service; invocation ID: 3a163eb10abd4ce48b7bccae82680ba3
+arm1 exit=0
+=== arm 2: neither variable ===
+Failed to connect to bus: No medium found
+arm2 exit=1
+=== arm 3: XDG_RUNTIME_DIR empty, DBUS_SESSION_BUS_ADDRESS set ===
+arm3 env: XDG_RUNTIME_DIR=[unset] DBUS_SESSION_BUS_ADDRESS=[unix:path=/run/user/1000/bus]
+Running as unit: holosmith-update.service; invocation ID: eed0b9ca9fc446c09ca182d8dc83be0d
+arm3 exit=0
+```
+
+So either variable reaches the manager on its own: arm 1 with `XDG_RUNTIME_DIR` set and no session bus, arm 3 with the
+session bus set and no runtime directory, and one cell is the failure — arm 2, with neither, which answered
+`Failed to connect to bus: No medium found` and exit **1**, the sentence the launcher's `Err` wraps. What this cannot
+say is which of the two a **linger-only** machine's units carry: the probe's outer environment also carried
+`DISPLAY=:1`, so both variables on this host were imported from the operator's graphical session, and a headless
+machine with `loginctl enable-linger` and no login session is the shape no cell here is.
+
+**Fact 2 — the `append:` file holds both streams, is appended to, and is readable after the restart.** Four runs wrote
+one file and truncated nothing in it:
+
+```text
+$ stat -c '%A %U:%G %s %n' <data>/update.log
+-rw-rw-r-- adamolsson:adamolsson 1371 <data>/update.log
+$ head -2 <data>/update.log
+job-stdout  start   pid=2381768 ... at 2026-11-25T14:32:20+01:00
+job-stderr  start   pid=2381768 at 2026-11-25T14:32:20+01:00
+$ tail -4 <data>/update.log
+second-run stdout 2026-11-25T14:33:15+01:00
+second-run stderr 2026-11-25T14:33:15+01:00
+failing run 2026-11-25T14:33:18+01:00
+after-failure run 2026-11-25T14:33:21+01:00
+```
+
+Mode `0664` is what a unit that sets no `UMask=` of its own gets, and a second transient unit measured that the
+**unit's** `UMask=` is the knob rather than the manager's: started with `--property=UMask=0077` and a **fresh**
+`append:` target, it produced a `0600` file, and a file the unit wrote itself was `0600` too:
+
+```text
+$ stat -c '%A %a %n' umask-log.log unit-made.txt
+-rw------- 600 umask-log.log
+-rw------- 600 unit-made.txt
+```
+
+So `0666 & ~0077 = 0600`: the unit's `UMask=`, and not the manager's, decides the mode of the file the manager opens
+for `append:`. The promotion's job unit is started with no `UMask=` property at all — `update::argv` sets the unit's
+name, `--collect`, the two output streams and `WorkingDirectory=` and nothing else — so it inherits this user manager's
+default, `0002`, and `0666 & ~0002 = 0664` is where the `-rw-rw-r--` above came from. The lever on a machine that
+wanted a `0600` log would be `--property=UMask=` in the launcher's argv, and this ADR does not make that change.
+
+Either mode is readable by the account whose unit this is (ADR-0088 D2: a user unit runs as its owner), which is the
+whole of what the API's "read the job's answer" needs. That half is the citation and not a measurement — the run never
+read the file *as* `serve`.
+
+**And `append:` is not every systemd's spelling.** The host's own `systemd` `NEWS` says, under `CHANGES WITH 240`:
+
+> `StandardOutput=`/`StandardError=` in service files gained support for new `append:…` parameters, for connecting
+> STDOUT/STDERR of a service to a file, and appending to it.
+
+So the floor is **240**, which is what `docs/requirements.md` states in its dependency table, scoped there to the
+promotion: a 239 installs, boots and serves sessions like any other, and only a promotion's job asks for the two
+`append:` properties. That half is quoted from `NEWS` rather than measured, because what a 239 answers for `append:` is
+something only a 239 can show — and this machine is not one.
+
+**Nothing in the tree reports a systemd version**, so the floor is met at the first press rather than before it.
+`doctor` reports no program for `systemd` — what it reads is the unit **directory**, not a manager's, which `update.rs`'s
+header states — so a 239 passes `doctor`, installs and serves sessions, and meets the floor when `systemd-run` refuses
+the two `append:` properties. What that press gets is `update::start`'s sentence for a start that did not take, naming
+`systemd-run`'s own status and first stderr line and ending "this one did not start": it says what happened rather than
+that the machine is older than the floor. A check that read a version and refused below 240 is the later change's; this
+ADR does not add one.
+
+**Fact 3 — the job outlives the restart it performs, and the name is reusable afterwards.** The restart killed the
+service instance that started the job and left the job alone: pid 2381763 was gone, pid 2381768 was alive and wrote
+`job-stdout survived the restart pid=2381768 at 2026-11-25T14:32:34+01:00` — and the same on stderr — ten seconds
+after the restart, then answered its own `is-active` with `self=active exit=0`, from a cgroup still at
+`…/app.slice/holosmith-update.service`. That is the fact `KillMode=mixed` with `TimeoutStopSec=30s` cannot reach: the
+job is not in the cgroup that stops.
+
+A second press while the first was live was refused **by the manager**:
+
+```text
+Failed to start transient service unit: Unit holosmith-update.service was already loaded or has a fragment file.
+press#1 systemd-run exit=1
+press#1 is-active exit=0 said=active
+```
+
+which is exactly the pair `update::start` reads — a non-zero start, then `is-active` saying the unit is live, which is
+`Answer::AlreadyRunning` and the route's `409 update_running`. It is the manager's refusal and not a stale lock: the
+prose on stderr is not what the answer is built on, the second child's exit status is.
+
+After the job ended, `--collect` reused the name — `Running as unit: holosmith-update.service; invocation ID:
+d58cf87fca3d48e6aa29eeeda1010c18`, `systemd-run exit=0` — and the same after a job that **failed**: one whose program
+ran `/bin/sh -c '…; exit 7'` started with `exit=0` and id `561ee8bb4e524d5d94b7482b18b2f14d`, and a third start with
+the same name and id `8623844f42354bf199dd96218b3df876` after that failing one ended. Both of the manager's readings
+said ended: `systemctl --user show -p ActiveState -p Result --value` answered `inactive` and `success` — what an
+unloaded unit reports, which is why the launcher's question is `is-active` and never `show` — and
+`systemctl --user is-active holosmith-update` answered `stdout=[inactive] exit=4 stderr=[]`, the `Some(3 | 4)` with
+nothing on stderr that `update::start` reads as "the unit is not there, so nothing is running".
+
+**The mechanism stays as it is, and the environment is why.** Two changes this measurement might have forced, and
+neither is taken: no `Environment=` line in `deploy::unit_text`, and no `--setenv` in the launcher's argv. The
+deployed-shaped unit's own environment, read out of `/proc/2686/environ`, carries `XDG_RUNTIME_DIR=/run/user/1000` and
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`; either variable alone reached the manager (arms 1 and 3,
+`exit=0`); and only a unit with neither answered `Failed to connect to bus: No medium found` at exit 1 (arm 2). A
+`--setenv` would hand the manager back a path the manager itself set, in service of a machine that already works, and
+what a machine without either variable gets is what the launcher's `Err` carries: `update.rs`'s
+`an_is_active_that_cannot_reach_the_manager_does_not_say_the_unit_is_missing` stands both children in with exactly that
+answer and asserts the sentence says this machine cannot say whether a promotion is already in flight, rather than that
+the unit did not start.
+
 ## What is not measured here
 
-- **A real `systemd-run`, a real unit, and a real restart.** There is no systemd on this machine, so ADR-0082's limit
-  applies unchanged: `systemctl` is a child the gate stands in for, and a unit booting a real release is not measured.
-  What *is* measured is the argv: `tests/update_api.rs` points `deploy::Tools::systemd_run` at a recorder and asserts
-  the whole command line D4 decided — `--user`, `--unit=holosmith-update`, `--collect`, both `append:` streams under
-  the data root, `WorkingDirectory=` naming the candidate tree, and the job's own words after `--` — and
-  `case_web_update` stands in for the launcher with a script that does what the unit would: it reads those two
-  properties and starts the job in a session of its own, which is how "a promotion outlives the restart it performs"
-  becomes something a run can watch rather than something this ADR asserts.
+- **A real `systemd-run`, a real unit and a real restart, inside a promotion.** The mechanism itself is measured, by
+  hand, on a machine whose systemd is real: the three facts, the probe's shape, the exit statuses and the log lines are
+  the section above. What that measurement does not reach — a promotion pressed from a browser on that machine, and a
+  real pass of the gate inside the unit — is what the bullets **A promotion started from a browser, end to end** and
+  **A pass of the gate end to end** are about, below. What *is* measured here is the argv: `tests/update_api.rs`
+  points `deploy::Tools::systemd_run` at a recorder and asserts the whole command line D4 decided — `--user`,
+  `--unit=holosmith-update`, `--collect`, both `append:` streams under the data root, `WorkingDirectory=` naming the
+  candidate tree, and the job's own words after `--` — and `case_web_update` stands in for the launcher with a script
+  that does what the unit would: it reads those two properties and starts the job in a session of its own, which is how
+  "a promotion outlives the restart it performs" becomes something a run can watch rather than something this ADR
+  asserts.
+- **A linger-only, headless machine's unit environment.** The measurement's environment was read out of
+  `/proc/2686/environ` on a desktop host, where both `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` are in the
+  manager's block because the operator's graphical session put them there — `DISPLAY=:1` in the probe's outer
+  environment is that session's fingerprint. A machine with `loginctl enable-linger` and no login session is the shape
+  D4's "no `Environment=` line" was not measured on: either variable is enough to reach the manager (Fact 1's four
+  cells), and which of the two such a machine's units carry is what this run cannot say. A unit with neither gets
+  `update::start`'s sentence for a manager it could not reach, which `update.rs`'s
+  `an_is_active_that_cannot_reach_the_manager_does_not_say_the_unit_is_missing` asserts.
 - **A promotion started from a browser, end to end.** The page is the app's, and no browser is in the gate; what the
   routes answer is measured. `tests/update_api.rs` drives the two routes that file is about over a socket — `POST
   /api/update` and the `GET /api/update` it starts a job for — covering the refusals the module asks in order (`403

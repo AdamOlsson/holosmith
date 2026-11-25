@@ -8,7 +8,7 @@ install` on a `role = "hub"` config asks neither Docker nor git question.
 
 | Dependency | Why |
 | --- | --- |
-| Linux with systemd | `holosmith install` enables `holosmith.service` in your user manager, and linger is what starts it at boot |
+| Linux with systemd (a promotion's job needs **240 or newer**) | `holosmith install` enables `holosmith.service` in your user manager, and linger is what starts it at boot; a promotion's job asks for `StandardOutput=append:` and `StandardError=append:`, which is systemd 240's spelling — a 239 does everything else, sessions included |
 | Docker Engine | every session is a container on its own `--internal` network, with three proxies beside it: `hs_egress`, `hs_key` and `hs_mcp` |
 | git 2.38 or newer | a session is a worktree plus an `agent/<id>` branch; merges use `git merge-tree --write-tree` |
 | a provider key | `opencode-go` (the default), `anthropic`, `openai` and nine more — a name it does not know is refused with the full list |
