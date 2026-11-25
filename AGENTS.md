@@ -129,16 +129,18 @@ built under the checkout is `$repo_root` plus 38 to 56 bytes — `target/verify-
 depending on the case's name and the pid's digits — so a case binding there would need `$repo_root` itself
 under 51 bytes (107 − 56), and the 83-byte worktree that made one fail built names of 122 to 139. No case
 binds a host-to-host socket there any more: every `fake_docker_ping` stand-in is in `$WORK`, a `mktemp -d` of
-about 20 bytes, as are the boots' `--admin-dir`s except `case_upgrade`'s, so no segment of those names is the
-checkout's. The exceptions are the sockets whose directory is also a container mount source, since a mount
-source has to be a path the daemon can see: `case_smoke`'s smoke root, and `case_upgrade`'s data root because
-`promote` puts the smoke root at `<data root>/smoke`. Those two roots stay under the checkout; `case_upgrade`
-audits its name with `scripts/verify.sh`'s `unix_socket_fits` — a checkout too deep for it is a `SKIP` naming
-the depth rather than a `FAIL` naming a missing socket — and `case_smoke`'s drain socket is the one binder a
-long path costs nothing, because `serve` warns rather than refusing and the case measures the turn, not the
-drain. Every socket a case binds for itself except that one is audited by the same helper, so a `TMPDIR` deep
-enough to overrun the cap is a `SKIP` naming the byte count and the cap: the bind raises in a python child whose
-stderr the gate discards, and a missing socket is also what a too-long path looks like.
+about 20 bytes, as are the boots' `--admin-dir`s except `case_upgrade`'s and `case_web_update`'s, so no segment
+of those names is the checkout's. The exceptions are the sockets whose directory is also a container mount source,
+since a mount source has to be a path the daemon can see: `case_smoke`'s smoke root, and `case_upgrade`'s and
+`case_web_update`'s data roots because `promote` puts the smoke root at `<data root>/smoke`. Those roots stay
+under the checkout; `case_upgrade` and `case_web_update` audit their names with `scripts/verify.sh`'s
+`unix_socket_fits` — a checkout too deep for one is a `SKIP` naming the depth rather than a `FAIL` naming a
+missing socket, which is why `case_web_update`'s root is `verify-web-` and the pid, eleven bytes before the
+digits — and `case_smoke`'s drain socket is the one binder a long path costs nothing, because `serve` warns
+rather than refusing and the case measures the turn, not the drain. Every socket a case binds for itself except
+that one is audited by the same helper, so a `TMPDIR` deep enough to overrun the cap is a `SKIP` naming the byte
+count and the cap: the bind raises in a python child whose stderr the gate discards, and a missing socket is
+also what a too-long path looks like.
 
 And never `pgrep -f` a pattern that also appears in the command line you are running: the match is your
 own shell, and `verify.sh` boots processes named for the binary anyway, so the name proves nothing
@@ -234,9 +236,10 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
 
 - **python3**: the gate cases that read a database or speak a socket by hand (`case_worktree`,
   `case_compaction`, `case_exit_classification`, `case_usage_survives_resume`, the history case,
-  `case_schema_newer`, `case_doctor_quick`) and `scripts/schema-snapshot.sh`, which needs stdlib `sqlite3`
-  because the CLI is not assumed to exist. `cargo test` covers the behaviour either way: **treat a `SKIP` line as
-  "not measured here", never as a defect in your change.**
+  `case_schema_newer`, `case_doctor_quick`) and `case_web_update`, which needs `free_port` because a promotion
+  polls the port its config names rather than the one a `--port 0` boot reports, plus `scripts/schema-snapshot.sh`,
+  which needs stdlib `sqlite3` because the CLI is not assumed to exist. `cargo test` covers the behaviour either
+  way: **treat a `SKIP` line as "not measured here", never as a defect in your change.**
 - **`$HOLOSMITH_TEST_IMAGE`** (default `pi-agent:local`): a Docker image with `sh`, `git` **and `node`** (the
   network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
   and the two mount/reconcile cases. The two install cases run the artifact in it too, as the machine the command hands

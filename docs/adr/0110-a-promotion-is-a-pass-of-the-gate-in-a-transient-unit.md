@@ -401,27 +401,51 @@ so the repair is read once the gate has started rather than instead of it.
 
 ## What is not measured here
 
-- **`systemd-run`, a transient unit, and a real restart.** There is no `systemd-run` in this tree and no systemd on
-  this machine: ADR-0082's own limit applies unchanged — `systemctl` is a child the gate stands in for, and a real unit
-  booting a real release is not measured here. So D4's mechanism is decided from the unit's directives and not from a
-  run.
-- **A promotion started from a browser, end to end.** The three routes are in the tree and no promotion has been started
-  through them: the answer shapes and the refusals have tests behind them, and `systemd-run` is not on this machine to
-  run a real start at all. What has been run is the gate in a container (ADR-0109, whose acceptance is a full green
-  in-container run) and the pipeline behind `holosmith upgrade` (ADR-0082's cases), which are the two halves this ADR
-  joins.
+- **A real `systemd-run`, a real unit, and a real restart.** There is no systemd on this machine, so ADR-0082's limit
+  applies unchanged: `systemctl` is a child the gate stands in for, and a unit booting a real release is not measured.
+  What *is* measured is the argv: `tests/update_api.rs` points `deploy::Tools::systemd_run` at a recorder and asserts
+  the whole command line D4 decided — `--user`, `--unit=holosmith-update`, `--collect`, both `append:` streams under
+  the data root, `WorkingDirectory=` naming the candidate tree, and the job's own words after `--` — and
+  `case_web_update` stands in for the launcher with a script that does what the unit would: it reads those two
+  properties and starts the job in a session of its own, which is how "a promotion outlives the restart it performs"
+  becomes something a run can watch rather than something this ADR asserts.
+- **A promotion started from a browser, end to end.** The page is the app's, and no browser is in the gate; what the
+  routes answer is measured. `tests/update_api.rs` drives the two routes that file is about over a socket — `POST
+  /api/update` and the `GET /api/update` it starts a job for — covering the refusals the module asks in order (`403
+  update_disabled`, the four shapes of the `404` it drives, `422 stale_candidate`, `409 update_running`), the `202` that
+  starts a job, both guards, and the report a `GET` answers before and after the process that started the job is gone —
+  and `case_web_update` presses the artifact itself: `POST /api/update`, the job the route starts, the restart it
+  performs, `GET /api/update` answering on the other side of it, and the release **directory** the process answering
+  `/api/health` runs from — `releases/old/holosmith` after the rollback and `releases/<tag>/holosmith` after the
+  promotion, read from `/proc/<pid>/exe`. The third route, `GET /api/update/candidate`, is measured a layer down:
+  `tests/update.rs` builds the router over the same fixture checkout and reads its `403`, its `404` and its `200` over a
+  socket, which is the only place the page's `Candidate` is checked against what the machine sends. What neither does
+  is run the gate that press rests on, which is the bullet below, and what no case can is show two *different*
+  versions on one machine: a gate has one artifact, so both releases a run holds are that one build, and
+  `/api/health`'s `version` is a compile-time constant in it — one a release build's thin LTO splits into immediates,
+  so not even a byte substitution can move it. A promotion across a version boundary is an operator's act —
+  the next tree is built and its artifact promoted — and not something a gate case can manufacture without a second
+  build, which is the second build path `AGENTS.md` refuses.
 - **The Docker behaviour behind "a running container holds its layers."** `case_server_images` untagging the image the
   gate itself runs in has not happened in a promotion yet; it happens in every in-container gate whose candidate shares
   the running release's version, and a run that finishes is what would measure it.
-- **The source tree's config key.** `[update] source` names the checkout now, with a validator and a row in
+- **The source tree's config key.** `[update] source` names the checkout, with a validator and a row in
   `docs/config.md`, and `candidate::resolve` is its one reader — reached from three places, which is the point of the
   candidate route: the job's own first step (`pass::pass`), `GET /api/update/candidate` rendering it for the page, and
-  `POST /api/update` re-resolving it to compare a press's token against `master`'s now. What is still unmeasured is
-  that transition end to end: no test drives the comparison over a socket yet, and none presses the button.
+  `POST /api/update` re-resolving it to compare a press's token against `master`'s now. That transition is measured
+  now, over a socket: `tests/update_api.rs` presses `master`'s commit and gets `202`, and presses another one and gets
+  `422 stale_candidate` naming both — with the four shapes of the `404` a press can reach beside it, each of them the
+  one `no_candidate` code the envelope carries: a path that is not there and a directory that is no repository
+  (`NotARepository` twice), a `master` with no commit (`NoMaster`), and a tree holding work its commit does not
+  (`Dirty`). The two shapes that file does not drive are measured elsewhere: `NoCandidate`, an unset `[update] source`,
+  by `tests/update.rs`'s candidate route, and `NotOnMaster` by `tests/candidate.rs` and the resolver's unit tests,
+  neither of them over a socket.
 - **A pass of the gate end to end.** `holosmith update` is measured by a fixture tree whose `scripts/verify-in-container.sh`
   records its argv and answers the exit code the test chooses, so the four steps, the exit-code translation and the
   report are facts about the command — and the run that is the point of D2, a green gate on a real machine promoting the
-  artifact its own build phase wrote, has not happened yet. The gate itself is measured separately (ADR-0109).
+  artifact its own build phase wrote, has not happened yet. `case_web_update` is the same shape one layer up: its
+  fixture gate exits `0` and the artifact it leaves is seeded by the case, so the promotion and its failure are real
+  and the three quarters of an hour are not. The gate itself is measured separately (ADR-0109).
 
 ## Consequences
 
