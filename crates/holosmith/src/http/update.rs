@@ -30,8 +30,9 @@
 //! 2. **the role** — a `hub` answers `403 update_disabled` with the role's own sentence. The route is **not** hidden
 //!    behind the role the way the forward route is: a page asking a hub "may I promote?" has to be answered, and
 //!    "there is no such endpoint" would leave it drawing a button against a `404`;
-//! 3. **the switch** — `[update] enabled` is `false` by default, and a machine that has not turned it on answers
-//!    `403 update_disabled` (ADR-0110 D1's consequence: an upgrade must not hand a phone a restart button);
+//! 3. **the switch** — `[update] enabled` is `true` by default (ADR-0112), and a machine whose file writes `false`
+//!    answers `403 update_disabled`: a kill switch for the operator who wants a machine nobody may restart from a
+//!    browser, rather than the opt-in it used to be;
 //! 4. **the release tree** — a machine that never deployed has nothing to switch and no release the unit runs:
 //!    `409 not_deployed`;
 //! 5. **the candidate** — [`crate::candidate::resolve`]'s five `git` reads, off the request's task: no candidate at
@@ -267,8 +268,8 @@ pub(crate) async fn start(state: &AppState, body: Result<Bytes, BytesRejection>)
         Err(error) => return error.into_response(),
     };
     // The role and then the machine's switch, before anything about a tree is asked: a machine that starts no
-    // promotion for itself makes every question after these unnecessary, and a machine that has not opted in cannot
-    // hand a phone a restart button by accident (ADR-0110 D1).
+    // promotion for itself makes every question after these unnecessary, and a machine whose file wrote the kill switch
+    // refuses here (ADR-0112).
     if let Some(refusal) = promotable(&state.config) {
         return refusal.into_response();
     }
@@ -804,16 +805,25 @@ mod tests {
     }
 
     /// The candidate route asks the same first two questions as the `POST`, in the same order: the role, then the
-    /// switch. A hub is a hub whatever its config says, and a machine that has not opted in is refused as one — the two
-    /// are different sentences with one code, which is why the order is measured by which sentence comes back.
+    /// switch. A hub is a hub whatever its config says, and a machine whose file turned the switch off is refused as
+    /// one — the two are different sentences with one code, which is why the order is measured by which sentence comes
+    /// back.
     #[test]
     fn the_role_is_asked_before_the_switch() {
         use crate::http::error::UPDATE_DISABLED;
-        let off = Config::default();
-        assert!(!off.update.enabled, "the switch is on by default");
+        assert!(
+            Config::default().update.enabled,
+            "the switch is off by default, so a machine would have to opt in"
+        );
+        let off = Config {
+            update: crate::config::Update {
+                enabled: false,
+                source: None,
+            },
+            ..Config::default()
+        };
 
-        let refused =
-            promotable(&off).expect("a machine that has not opted in refuses a promotion");
+        let refused = promotable(&off).expect("a machine whose switch is off refuses a promotion");
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         assert_eq!(refused.body.code, UPDATE_DISABLED);
         assert_eq!(
@@ -829,7 +839,7 @@ mod tests {
         assert_eq!(
             refused.body.message,
             ApiError::hub_cannot_promote().body.message,
-            "a hub with `[update] enabled = false` was refused as a config rather than as a hub"
+            "a hub whose file writes `[update] enabled = false` was refused as a config rather than as a hub"
         );
 
         let server = Config {

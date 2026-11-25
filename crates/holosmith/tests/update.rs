@@ -852,13 +852,19 @@ fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
 /// the reason two states in one process never share a path.
 #[tokio::test]
 async fn the_candidate_route_is_read_only_and_answers_the_pages_three_fields() {
-    // A machine that has not opted in. `[update] enabled` is `false` by default, which is the state an upgrade leaves
-    // a machine in — the one where the route must exist and refuse rather than be absent.
+    // A machine whose file turned the kill switch off: `[update] enabled = false` (ADR-0112) is the one state where the
+    // route must exist and refuse rather than answer a candidate.
     let off = TempDir::new("update-candidate-off");
-    let machine = state_in(&off, candidate_config(&off, None));
+    let mut config = candidate_config(&off, None);
+    assert!(
+        config.update.enabled,
+        "the fixture no longer starts from the default, so the kill switch's arm measures nothing"
+    );
+    config.update.enabled = false;
+    let machine = state_in(&off, config);
     assert!(
         !machine.config.update.enabled,
-        "the fixture opted in, so it no longer measures a machine that has not"
+        "the fixture switched the route back on, so it no longer measures a machine that turned it off"
     );
 
     let app = App::new(
@@ -879,11 +885,10 @@ async fn the_candidate_route_is_read_only_and_answers_the_pages_three_fields() {
     assert_eq!(code_of(&refused.body), "update_disabled");
     served.finish().await.expect("the server stops");
 
-    // A server that opted in with no `[update] source`: the press's own `404`, so the page has a sentence and no
-    // button.
+    // A machine left on the default switch with no `[update] source`: the press's own `404`, so the page has a
+    // sentence and no button. This arm is what measures the default — nothing here names `[update] enabled`.
     let on = TempDir::new("update-candidate-no-source");
-    let mut config = candidate_config(&on, None);
-    config.update.enabled = true;
+    let config = candidate_config(&on, None);
     let served = Served::start(http::router(state_in(&on, config)), GRACE).await;
     let refused = fetch(served.addr, "/api/update/candidate").await;
     assert_eq!(refused.status, 404, "{}", refused.body);
@@ -897,8 +902,7 @@ async fn the_candidate_route_is_read_only_and_answers_the_pages_three_fields() {
     repository_on(&source, "master");
     let commit = head(&source);
     let tag = git(&source, &["describe", "--tags", "--always"]);
-    let mut config = candidate_config(&ready, Some(source.clone()));
-    config.update.enabled = true;
+    let config = candidate_config(&ready, Some(source.clone()));
     let served = Served::start(http::router(state_in(&ready, config)), GRACE).await;
     let answer = fetch(served.addr, "/api/update/candidate").await;
     assert_eq!(answer.status, 200, "{}", answer.body);
@@ -916,15 +920,16 @@ async fn the_candidate_route_is_read_only_and_answers_the_pages_three_fields() {
 }
 
 /// A machine's config for the candidate route: its own data root and projects root, and `[update] source` when the test
-/// names one. The switch is left off, which is the default.
+/// names one. The switch keeps its default, which is on (ADR-0112) — an arm that measures the kill switch turns it off
+/// itself.
 fn candidate_config(dir: &TempDir, source: Option<PathBuf>) -> Config {
     Config {
         data_root: dir.file("data"),
         projects_root: dir.file("projects"),
         control_listen: "127.0.0.1:1".parse().expect("a valid address"),
         update: Update {
-            enabled: false,
             source,
+            ..Update::default()
         },
         ..Config::default()
     }

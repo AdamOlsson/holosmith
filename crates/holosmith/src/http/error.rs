@@ -799,15 +799,16 @@ impl ApiError {
     /// What a promotion request answers on a machine whose `[update] enabled` is `false`.
     ///
     /// A `403` for [`Self::publish_disabled`]'s reason: the route exists, the *machine* will not do it, and no retry on
-    /// this machine changes that — the operator's move is a config edit and a restart. `false` is the default so that
-    /// an upgrade cannot hand a phone a restart button by accident, which is what the sentence has to say.
+    /// this machine changes that — the operator's move is a config edit and a restart. The key is a **kill switch**
+    /// (ADR-0112): `true` is the default, so a machine that answers this is one whose own file turned the route off,
+    /// which is why the sentence offers removing the line beside setting it.
     pub fn update_disabled() -> Self {
         Self::new(
             StatusCode::FORBIDDEN,
             UPDATE_DISABLED,
             "this machine's `[update] enabled` config key is false, so no promotion may be started from a request \
-             here; set it to `true` in the config file, with `[update] source` naming the checkout a promotion would \
-             build, and restart the server",
+             here; remove that line or set it to `true` in the config file, with `[update] source` naming the checkout \
+             a promotion would build, and restart the server",
         )
     }
 

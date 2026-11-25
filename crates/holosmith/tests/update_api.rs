@@ -450,16 +450,16 @@ impl images::Images for Nothing {
 
 // ---- the refusals, in the order the route asks them ---------------------------------------------
 
-/// A machine whose `[update] enabled` is `false` — the default an upgrade leaves behind — answers `403
-/// update_disabled` with the config key's sentence, before it reads the release tree or the tree a press names.
+/// A machine whose `[update] enabled` is `false` — the kill switch (ADR-0112), which the file has to write — answers
+/// `403 update_disabled` with the config key's sentence, before it reads the release tree or the tree a press names.
 #[tokio::test]
-async fn a_machine_that_has_not_opted_in_refuses_the_press_as_update_disabled() {
+async fn a_machine_whose_kill_switch_is_false_refuses_the_press_as_update_disabled() {
     let world = world("update-api-disabled");
     let mut config = world.config.clone();
     config.update.enabled = false;
     assert!(
-        !Config::default().update.enabled,
-        "the fixture opted in by itself, so this arm no longer measures the default it is about"
+        Config::default().update.enabled,
+        "the switch is off by default, so this arm would be measuring the default rather than the operator's choice"
     );
 
     let served = world
