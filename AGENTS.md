@@ -41,6 +41,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `docs/*.md` | Operator guides: requirements, egress, remote access, hub, keys, troubleshooting, architecture |
 | `docs/config.md` | Every config key: type, default, rule, and what reads it |
 | `docs/keys.md` | The tool-key runbook: rotating a stored key, why no restart is needed, and the five `doctor --full` lines |
+| `docs/gate.md` | What a full verification measures, phase by phase and case by case, and what each piece costs |
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |
