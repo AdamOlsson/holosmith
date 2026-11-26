@@ -66,6 +66,11 @@ ERROR: failed to build: failed to solve: failed to compute cache key: failed to 
 
 /// The shape a build takes when musl.cc does not answer: the layer, curl's own diagnostic for a connection that never
 /// opened and its retry warning, the instruction with the whole `RUN` around it, and the exit status.
+///
+/// **Recorded before the recipes grew their certificate fallback, and left exactly as it was recorded.** The
+/// instruction it echoes is `RUN curl -fsSL …` where a build of the current recipes prints `RUN if curl …`. That is
+/// drift in the recording, not in the rule: `images::fetch_did_not_answer` reads the host's name and the build's last
+/// exit status, and never the instruction's text, so what this measures is the shape a *pinned fetch* takes.
 const MUSL_FETCH_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
 #8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
 #8 0.512 Warning: Transient problem: connection refused Will retry in 2 seconds. 4 retries left.
@@ -82,7 +87,8 @@ ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL -o /tmp
 
 /// The tarball arrived and was not the pinned one: the failure the pin exists for, and the one a fetch classification
 /// may never excuse. It carries a retried attempt's connection error as well, which is what makes the digest the thing
-/// this arm is about.
+/// this arm is about. Its instruction is the pre-fallback `RUN curl -fsSL …` shape, for the reason
+/// [`MUSL_FETCH_FAILURE`] gives; the digest is what this arm reads, not an instruction.
 const DIGEST_MISMATCH: &str = "#8 0.512 curl: (7) Failed to connect to musl.cc port 443 after 0 ms: Couldn't connect to server
 ------
  > [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz:
@@ -96,7 +102,8 @@ Dockerfile:76
 ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz\" did not complete successfully: exit code: 1";
 
 /// The name that did not resolve: the log ADR-0111 D1 quotes from a real `docker build` under `--network none`, five
-/// attempts two seconds apart and the child's own status 6.
+/// attempts two seconds apart and the child's own status 6. Its instruction is the pre-fallback `RUN curl -fsSL …`
+/// shape, for the reason [`MUSL_FETCH_FAILURE`] gives: the status is what this arm reads.
 const MUSL_NAME_UNRESOLVED: &str = "#8 [4/9] RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
 #8 0.166 curl: (6) Could not resolve host: musl.cc
 #8 2.170 curl: (6) Could not resolve host: musl.cc
@@ -509,6 +516,23 @@ fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
     );
 }
 
+/// The instructions that fetch one of the two musl tarballs, in file order: one per toolchain, in each recipe.
+///
+/// The filter is the pinned URL and not `RUN curl `: a fetch begins `RUN if curl …` (the certificate fallback,
+/// ADR-0116), and a filter on the older spelling would measure no downloads at all and pass over an empty list.
+fn toolchain_fetches(name: &str, recipe: &str) -> Vec<String> {
+    let fetches: Vec<String> = instructions(recipe)
+        .into_iter()
+        .filter(|block| block.contains("https://musl.cc/"))
+        .collect();
+    assert_eq!(
+        fetches.len(),
+        2,
+        "{name} does not fetch exactly two tarballs: {fetches:?}"
+    );
+    fetches
+}
+
 #[test]
 fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
     // The two musl cross toolchains are fetched from musl.cc while each image builds, so an image build is only as
@@ -521,18 +545,7 @@ fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
         ("agent.Dockerfile", images::AGENT_DOCKERFILE),
         ("builder.Dockerfile", holosmith::builder::DOCKERFILE),
     ] {
-        let blocks = instructions(recipe);
-        let downloads: Vec<&str> = blocks
-            .iter()
-            .map(String::as_str)
-            .filter(|block| block.starts_with("RUN curl "))
-            .collect();
-        assert_eq!(
-            downloads.len(),
-            2,
-            "{name} does not fetch exactly two tarballs: {downloads:?}"
-        );
-        for download in downloads {
+        for download in toolchain_fetches(name, recipe) {
             for word in [
                 "--retry 4",
                 "--retry-delay 2",
@@ -545,6 +558,68 @@ fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
                     "{name}'s download does not carry `{word}`: {download}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn both_recipes_read_an_unverifiable_certificate_as_a_warning_over_the_pin() {
+    // musl.cc's certificate expired and stayed unrenewed, which failed every from-scratch build of both images with
+    // curl's 60 — over tarballs the same `RUN` pins by SHA-256 (ADR-0116). The fallback is only ever reached when the
+    // certificate is what failed, it only ever adds `--insecure` to the same URL, and the digest check still follows it:
+    // the pin is what says the bytes are the vetted ones. Each of those three is a fact this asserts, and a comment
+    // beside a recipe is not.
+    for (name, recipe) in [
+        ("agent.Dockerfile", images::AGENT_DOCKERFILE),
+        ("builder.Dockerfile", holosmith::builder::DOCKERFILE),
+    ] {
+        for fetch in toolchain_fetches(name, recipe) {
+            // One fallback and not a fetch made without verification: the first attempt is curl's own flags, and
+            // `--insecure` is the retry's.
+            assert_eq!(
+                fetch.matches("--insecure").count(),
+                1,
+                "{name}'s fetch is not exactly one verified attempt and one fallback: {fetch}"
+            );
+            let urls: Vec<usize> = fetch
+                .match_indices("https://musl.cc/")
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(
+                urls.len(),
+                2,
+                "{name}'s fallback does not retry the same one tarball: {fetch}"
+            );
+            let insecure = fetch
+                .find("--insecure")
+                .unwrap_or_else(|| panic!("{name}'s fetch has no fallback: {fetch}"));
+            assert!(
+                urls[0] < insecure && insecure < urls[1],
+                "{name}'s `--insecure` is not the second attempt at the same URL: {fetch}"
+            );
+            // The fallback is guarded by curl's certificate statuses and by nothing else: every other status is exited
+            // with the child's own code, which is what keeps a host that did not answer a failed build (ADR-0111).
+            assert!(
+                fetch.contains("case $status in 51|60|77|83)"),
+                "{name}'s fallback is not guarded by curl's four certificate statuses alone: {fetch}"
+            );
+            assert!(
+                fetch.contains("*) exit $status"),
+                "{name}'s fallback does not leave every other curl status fatal: {fetch}"
+            );
+            // The pin still decides what lands in `/opt`, and it follows the fallback rather than replacing it.
+            let digest = fetch
+                .find("| sha256sum -c -")
+                .unwrap_or_else(|| panic!("{name}'s fetch checks no digest: {fetch}"));
+            assert!(
+                insecure < digest,
+                "{name}'s digest check does not follow the fallback it has to vouch for: {fetch}"
+            );
+            // And the fallback says so, on stderr, in the words each build's reader carries to an operator.
+            assert!(
+                fetch.contains(images::CERTIFICATE_WARNING) && fetch.contains(">&2"),
+                "{name}'s fallback prints no warning an operator would hear: {fetch}"
+            );
         }
     }
 }

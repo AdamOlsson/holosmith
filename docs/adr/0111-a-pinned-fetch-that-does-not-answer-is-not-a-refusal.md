@@ -22,7 +22,9 @@ and any `upgrade` whose image labels say the recipe changed.
 
 Both `curl`s are already pinned by SHA-256, so a vendored copy or a mirror is *technically* safe to substitute. What was
 missing is the other two halves: nothing retried the fetch, and nothing told a network failure apart from a tarball that
-did not match its digest.
+did not match its digest. That pin is also why a certificate that cannot be verified is a warning rather than a failed
+build: the digest decides what lands in `/opt`, and this decision is about a host that did not answer at all
+(ADR-0116).
 
 ## Three answers, and the two refused
 

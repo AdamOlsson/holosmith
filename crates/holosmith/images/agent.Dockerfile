@@ -133,13 +133,37 @@ RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 # that stays away is still a failed build, and the sentence `images::failure` writes for it says the fetch did not
 # answer rather than that the recipe is wrong: `server deploy` exits 4 for it and the gate prints a line that measured
 # nothing (ADR-0111).
-RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
-      https://musl.cc/x86_64-linux-musl-cross.tgz \
+#
+# **The pin covers what arrives; the certificate covers only who served it.** The digest below is the integrity
+# guarantee — the bytes that land in `/opt` are the bytes that were vetted, whoever answered — and transport
+# authentication adds nothing the pin does not already hold. So a certificate that cannot be verified is a warning and
+# a second attempt with `--insecure`, never a failed build: curl's own statuses 51, 60, 77 and 83 say the certificate is
+# what failed, and **every other status stays fatal** — the refused connection, the name that did not resolve, the
+# timeout, the HTTP 5xx and a digest that did not match are the failures they always were (ADR-0116). The line the
+# fallback prints is `images::CERTIFICATE_WARNING`'s marker, which `images::ensure` replays to an operator rather than
+# swallowing: a silent fallback is the one shape this repository does not do. `/bin/sh` is dash, so the fallback is a
+# `case` on the child's status and nothing bash-shaped.
+RUN if curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
+      https://musl.cc/x86_64-linux-musl-cross.tgz; then :; else \
+      status=$?; \
+      case $status in 51|60|77|83) \
+        echo "warning: musl.cc's certificate did not verify (curl exit $status): retrying that URL without certificate verification, and the pinned digest decides" >&2 ;; \
+      *) exit $status ;; esac; \
+      curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --insecure -o /tmp/musl.tgz \
+        https://musl.cc/x86_64-linux-musl-cross.tgz; \
+    fi \
  && echo "c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea  /tmp/musl.tgz" | sha256sum -c - \
  && tar -C /opt -xzf /tmp/musl.tgz \
  && rm /tmp/musl.tgz
-RUN curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
-      https://musl.cc/aarch64-linux-musl-cross.tgz \
+RUN if curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
+      https://musl.cc/aarch64-linux-musl-cross.tgz; then :; else \
+      status=$?; \
+      case $status in 51|60|77|83) \
+        echo "warning: musl.cc's certificate did not verify (curl exit $status): retrying that URL without certificate verification, and the pinned digest decides" >&2 ;; \
+      *) exit $status ;; esac; \
+      curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --insecure -o /tmp/musl.tgz \
+        https://musl.cc/aarch64-linux-musl-cross.tgz; \
+    fi \
  && echo "c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38  /tmp/musl.tgz" | sha256sum -c - \
  && tar -C /opt -xzf /tmp/musl.tgz \
  && rm /tmp/musl.tgz

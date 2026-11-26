@@ -11690,7 +11690,9 @@ case_image_fetch() {
   # The stand-in: the daemon's architecture this binary can build for, no image on the machine, and a `build` whose
   # output is the shape BuildKit prints when a `RUN` could not reach musl.cc. Every argv is one line of the log, so
   # "which builds were asked for" is a file rather than a claim. The archive on stdin is drained, as a real daemon
-  # reads it.
+  # reads it. The lines below carry the pre-fallback `RUN curl -fsSL …`, which is what a build of the current recipe
+  # prints as `RUN if curl …`: the fallback changed the instruction and not this measurement, which reads the host's
+  # name and the build's last exit status and never the instruction's text (ADR-0111, ADR-0116).
   cat >"$bin/docker" <<'SHIM'
 #!/bin/sh
 if [ "${1:-}" = "-H" ]; then shift 2; fi
@@ -12070,8 +12072,10 @@ case_server_images() {
   done
 
   # The second deploy: `satisfied`, and no image was rebuilt.
-  id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$base") \
-    $(docker image inspect --format '{{.Id}}' "$agent")"
+  # One `inspect` for all three, and the newlines turned into spaces, because the same string has to be *equal* on both
+  # sides: a continuation inside the quotes carries its indentation into the value, which is how this assertion read
+  # five spaces where the comparison below had one and failed a second deploy that changed nothing.
+  id_before="$(docker image inspect --format '{{.Id}}' "$proxy" "$base" "$agent" | tr '\n' ' ')"
   status=0
   PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.again.out" 2>&1 || status=$?
@@ -12081,8 +12085,8 @@ case_server_images() {
   grep -q '^3\. images: satisfied: ' "$WORK/$name.again.out" ||
     fail "$name/again/step3" "the second run's step 3 is not satisfied: $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
-  check "$name/again/ids" "$id_before" "$(docker image inspect --format '{{.Id}}' "$proxy") \
-    $(docker image inspect --format '{{.Id}}' "$base") $(docker image inspect --format '{{.Id}}' "$agent")"
+  check "$name/again/ids" "$id_before" \
+    "$(docker image inspect --format '{{.Id}}' "$proxy" "$base" "$agent" | tr '\n' ' ')"
 
   # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
   # the label comparison read back through its other caller — and it runs the self-test, which is the measurement

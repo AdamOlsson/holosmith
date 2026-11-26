@@ -815,6 +815,71 @@ pub fn fetch_did_not_answer(text: &str) -> bool {
     }
 }
 
+/// The marker both recipes print on stderr when a pinned fetch's certificate could not be verified, and the one phrase
+/// [`certificate_warnings`] reads a build's log for.
+///
+/// It is a constant rather than two literals because three places have to agree on it: the two recipes' `echo` (both
+/// `include_str!`ed, and asserted to carry this text by `tests/images.rs`), the reader below, and an operator who greps
+/// a build's output for it. The line continues with the curl status and what the fallback is; the marker is only the
+/// part that says what happened.
+pub const CERTIFICATE_WARNING: &str = "warning: musl.cc's certificate did not verify";
+
+/// The clause a build's sentence gains when its log carried [`CERTIFICATE_WARNING`].
+///
+/// The same fact as the recipe's line, in the sentence's own voice, because the two reach different readers: the sink is
+/// what an `install` watches, and `server deploy` passes the silent one and prints its steps instead — so step 3's
+/// sentence *is* the report, and the report is the whole of what a deploy prints (ADR-0092, ADR-0116 D3). It names the
+/// tarball without a count because one fetch falling back or both is the build's own business, and the clause is one
+/// clause either way.
+///
+/// Two sentences carry it, one per recipe: [`ensure`]'s, for the three product images, and `builder::built_sentence`'s,
+/// for `holosmith build`'s builder image — which has no sink at all, so its sentence is the only thing an operator
+/// running that command sees. One constant, because one fact spelled twice drifts.
+pub(crate) const CERTIFICATE_CLAUSE: &str = "; musl.cc's certificate did not verify, so the pinned tarball was fetched \
+                                              without verification and its digest matched";
+
+/// The certificate warnings a build printed, as the phrases a [`Progress`] sink repeats.
+///
+/// The recipes fetch both musl cross toolchains from musl.cc while the image builds (ADR-0111), and a host whose
+/// certificate cannot be verified is a fetch they retry with `--insecure` — only when curl's own status says the
+/// certificate is what failed (ADR-0116). That is safe because the tarball is pinned by SHA-256 in the same
+/// instruction: the pin, not the certificate, decides what lands in `/opt`. It is still a fact an operator has to be
+/// told — a fallback nobody hears about is the silent kind this repository does not do — so [`ensure`] replays these
+/// lines through the sink a step already has, and both build sentences (that one and `builder::built_sentence`) carry
+/// [`CERTIFICATE_CLAUSE`].
+///
+/// **The marker has to begin the line, not merely appear in it.** BuildKit prefixes a child's every output line with
+/// `#8 0.512 `, and it also echoes the instruction that failed (`#8 [4/9] RUN …`, ` > [4/9] RUN …`, `  76 | >>> RUN …`)
+/// and the shell in its last `did not complete successfully` line — every one of which carries the whole `RUN`, the
+/// `echo` and all. A text search over the log would read those echoes back as warnings.
+pub fn certificate_warnings(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| without_layer_prefix(line).unwrap_or(line).trim())
+        .filter(|line| line.starts_with(CERTIFICATE_WARNING))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `line` without BuildKit's `#8 0.512 ` prefix: the layer the child ran in, and how long it had been running when the
+/// line arrived.
+///
+/// `None` for every line that is not a child's output, which is the half [`certificate_warnings`] leans on: the
+/// build's own header (`#0 building with …`) has no duration, and the instruction BuildKit echoes (`#8 [4/9] RUN …`)
+/// has a layer number where the duration would be. A log that carries no prefixes at all (a stand-in's) is answered by
+/// every line as it stands.
+fn without_layer_prefix(line: &str) -> Option<&str> {
+    let (layer, rest) = line.strip_prefix('#')?.split_once(' ')?;
+    if layer.is_empty() || !layer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (elapsed, rest) = rest.split_once(' ')?;
+    let duration = !elapsed.is_empty()
+        && elapsed
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.');
+    duration.then_some(rest)
+}
+
 /// The exit status of the child the build stopped at: `N` from the **last** `did not complete successfully: exit
 /// code: N` line in `text`, which BuildKit prints on a failed build's last line.
 ///
@@ -1020,6 +1085,9 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// `Err` is a [`BuildError`]: the sentence, and whether a pin's host did not answer — the one failure here that is the
 /// machine's network rather than the tree's ([`fetch_did_not_answer`] reads it out of the log, and
 /// [`crate::deploy::Report::exit_code`] is where it becomes an exit code).
+///
+/// The sentence also carries a `; …` clause when a build's log carried a certificate warning ([`CERTIFICATE_CLAUSE`]):
+/// the sink is `install`'s, and a verb that passes [`crate::progress::Silent`] has no other way to say it (ADR-0116 D3).
 #[allow(clippy::too_many_arguments)]
 pub fn ensure(
     images: &dyn Images,
@@ -1038,6 +1106,9 @@ pub fn ensure(
     // compared with it: the candidate is this machine's build (the promotion refuses anything else) and runs nowhere
     // else.
     architecture(images, env!("HOLOSMITH_TARGET"))?;
+    // Once for the whole step, however many builds warned and however many of a recipe's two fetches fell back: the
+    // clause is the sentence's, and one step is one sentence. The sink still hears every line.
+    let mut warned = false;
     for (kind, _) in pending {
         let expectation = Expectation::of_release(*kind, config, release, digest);
         let tag = expectation.tag();
@@ -1047,6 +1118,15 @@ pub fn ensure(
         let built = images.build(&tag, &archive, &arguments);
         // A daemon that could not run the build at all did not build the image either.
         let success = built.as_ref().is_ok_and(|log| log.success);
+        // A build that survived a certificate it could not verify is a build an operator has not heard about: the
+        // recipe printed the line and this sink is the one the step already has (ADR-0116). Only on success — a failed
+        // build's sentence is the whole of what it says, and the warning is not what went wrong.
+        if success && let Ok(log) = &built {
+            for warning in certificate_warnings(&log.text) {
+                progress.note(label, &warning);
+                warned = true;
+            }
+        }
         progress.note(
             label,
             &format!("{} {tag}", if success { "built" } else { "did not build" }),
@@ -1068,12 +1148,18 @@ pub fn ensure(
         .iter()
         .map(|(kind, _)| kind.image_of(&release.version))
         .collect();
-    Ok(format!(
+    let sentence = format!(
         "built {} image{}: {}",
         tags.len(),
         if tags.len() == 1 { "" } else { "s" },
         tags.join(", ")
-    ))
+    );
+    // Byte-identical when nothing warned, because every assertion about this sentence is about that shape.
+    Ok(if warned {
+        format!("{sentence}{CERTIFICATE_CLAUSE}")
+    } else {
+        sentence
+    })
 }
 
 #[cfg(test)]
@@ -1101,5 +1187,232 @@ mod tests {
         ] {
             assert_eq!(hex(&sha256(input.as_bytes())), wanted, "{input:?}");
         }
+    }
+
+    /// The line both recipes print when curl's status says the certificate is what failed, as the shell writes it: the
+    /// marker, the status that took the fallback, and what the fallback is.
+    fn warning_line(status: u8) -> String {
+        format!(
+            "{CERTIFICATE_WARNING} (curl exit {status}): retrying that URL without certificate verification, and the pinned digest decides"
+        )
+    }
+
+    /// The fetch instruction both recipes carry, as BuildKit echoes it back: the layer's own name line, the instruction
+    /// with the whole `RUN` around it — `echo` and marker included — and nothing that is a child's output.
+    fn echoed_instruction(status: u8) -> String {
+        format!(
+            "#8 [4/9] RUN if curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz; then :; else \
+             status=$?; case $status in 51|60|77|83) echo \"{CERTIFICATE_WARNING} (curl exit $status): retrying that URL \
+             without certificate verification, and the pinned digest decides\" >&2 ;; *) exit $status ;; esac; \
+             curl -fsSL --insecure -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz; fi\n \
+             > [4/9] RUN if curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz; then :; else \
+             echo \"{CERTIFICATE_WARNING} (curl exit $status): …\" >&2 ;; esac; fi:\n \
+              76 | >>> RUN if curl -fsSL -o /tmp/musl.tgz https://musl.cc/x86_64-linux-musl-cross.tgz; then :; else \
+             echo \"{CERTIFICATE_WARNING} (curl exit $status): …\" >&2 ;; esac; fi\n \
+             ERROR: failed to build: failed to solve: process \"/bin/sh -c if curl … echo \"{CERTIFICATE_WARNING} …\" >&2 ;; \
+             esac\" did not complete successfully: exit code: {status}"
+        )
+    }
+
+    #[test]
+    fn the_certificate_warning_is_read_from_a_builds_output_and_not_from_its_echoed_instruction() {
+        // The recipes fall back to an unverified fetch only when curl's status says the certificate is what failed, and
+        // a fallback an operator never hears about is the silent kind (ADR-0116). The build's log holds two kinds of
+        // line carrying the same words: the child's own output, and BuildKit's echoes of the instruction — one of them
+        // the whole `RUN`, `echo` and all. Only the first is a warning.
+        let said = warning_line(60);
+        let log = format!(
+            "{}\n#8 0.512 {said}\n\
+             #8 8.204 /tmp/musl.tgz: OK\n\
+             #8 DONE 9.1s",
+            echoed_instruction(60)
+        );
+        assert_eq!(
+            certificate_warnings(&log),
+            [said],
+            "the log's warning line and its echoed instruction are not told apart: {log}"
+        );
+        // A line whose marker has no BuildKit prefix in front of it is a warning too: the prefix is the daemon's
+        // spelling, not the recipe's.
+        assert_eq!(
+            certificate_warnings(&warning_line(51)),
+            [warning_line(51)],
+            "a warning line without a layer prefix is not read"
+        );
+        // Both toolchains' fetches in one build are two warnings, in the order they were printed.
+        assert_eq!(
+            certificate_warnings(&format!(
+                "#8 0.512 {}\n#9 0.512 {}",
+                warning_line(60),
+                warning_line(83)
+            )),
+            [warning_line(60), warning_line(83)]
+        );
+        // A build that fell back is not the only shape: a log with no warning says nothing, and neither does an empty
+        // one.
+        assert!(certificate_warnings("#8 DONE 9.1s").is_empty());
+        assert!(certificate_warnings("").is_empty());
+    }
+
+    #[test]
+    fn a_certificate_warning_leaves_every_failures_classification_where_it_was() {
+        // The warning is a fact about a fetch that ran; it is not evidence about how the build ended. A log that fell
+        // back and then failed for a reason the tree owns is still the tree's — a compile error or a tarball that
+        // arrived and was not the pinned one — and must not be excused as a host that did not answer (ADR-0111's rule,
+        // which the fallback does not widen).
+        let warned = format!("#8 0.512 {}\n", warning_line(60));
+        for (said, tail) in [
+            (
+                "a compile error after the fallback",
+                "#9 ERROR: process \"/bin/sh -c cargo build\" did not complete successfully: exit code: 1",
+            ),
+            (
+                "a tarball that failed its digest after the fallback",
+                "#9 0.512 sha256sum: WARNING: 1 computed checksum did NOT match\n\
+                 #9 ERROR: process \"/bin/sh -c echo c5d4… | sha256sum -c -\" did not complete successfully: exit code: 1",
+            ),
+        ] {
+            let log = format!("{warned}{tail}");
+            assert!(
+                !fetch_did_not_answer(&log),
+                "{said} reads as a fetch that did not answer: {log}"
+            );
+            assert!(
+                !failure("agent-image:0.1.0", &log).contains("did not answer"),
+                "{said} is reported as a host that did not answer: {}",
+                failure("agent-image:0.1.0", &log)
+            );
+            // And the warning is still there to replay, so silencing the classification does not silence the fact.
+            assert_eq!(certificate_warnings(&log).len(), 1, "{said}");
+        }
+    }
+
+    /// The daemon [`ensure`] asks, and the two questions it never has to answer here: `pending` is handed in, so the
+    /// labels are not read, and a build is asked only to answer with `log`, successful.
+    struct WarningBuilds {
+        log: String,
+    }
+
+    impl Images for WarningBuilds {
+        fn daemon_arch(&self) -> Result<String, String> {
+            // This machine's own word, so the architecture guard passes: every arm here is about the sentence rather
+            // than about a daemon that builds for something else.
+            let arch = env!("HOLOSMITH_TARGET")
+                .split('-')
+                .next()
+                .unwrap_or_default();
+            Ok(match arch {
+                "x86_64" => "amd64".to_string(),
+                "aarch64" => "arm64".to_string(),
+                other => other.to_string(),
+            })
+        }
+
+        fn labels(&self, _image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+            Ok(None)
+        }
+
+        fn build(&self, _tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+            Ok(Log {
+                success: true,
+                text: self.log.clone(),
+            })
+        }
+    }
+
+    /// What [`ensure`] told a sink, in the order it told it.
+    #[derive(Default)]
+    struct Notes(Vec<String>);
+
+    impl Progress for Notes {
+        fn note(&mut self, label: &str, phrase: &str) {
+            self.0.push(format!("[{label}] {phrase}"));
+        }
+    }
+
+    #[test]
+    fn a_build_that_fell_back_to_an_unverified_fetch_says_so_in_the_sentence_once() {
+        // Step 3's sentence is the whole of what a verb passing `Silent` prints about the step, so the fact cannot live in
+        // the sink alone (ADR-0116 D3). Both toolchains' fetches in one recipe print the same line, and a second build
+        // prints it again — four lines here — so the clause appears once for the whole step, not once per line: the
+        // sentence says the fact once, and the sink still hears every line the builds printed.
+        let pending = [
+            (
+                Kind::Base,
+                "holosmith-base is not on this machine".to_string(),
+            ),
+            (
+                Kind::Agent,
+                "agent-image is not on this machine".to_string(),
+            ),
+        ];
+        // The archive carries the Dockerfile and a binary read from a path, which is the one thing this needs from the
+        // filesystem: a manifest is a file every crate has and its bytes are read, not inspected.
+        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let release = VersionInfo::current();
+        let digest = "0".repeat(64);
+        let tags = format!(
+            "{}, {}",
+            Kind::Base.image_of(&release.version),
+            Kind::Agent.image_of(&release.version)
+        );
+
+        let mut sink = Notes::default();
+        let sentence = ensure(
+            &WarningBuilds {
+                log: format!(
+                    "#8 0.512 {}\n#9 0.512 {}\n#8 DONE 9.1s",
+                    warning_line(60),
+                    warning_line(60)
+                ),
+            },
+            &binary,
+            &digest,
+            &release,
+            &Config::default(),
+            &pending,
+            "images",
+            &mut sink,
+        )
+        .expect("a successful build is not an error");
+        assert_eq!(
+            sentence,
+            format!(
+                "built 2 images: {tags}; {}",
+                CERTIFICATE_CLAUSE.trim_start_matches("; ")
+            ),
+            "the sentence does not carry the certificate's clause exactly once: {sentence}"
+        );
+        // The install path is unchanged: every line the builds printed is a note of its own.
+        assert_eq!(
+            sink.0
+                .iter()
+                .filter(|note| note.contains(CERTIFICATE_WARNING))
+                .count(),
+            4,
+            "the sink was not told each warning line: {:?}",
+            sink.0
+        );
+
+        // And a build that warned nothing answers the sentence it always did, byte for byte: every assertion about it is
+        // about that shape.
+        let mut sink = Notes::default();
+        assert_eq!(
+            ensure(
+                &WarningBuilds {
+                    log: "#8 DONE 9.1s".to_string(),
+                },
+                &binary,
+                &digest,
+                &release,
+                &Config::default(),
+                &pending,
+                "images",
+                &mut sink,
+            )
+            .expect("a successful build is not an error"),
+            format!("built 2 images: {tags}"),
+            "the clause appears over a build that warned nothing"
+        );
     }
 }

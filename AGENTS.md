@@ -216,7 +216,9 @@ no visible reason is usually one of them missing:
   daemon (ADR-0105, ADR-0106) — the daemon stays outside, and the wrapper is what hands one to a gate for the
   length of a run.
 - **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** for the shipped targets. SQLite is compiled from
-  source (`rusqlite`'s `bundled`), so the C toolchain crosses too.
+  source (`rusqlite`'s `bundled`), so the C toolchain crosses too; the images fetch the same two from musl.cc at build
+  time, where the tarball's SHA-256 is the pin and a certificate that cannot be verified is a warning over it rather
+  than a failed build (ADR-0116).
 - **node and npm** for `scripts/build-web.sh`: Vite 7 needs node 20.19+, and `npm test` — node's own runner over
   `web/test/`, importing TypeScript directly — needs **node 22.18 or later** (22.6–22.17 need
   `--experimental-strip-types`). A bare `cargo build` never runs npm.
