@@ -1065,11 +1065,12 @@ _Avoid_: Build container, build image, toolchain image, CI image
 
 **Session toolchain**:
 What a session's container carries of the compiler its tree is written in, as part of the **fixed** set: rustc, cargo,
-rustfmt and clippy at the version the agent recipe's `FROM rust:` line names, both musl targets, and both musl.cc cross
-linkers. There is no package key and no toolchain label: everything a recipe installs is fixed, so no config key
-removes it and none moves its version. The analogue of the **pinned pi version** for rust is those `FROM` lines in
-`agent.Dockerfile` and `builder.Dockerfile`, which a test asserts are one identical string; there is no `pins/rust.txt`
-because a Dockerfile cannot `include` anything. A session can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
+rustfmt and clippy at the version `pins/rust.txt` holds, both musl targets, and both musl.cc cross linkers. There is no
+package key and no toolchain label: everything a recipe installs is fixed, so no config key removes it and none moves
+its version. The analogue of the **pinned pi version** for rust is that pin file, whose one line is the base's whole
+reference — tag and digest — and which every recipe with a rust stage takes as `ARG HOLOSMITH_RUST_IMAGE`, so no
+recipe holds the digest and a bump is one edit (ADR-0118). A session can therefore run `cargo fmt`, `cargo clippy`,
+`cargo test`
 and `npm test` (ADR-0105) out of the **Vendored crate set** it carries too; what it does not have is a Docker daemon,
 so `scripts/verify-in-container.sh` is what runs `scripts/verify.sh` in that image on the host's daemon (ADR-0109),
 where the container-shaped integration binaries measure instead of printing a `SKIP`.

@@ -104,6 +104,11 @@ pub fn smoke_image() -> String {
 /// in-container entry point left, `holosmith container snapshot`, has no caller in the product path.
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
+/// The build argument a recipe with a rust stage reads its base's reference from, and the only argument that is
+/// not a label: its value is [`crate::pins::rust_image`]'s, so a recipe holds no digest and a bump is one edit
+/// (ADR-0118).
+pub const RUST_IMAGE_ARG: &str = "HOLOSMITH_RUST_IMAGE";
+
 /// The labels an image carries: the four facts this binary knows about itself, all under this build's own namespace.
 ///
 /// Read back by step 3's skip rule and by `doctor`, so the spelling is a contract: an image built by another
@@ -664,11 +669,21 @@ fn write_octal(field: &mut [u8], value: u64) {
 ///
 /// `--build-arg` for every fact the Dockerfile labels with, in [`Expectation::build_args`]'s order, so the
 /// image's labels are this binary's values and not a constant in a file.
+///
+/// **The one argument that is not a label is the rust base's**, and only the agent image's vector carries it: that
+/// recipe has a rust stage and takes its reference from [`crate::pins::rust_image`] rather than holding a literal in
+/// a `FROM` line (ADR-0118). The value is the pin's, verbatim — nothing here spells a version — and a recipe with no
+/// rust stage is sent no argument at all, because a `--build-arg` a recipe does not declare is a BuildKit warning
+/// over nothing.
 pub fn build_arguments(tag: &str, expectation: &Expectation) -> Vec<String> {
     let mut arguments = vec!["build".to_string(), "-t".to_string(), tag.to_string()];
     for (key, value) in expectation.build_args() {
         arguments.push("--build-arg".to_string());
         arguments.push(format!("{key}={value}"));
+    }
+    if expectation.kind == Kind::Agent {
+        arguments.push("--build-arg".to_string());
+        arguments.push(format!("{RUST_IMAGE_ARG}={}", crate::pins::rust_image()));
     }
     arguments.push("-".to_string());
     arguments

@@ -8,7 +8,9 @@
 # has: rustc with both musl targets, the two musl.cc cross toolchains, and node 24 for the web app. Both of its
 # bases are pinned by **manifest-list digest**, so one recipe resolves to the machine's own architecture (the same
 # rule as `proxy.Dockerfile` and `agent.Dockerfile`), and the musl.cc tarballs are pinned by their SHA-256 in the
-# `RUN` lines below — a download is a pin only if its bytes are checked.
+# `RUN` lines below — a download is a pin only if its bytes are checked. The rust base's **whole reference** is
+# `pins/rust.txt`'s and arrives as an argument (ADR-0118), so the pin is one file with one writer and a bump is one
+# edit rather than two lines a test has to hold together.
 #
 # The **second** stage is the final image: node is the base a session's build needs anyway, and rust is copied into
 # it. The order is not cosmetic — `COPY --from=rust` inside a stage named `rust` is a circular dependency, so the
@@ -16,7 +18,13 @@
 #
 # It carries no `holosmith` binary: the product images are built from this program, and this image builds the
 # program. Its `build-entry.sh` is the whole of what it runs.
-FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS rust
+#
+# **The rust stage comes first, and the argument is declared before the first `FROM`.** That is the only scope a
+# `FROM` can read an argument from, and `COPY --from=rust` resolves against *stage names* first and an image
+# reference second, so the stage has to come first and be named. The pre-`FROM` argument costs no cache boundary: a
+# stage's base is above every layer, and a different reference was always a rebuild (ADR-0115).
+ARG HOLOSMITH_RUST_IMAGE
+FROM rust:${HOLOSMITH_RUST_IMAGE} AS rust
 FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS node
 
 # rustc, cargo and rustup, taken from the pinned rust stage rather than installed by a script: `curl … | sh` would

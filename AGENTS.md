@@ -45,6 +45,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |
+| `pins/rust.txt` | The rust base's whole reference — tag and digest — the recipes take as `HOLOSMITH_RUST_IMAGE` |
 | `GLOSSARY.md` | The project vocabulary — read it before naming anything |
 
 ## Build and gates
@@ -479,6 +480,9 @@ next boot resumes them.
   `scripts/build.sh` guarantees a fresh tag.
 - **`pins/pi.txt` is the only copy of the pi version.** Do not repeat the number in code, comments, docs or
   tests — `tests/pin_single_source.rs` fails if it appears in a second tracked file.
+- **The rust base's reference is `pins/rust.txt`'s**, and it is handed to the recipes as `ARG HOLOSMITH_RUST_IMAGE`, so
+  no recipe holds the digest and a bump is one edit — `tests/pin_single_source.rs` fails if the digest appears in a
+  second tracked file (ADR-0118).
 - The workspace root has one member, so a command from the root needs `-p holosmith`
   (`cargo run -p holosmith -- version`).
 - **The fetch-nothing proof**, once per target: `cargo fetch --locked`, then a release build under

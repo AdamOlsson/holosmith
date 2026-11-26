@@ -58,16 +58,21 @@
 #
 # **The rust stage comes first, and its name is load-bearing.** `COPY --from=rust` resolves against *stage names*
 # first and an image reference second, so a stage this file did not name would be `docker.io/library/rust:latest` —
-# an extra unpinned pull and a toolchain from whatever `latest` is that day. The reference is the same string
-# `builder.Dockerfile`'s `FROM rust:` line carries, and a test asserts the two are identical, so a bump is two edits
-# that cannot drift.
-FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS rust
+# an extra unpinned pull and a toolchain from whatever `latest` is that day.
+#
+# **The reference is `pins/rust.txt`'s and arrives as an argument, because a `FROM` line cannot include a file**
+# (ADR-0118). The pin holds the **whole** reference — tag and digest — and `images::build_arguments` hands it to
+# this recipe verbatim, so the value has one reader and one writer and a bump is one edit. It is declared
+# **before the first `FROM`** because that is the only scope a `FROM` can read an argument from, and it costs no
+# cache boundary: a stage's base is above every layer, and changing that reference was always a rebuild (ADR-0115).
+ARG HOLOSMITH_RUST_IMAGE
+FROM rust:${HOLOSMITH_RUST_IMAGE} AS rust
 FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
 # rustc, cargo and rustup, taken from the pinned rust stage rather than installed by a script: `curl … | sh` would
-# put an unpinned installer in the build path, which is the thing a pinned stage exists to avoid. The stage is
-# `rust:1.99.1-bookworm` rather than the image's node base because the two are not the same Debian — a toolchain
-# copied across releases links against whatever libc its own base had.
+# put an unpinned installer in the build path, which is the thing a pinned stage exists to avoid. The stage is the
+# pinned rust base rather than the image's node base because the two are not the same Debian — a toolchain copied
+# across releases links against whatever libc its own base had.
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 
@@ -93,7 +98,8 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 # The one fact a `RUN` below spends, declared above it because an `ARG` is in scope of every instruction after it:
 # `HOLOSMITH_PI_VERSION` is the pi version the install step pins. Every package this recipe installs is a literal in
-# the line below, and a bump of the toolchain's own version is the `FROM` line's.
+# the line below, and a bump of the toolchain's own version is `pins/rust.txt`'s, which reaches the `FROM` above as
+# an argument.
 #
 # **A build argument's scope is a cache boundary.** A `RUN` is in scope of every argument declared above it, and
 # BuildKit puts that scope in the instruction's cache key whether or not the instruction names the value. So an
@@ -122,7 +128,7 @@ RUN apt-get update \
       python3 ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
-# **Load-bearing**: `rust:1.99.1-bookworm` ships rustup's minimal profile, which is rustc, cargo and the standard
+# **Load-bearing**: the pinned rust base ships rustup's minimal profile, which is rustc, cargo and the standard
 # library only. Without these two components `cargo fmt` and `cargo clippy` answer `'cargo-fmt' is not installed for
 # the toolchain`, which is a session's first command failing on an image that looks complete.
 RUN rustup component add rustfmt clippy

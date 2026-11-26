@@ -10,6 +10,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/web_embed.rs");
     println!("cargo:rerun-if-changed=../../pins/pi.txt");
+    // Both pins are embedded by `src/pins.rs`, so a bumped one is a different binary.
+    println!("cargo:rerun-if-changed=../../pins/rust.txt");
     // The version is a file outside the manifests, for the reason `version()` gives.
     println!("cargo:rerun-if-changed=../../VERSION");
     // Without this line a new migration file is silently left out of the binary (ADR-0009).

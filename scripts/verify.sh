@@ -12159,12 +12159,12 @@ case_agent_toolchain() {
       "$name" "$agent"
     return 0
   fi
-  # The version the recipe pins, read out of the recipe: a literal here would be a second copy of the pin, and the
-  # `FROM rust:1.99.1-bookworm@sha256:… AS rust` line is the only place the toolchain's version is written.
-  pinned="$(sed -n 's/^FROM rust:\([^-]*\)-[^@]*@sha256:.*/\1/p' \
-    "$repo_root/crates/holosmith/images/agent.Dockerfile")"
+  # The version the pin holds, read out of `pins/rust.txt`: a literal here would be a second copy of the pin. The
+  # file's one value is the whole reference — tag and digest — so the version is the part before the first `-`.
+  pinned="$(tr -d '[:space:]' <"$repo_root/pins/rust.txt")"
+  pinned="${pinned%%-*}"
   case "$pinned" in
-    '' | *[!0-9.]*) fail "$name/pin" "the agent recipe names no rust version to compare against: '$pinned'" ;;
+    '' | *[!0-9.]*) fail "$name/pin" "pins/rust.txt names no rust version to compare against: '$pinned'" ;;
   esac
 
   rm -rf "$root"
