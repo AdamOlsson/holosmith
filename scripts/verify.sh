@@ -17,7 +17,7 @@
 # answer, not a phase's** — no phase ran.
 #
 # A case that cannot measure what it is about stops the run with **4** and a `UNREACHABLE <case>` line, never with a
-# `FAIL` and never with a `SKIP`: the source a build fetches did not answer (`https://musl.cc/`, for the two pinned
+# `FAIL` and never with a `SKIP`: the source a build fetches did not answer (`https://musl.cc/`, for the pinned
 # cross toolchains), so the images were never built and nothing about the tree was measured (ADR-0111). A `SKIP` would
 # be a green run over a build that never happened, and a `FAIL` is what `holosmith update` records as a candidate the
 # gate refused — in the report and on the app's Service screen, about a tree nobody refused.
@@ -11643,7 +11643,7 @@ case_disk_quota() {
 
 # The one image-build failure that is not a verdict about the tree, measured with **no daemon and no network**.
 #
-# Both recipes fetch their two musl cross toolchains from musl.cc while the image builds, so a minute of that host being
+# Both recipes fetch their pinned musl cross toolchains from musl.cc while the image builds, so a minute of that host being
 # away is a build that failed. Recorded as a `FAIL`, that is a gate run which exits 1 — and `holosmith update` turns
 # exit 1 into `Verdict::Refused`/`State::Refused`, so the report and the app's Service screen say the gate refused a
 # candidate nobody refused. The classification lives where the build's log is (`images::fetch_did_not_answer`), the code
@@ -12117,7 +12117,7 @@ case_server_images() {
   rm -rf "$root"
 }
 
-# The agent image can run this tree's own gate: rustc, cargo, rustfmt, clippy and both musl cross linkers, at the
+# The agent image can run this tree's own gate: rustc, cargo, rustfmt, clippy and the musl cross linker, at the
 # version the recipe pins, and the crates and npm packages the tree builds from inside the image itself (ADR-0105,
 # ADR-0106).
 #
@@ -12199,9 +12199,9 @@ case_agent_toolchain() {
   check "$name/cargo/version" "cargo $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
   answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in the agent image: $answer"
   check "$name/rustc/version" "rustc $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
-  # Both cross linkers, by name: the tree's own `.cargo/config.toml` names them for the two musl targets, and a
-  # session that cannot find one gets a linker-not-found that reads like a code error.
-  for linker in x86_64-linux-musl-gcc aarch64-linux-musl-gcc; do
+  # The cross linker, by name: the tree's own `.cargo/config.toml` names it for the one release target, and a session
+  # that cannot find it gets a linker-not-found that reads like a code error.
+  for linker in x86_64-linux-musl-gcc; do
     answer="$(in_image "$linker" --version)" ||
       fail "$name/$linker" "$linker does not run in the agent image: $answer"
     case "$answer" in
@@ -13617,7 +13617,7 @@ case_build() {
       host_target=aarch64-unknown-linux-musl
       other_target=x86_64-unknown-linux-musl
       ;;
-    *) fail "$name/arch" "no release target for $(uname -m): AGENTS.md names the two" ;;
+    *) fail "$name/arch" "no build target for $(uname -m): holosmith build names x86_64 and aarch64" ;;
   esac
   rm -rf "$root"
   mkdir -p "$bin" "$out"
@@ -13825,8 +13825,8 @@ SHIM
   rm -rf "$root"
 }
 
-# A session builds this tree's release artifacts: `scripts/build-web.sh` and then `scripts/build.sh` in a session's own
-# shape, with both `dist/<triple>/holosmith` files statically linked and no network anywhere.
+# A session builds this tree's release artifact: `scripts/build-web.sh` and then `scripts/build.sh` in a session's own
+# shape, with `dist/<triple>/holosmith` statically linked and no network anywhere.
 #
 # The case exists because this is the product's path and not a flag's. `scripts/build.sh` is what a worker runs to
 # prove a tree, and until the image carried its crates and its npm cache that command needed the network; the warm
@@ -13840,15 +13840,15 @@ SHIM
 # Its own case rather than an arm of `case_agent_toolchain`, because of what it costs and because a failure should name
 # the release build rather than the toolchain; it sits beside `case_build` in `serve_cases` for the same reason.
 # Measured on this host in this shape — 2 cpus, the invoking uid, a `git ls-files` copy writable at `/src` — the web
-# half answers in ~7 s (its `npm ci` reads `/opt/npm-cache`) and the two release musl targets in ~5 min 20 s, and the
-# copy grows to ~550 MB, almost all of it its `target/`. That is why the copy is under `$repo_root/target/` and not in
-# `$WORK`: a `mktemp -d` on a tmpfs is a path the daemon may not see (ADR-0035).
+# half answers in ~7 s (its `npm ci` reads `/opt/npm-cache`) and the one release musl target in a few minutes, and the
+# copy grows to hundreds of MB, almost all of it its `target/`. That is why the copy is under `$repo_root/target/` and
+# not in `$WORK`: a `mktemp -d` on a tmpfs is a path the daemon may not see (ADR-0035).
 #
 # The `SKIP` lines in the captured output are all `check-static.sh`'s, and none of them is about the crates:
-# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against), the x86_64 empty-root run (this
-# container has no Docker daemon to run it in) and the aarch64 execution (no emulator in the image). `build.sh` calls
-# `build-web.sh` itself, so the explicit run is the npm half measured on its own and the second, inside `build.sh`, is
-# the fast path with `node_modules` already there.
+# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against) and the x86_64 empty-root run
+# (this container has no Docker daemon to run it in). `build.sh` calls `build-web.sh` itself, so the explicit run is
+# the npm half measured on its own and the second, inside `build.sh`, is the fast path with `node_modules` already
+# there.
 #
 # The image is `agent-image:$version`, which `case_server_images` builds and leaves in place, so the tag read here is
 # one built from **this** tree; a machine without it skips with the reason rather than measuring an older image.
@@ -13902,9 +13902,9 @@ case_agent_offline_build() {
     fail "$name/web" "scripts/build-web.sh exited $code in the agent image: $(tail -20 "$WORK/$name.web.out")"
   assertions=$((assertions + 1))
 
-  # Then both release musl targets, which is `cargo build --release --locked` twice with no flag beyond the lock. The
-  # tree's own `scripts/check-static.sh` is `build.sh`'s last step, so a placeholder page, a dynamic artifact or a
-  # missing embedded file fails here as a build failure — the assertions below are about where the files came from.
+  # Then the release musl target, which is `cargo build --release --locked` with no flag beyond the lock. The tree's own
+  # `scripts/check-static.sh` is `build.sh`'s last step, so a placeholder page, a dynamic artifact or a missing embedded
+  # file fails here as a build failure — the assertions below are about where the files came from.
   code=0
   timeout 1800 docker run --rm --name "hs_offline_build_release_$$" --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
@@ -13918,7 +13918,7 @@ case_agent_offline_build() {
   # The artifacts are read **inside the image**, over the same mount the build wrote: `build.sh` returning 0 is the
   # claim that they were produced, and `file` is the image's own. `file` on the host would be reading a file nothing
   # proves came from the image's toolchain, while one container that never entered it could have written one.
-  for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+  for triple in x86_64-unknown-linux-musl; do
     answer="$(in_image sh -c "test -f dist/$triple/holosmith && file -b dist/$triple/holosmith")" ||
       fail "$name/$triple" "scripts/build.sh left no dist/$triple/holosmith in the image: $answer"
     case "$answer" in
@@ -14371,7 +14371,7 @@ case_deploy_ssh() {
   # turns any failure into `line N: holder_pid: unbound variable` and buries the sentence that mattered.
   local control preview status line got shims sshlog log state home
   local socket_pid="" holder_pid=""
-  local digest copy short hostarch other corrupt downloader
+  local digest copy short hostarch other other_machine corrupt downloader
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'SKIP %s: no python3 to pick the two ports, answer `_ping` and hold the control port (tests/remote.rs covers the four argvs and every refusal)\n' "$name"
     return 0
@@ -14387,14 +14387,25 @@ case_deploy_ssh() {
     sleep 0.05
   done
   [ -S "$sock" ] || fail "$name/socket" "the fake daemon socket never appeared"
+  # The ELF header's `e_machine` is what `--binary` reads — two little-endian bytes at offset 18, the only bytes
+  # remote.rs's reader visits — so a copy of this artifact with them rewritten is a build for the other machine this
+  # command can describe. One artifact is built now, so a hand-built one is what keeps this arm measured rather than a
+  # permanent `SKIP` (ADR-0119).
   hostarch="$(uname -m)"
   case "$hostarch" in
-    x86_64|amd64) hostarch=x86_64; other="$repo_root/dist/aarch64-unknown-linux-musl/holosmith" ;;
-    aarch64|arm64) hostarch=aarch64; other="$repo_root/dist/x86_64-unknown-linux-musl/holosmith" ;;
+    x86_64|amd64) hostarch=x86_64; other_machine=aarch64 ;;
+    aarch64|arm64) hostarch=aarch64; other_machine=x86_64 ;;
     *) fail "$name/arch" "this machine answers uname -m as $hostarch, which the deploy cannot name" ;;
   esac
   digest="$(sha256sum "$artifact" | cut -d' ' -f1)"
   [ -n "$digest" ] || fail "$name/digest" "the artifact has no digest"
+  other="$WORK/$name.other-machine"
+  cp "$artifact" "$other"
+  # 183 is aarch64's `e_machine` and 62 is x86_64's, in the little-endian pair a `printf` writes.
+  case "$other_machine" in
+    aarch64) printf '\267\000' | dd of="$other" bs=1 seek=18 count=2 conv=notrunc status=none ;;
+    x86_64) printf '\076\000' | dd of="$other" bs=1 seek=18 count=2 conv=notrunc status=none ;;
+  esac
   shims="$WORK/$name.shims"
   sshlog="$WORK/$name.ssh.log"
   log="$WORK/$name.tailscale.log"
@@ -14552,34 +14563,29 @@ case_deploy_ssh() {
   holder_pid=""
 
   # ---- 3. the architecture: refused before anything is copied, accepted when --binary matches ---------
-  # The two musl artifacts `scripts/build.sh` leaves behind are the two builds this command can be given, so the
-  # "other" one is a real ELF for a machine this one is not.
+  # The "other" binary is the one built above with its header rewritten, so it is a real ELF for a machine this one is
+  # not — which is the file `--binary` has to judge.
   home="$root/home-arch"
   mkdir -p "$home"
   export HS_SSH_HOME="$home"
   : >"$sshlog"
-  if [ ! -x "$other" ]; then
-    printf 'SKIP %s/arch: no %s artifact to offer as a mismatch (scripts/build.sh builds both; --no-build skips it)\n' \
-      "$name" "$other"
-  else
-    status=0
-    PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --binary "$other" --dry-run \
-      --root "$root/arch" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.arch.out" 2>&1 || status=$?
-    check "$name/arch/exit" 1 "$status"
-    grep -q 'cannot run there' "$WORK/$name.arch.out" ||
-      fail "$name/arch/sentence" "the refusal does not say why: $(cat "$WORK/$name.arch.out")"
-    assertions=$((assertions + 1))
-    grep -q 'deploy: ssh: .*--binary.*' "$WORK/$name.arch.out" ||
-      fail "$name/arch/advice" "the refusal names no way forward: $(cat "$WORK/$name.arch.out")"
-    assertions=$((assertions + 1))
-    # "before anything is copied": the read ran and nothing else did.
-    check "$name/arch/children" 1 "$(grep -c '' "$sshlog")"
-    [ ! -e "$home/.cache" ] || fail "$name/arch/copied" "an architecture mismatch copied the binary anyway"
-    assertions=$((assertions + 1))
-    grep -q '^deploy: resume: holosmith server deploy --ssh me@box --binary ' "$WORK/$name.arch.out" ||
-      fail "$name/arch/resume" "the refusal prints no resume command: $(cat "$WORK/$name.arch.out")"
-    assertions=$((assertions + 1))
-  fi
+  status=0
+  PATH="$WORK/$name.nodl:$shims:$PATH" "$artifact" server deploy --verbose --ssh me@box --binary "$other" --dry-run \
+    --root "$root/arch" --config "$WORK/config-deploy-ssh.toml" >"$WORK/$name.arch.out" 2>&1 || status=$?
+  check "$name/arch/exit" 1 "$status"
+  grep -q 'cannot run there' "$WORK/$name.arch.out" ||
+    fail "$name/arch/sentence" "the refusal does not say why: $(cat "$WORK/$name.arch.out")"
+  assertions=$((assertions + 1))
+  grep -q 'deploy: ssh: .*--binary.*' "$WORK/$name.arch.out" ||
+    fail "$name/arch/advice" "the refusal names no way forward: $(cat "$WORK/$name.arch.out")"
+  assertions=$((assertions + 1))
+  # "before anything is copied": the read ran and nothing else did.
+  check "$name/arch/children" 1 "$(grep -c '' "$sshlog")"
+  [ ! -e "$home/.cache" ] || fail "$name/arch/copied" "an architecture mismatch copied the binary anyway"
+  assertions=$((assertions + 1))
+  grep -q '^deploy: resume: holosmith server deploy --ssh me@box --binary ' "$WORK/$name.arch.out" ||
+    fail "$name/arch/resume" "the refusal prints no resume command: $(cat "$WORK/$name.arch.out")"
+  assertions=$((assertions + 1))
   # …and the same target accepts a build for it, which is the acceptance's "unless `--binary` supplies a matching
   # build": the digest-named copy is this artifact, and the dry run runs from it.
   : >"$sshlog"
@@ -16854,8 +16860,7 @@ phase_serve() {
   printf '== serve ==\n'
   case "$(uname -m)" in
     x86_64) host_target=x86_64-unknown-linux-musl ;;
-    aarch64) host_target=aarch64-unknown-linux-musl ;;
-    *) fail "serve/artifact" "no shipped artifact for $(uname -m): AGENTS.md names the two" ;;
+    *) fail "serve/artifact" "no shipped artifact for $(uname -m): this build makes x86_64-unknown-linux-musl only (AGENTS.md)" ;;
   esac
   # The shipped musl artifact, not target/debug: it is the thing that ships, and the one
   # scripts/check-static.sh has already proved. A debug binary would embed whatever web/dist

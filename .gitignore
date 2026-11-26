@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 
+# The cross toolchain scripts/build.sh fetches into the tree when neither PATH nor this directory has one
+/toolchains/
+
 # Artifacts: scripts/build.sh writes dist/<target-triple>/holosmith
 /dist/
 

@@ -131,11 +131,11 @@ pub const LABEL_PI: &str = "org.holosmith.pi-version";
 /// running it. The acceptance's word is "the binary", so the read measures the binary.
 pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 
-/// One image build's bound: a first build installs pi and both musl.cc toolchains over the network.
+/// One image build's bound: the agent image's first build installs pi and the musl.cc cross toolchain over the network.
 ///
 /// Forty minutes rather than the proxies' minute, because the agent image's `npm install` fetches pi from one
-/// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks two cross
-/// toolchains of its own. **Measured at 10 min 30 s with both base images already on the machine** — `rust` is
+/// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks a cross
+/// toolchain of its own. **Measured at 10 min 30 s with both base images already on the machine** — `rust` is
 /// 2.2 GB and `node` 333 MB, so a cold one also pulls ~2.5 GB that this bound has to cover — and the rust stage
 /// is copied rather than installed, which is why the number is minutes and not an hour. That figure predates the
 /// vendor and npm steps (ADR-0106), which run **inside** the same bound: their own cost is unmeasured, so the forty
@@ -558,7 +558,7 @@ impl Images for Docker {
             Ok(Some(log)) => Ok(log),
             Ok(None) => Err(format!(
                 "the build of {tag} did not finish within {}s and was killed: a first build installs pi, pulls \
-                 both bases, vendors the crate set and fetches the two cross toolchains over the network, so this is a \
+                 both bases, vendors the crate set and fetches the cross toolchain over the network, so this is a \
                  machine that could not reach it rather than a Dockerfile that is wrong",
                 BUILD_TIMEOUT.as_secs()
             )),
@@ -743,9 +743,9 @@ pub fn failure(image: &str, text: &str) -> String {
     format!("the build of {image} failed{at}, and no new image was tagged {image}: {last}")
 }
 
-/// The host both recipes fetch their two cross toolchains from.
+/// The host the recipes fetch their pinned toolchains from.
 ///
-/// It is what ties a build's log to *this* build's two pinned downloads: an image whose own `curl` could not reach its
+/// It is what ties a build's log to *this* build's pinned downloads: an image whose own `curl` could not reach its
 /// own host is that image's failure, and reading it as this one's would excuse a broken recipe as an outage.
 const MUSL_HOST: &str = "musl.cc";
 

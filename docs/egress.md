@@ -5,7 +5,7 @@ Read this when an agent cannot install packages, or before you widen what sessio
 
 **A session has no Internet by default.** `[egress] allow = []` means the agent reaches its provider through the key
 proxy and nothing else. It does not mean a build fails: the toolchain is in the image (rustc, cargo, rustfmt, clippy and
-both musl cross linkers are part of the fixed set) and so are the crates `Cargo.lock` names and the web app's packages,
+the musl cross linker are part of the fixed set) and so are the crates `Cargo.lock` names and the web app's packages,
 so `cargo build --locked` and `npm ci` need no flag and no network. What an empty list blocks is a crate or a package
 the image does not carry — a new dependency, or another project's. Add the hosts a project needs in
 `holosmith config edit`, then restart:

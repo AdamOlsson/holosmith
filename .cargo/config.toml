@@ -1,11 +1,8 @@
-# Builds need the cross toolchains on PATH:  . ~/.pi/toolchains/env.sh  (AGENTS.md).
+# One release target, and its musl cross linker on the build's PATH: scripts/build.sh takes that linker from PATH
+# first, then from this tree's toolchains/, and fetches the pinned tarball when neither has it (ADR-0119, ADR-0120).
 #
 # Never export RUSTFLAGS anywhere in this repo: it silently disables the
 # per-target rustflags below and ships static-PIE without an error (ADR-0005).
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"
-rustflags = ["-C", "relocation-model=static"]
-
-[target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-musl-gcc"
 rustflags = ["-C", "relocation-model=static"]

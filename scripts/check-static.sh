@@ -5,9 +5,7 @@
 #
 # Usage: scripts/check-static.sh [--target <triple>]...
 # Reads the artifact's `version` and `serve` output, so run scripts/build.sh first. Downloads
-# nothing: qemu-aarch64-static is a machine-local tool (AGENTS.md) and its absence
-# prints one SKIP line instead of failing. The empty-root run is a container, so a machine
-# with no Docker daemon prints one too.
+# nothing: the empty-root run is a container, so a machine with no Docker daemon prints one SKIP line.
 
 set -euo pipefail
 
@@ -42,7 +40,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ ${#targets[@]} -eq 0 ]; then
-  targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl)
+  targets=(x86_64-unknown-linux-musl)
 fi
 
 fail() {
@@ -273,8 +271,6 @@ check_git_tag() {
     fail "$label: git_tag $reported is not this tree ($expected_tag): re-run scripts/build.sh"
 }
 
-host_arch="$(uname -m)"
-
 for target in "${targets[@]}"; do
   bin="dist/$target/holosmith"
   bin_abs="$repo_root/$bin"
@@ -323,46 +319,24 @@ for target in "${targets[@]}"; do
   grep -q 'CREATE TABLE schema_version' "$bin_abs" ||
     fail "$bin does not carry the initial migration: the migrations were not embedded"
 
-  arch="${target%%-*}"
-  runner=()
-  if [ "$arch" = "$host_arch" ]; then
-    label="$target native"
-  else
-    case "$target" in
-      aarch64-unknown-linux-musl) emulator="${HOLOSMITH_QEMU_AARCH64:-qemu-aarch64-static}" ;;
-      x86_64-unknown-linux-musl) emulator="${HOLOSMITH_QEMU_X86_64:-qemu-x86_64-static}" ;;
-      *) emulator="" ;;
-    esac
-    if [ -n "$emulator" ] && command -v "$emulator" >/dev/null 2>&1; then
-      runner=("$(command -v "$emulator")")
-      label="$target via $(basename "$emulator")"
-    else
-      printf 'SKIP %s execution: %s not found (see AGENTS.md)\n' \
-        "$target" "${emulator:-an emulator}"
-      printf '     %s: %s\n' "$bin" "$file_line"
-      continue
-    fi
-  fi
+  # Every target this tree builds is the host's own — `.cargo/config.toml` names one linker, and it is this
+  # machine's — so there is no emulator to run an artifact under and no `SKIP` where one is missing (ADR-0119).
+  label="$target native"
 
-  plain="$("${runner[@]}" "$bin_abs" version)"
+  plain="$("$bin_abs" version)"
   check_version_output "$label" "$plain"
   check_git_tag "$label" "$plain"
 
   if [ -n "$empty_root_skip" ]; then
     printf 'SKIP %s empty-root run: %s\n' "$target" "$empty_root_skip"
   else
-    # An empty root: no /lib, no /usr, nothing but the artifact (and the emulator). The build context is two lines
-    # and one copied file, so the image's filesystem *is* the artifact — which is what the probe below asserts
-    # rather than leaves implied.
+    # An empty root: no /lib, no /usr, nothing but the artifact. The build context is two lines and one copied
+    # file, so the image's filesystem *is* the artifact — which is what the probe below asserts rather than leaves
+    # implied.
     empty_root_build="$(mktemp -d "$repo_root/target/check-static-image-XXXXXX")"
     install -m 0755 "$bin_abs" "$empty_root_build/holosmith"
     printf 'FROM scratch\nCOPY holosmith /holosmith\n' >"$empty_root_build/Dockerfile"
     inner=(/holosmith)
-    if [ ${#runner[@]} -gt 0 ]; then
-      install -m 0755 "${runner[0]}" "$empty_root_build/qemu"
-      printf 'COPY qemu /qemu\n' >>"$empty_root_build/Dockerfile"
-      inner=(/qemu /holosmith)
-    fi
     empty_root_image="holosmith-check-static-$target:$$"
     docker build -q -t "$empty_root_image" "$empty_root_build" >"$empty_root_build/build.out" \
       2>"$empty_root_build/build.err" ||
@@ -393,5 +367,5 @@ for target in "${targets[@]}"; do
   printf '     %s  %s bytes  %s\n' \
     "$(sha256sum "$bin_abs" | cut -d' ' -f1)" \
     "$(stat -c %s "$bin_abs")" \
-    "$("${runner[@]}" "$bin_abs" version --json)"
+    "$("$bin_abs" version --json)"
 done

@@ -110,10 +110,12 @@ daemon cannot see) are exit 2 with one sentence naming the fix. A failed run's w
 `target/tmp-verify-in-container`, and the gate's own `kept work dir:` line prints the container path
 `/verify-work/tmp.XXXX`, which is that directory's `tmp.XXXX`.
 
-The `.` line is part of the command, not a convenience: `~/.pi/toolchains/env.sh` puts rustc 1.99, both
-musl targets, the cross gccs and node/npm on `PATH`. `verify.sh` needs the musl cross toolchains there
-**before** it runs, and the default `~/.cargo`/`~/.rustup` toolchain does not have them — its `build`
-phase fails with a missing `x86_64-unknown-linux-musl`, which reads like a code error and is not.
+The `.` line is part of the command, not a convenience: `~/.pi/toolchains/env.sh` puts rustc 1.99 and the
+musl cross gcc on `PATH`. The default `~/.cargo`/`~/.rustup` toolchain is another version entirely, and
+`scripts/build.sh` refuses a compiler that is not `pins/rust.txt`'s — so without the line the `build` phase fails
+on the compiler rather than on the linker. The linker itself the build can now fetch into `toolchains/`
+(ADR-0120), which is the escape for a machine with no toolchains directory; a host that has one still takes it
+from there, because a fetch is a network and a digest where a `PATH` entry is neither.
 
 Run it detached with the output going to `target/verify.log`, and poll that file for the sentinel; do
 not block on the command's own stdout. That one fixed name is deliberate — the poller has to find the
@@ -211,18 +213,20 @@ cd web && npm ci && npm test && npm run build
 `cargo build` needs rustc only. Everything past a debug run wants these on `PATH`, and a step that failed for
 no visible reason is usually one of them missing:
 
-- **rustc 1.99.1** from `~/.pi/toolchains/env.sh`. There is no `rust-toolchain.toml`: the build fetches nothing
-  beyond its declared dependencies. The same toolchain in the same version is also inside the **agent image**, with
+- **rustc 1.99.1** from `~/.pi/toolchains/env.sh`. There is no `rust-toolchain.toml`: a `cargo build` fetches nothing
+  beyond its declared dependencies, and the one fetch a script of this tree may make is `scripts/build.sh`'s cross
+  toolchain into `toolchains/` (ADR-0120). The same toolchain in the same version is also inside the **agent image**, with
   this tree's crate set vendored beside it and the web app's packages in its npm cache, so a session can run
   `cargo build --locked`, `cargo fmt`, `cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag and no
   network. Full verification has two shapes: on the machine (`scripts/verify.sh`) or in the agent image on that
   machine's daemon (`scripts/verify-in-container.sh`, ADR-0109). A *session's* container still carries no Docker
   daemon (ADR-0105, ADR-0106) — the daemon stays outside, and the wrapper is what hands one to a gate for the
   length of a run.
-- **`x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc`** for the shipped targets. SQLite is compiled from
-  source (`rusqlite`'s `bundled`), so the C toolchain crosses too; the images fetch the same two from musl.cc at build
+- **`x86_64-linux-musl-gcc`** for the shipped target. SQLite is compiled from
+  source (`rusqlite`'s `bundled`), so the C toolchain crosses too; the image fetches the same one from musl.cc at build
   time, where the tarball's SHA-256 is the pin and a certificate that cannot be verified is a warning over it rather
-  than a failed build (ADR-0116).
+  than a failed build (ADR-0116). `scripts/build.sh` takes it from `PATH` first, then from `toolchains/`, and fetches
+  the pinned tarball into `toolchains/` when neither has it (ADR-0119, ADR-0120).
 - **node and npm** for `scripts/build-web.sh`: Vite 7 needs node 20.19+, and `npm test` — node's own runner over
   `web/test/`, importing TypeScript directly — needs **node 22.18 or later** (22.6–22.17 need
   `--experimental-strip-types`). A bare `cargo build` never runs npm.
@@ -257,8 +261,6 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
   a home of its own (ADR-0108). It is run as the config's `base_image`, so a development machine may point
   that key at an image it tagged by hand; the three product images are `holosmith-proxy:<version>`,
   `holosmith-base:<version>` and `agent-image:<version>` (ADR-0057, ADR-0114).
-- **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here. It is machine-local and
-  **no script in this repo downloads anything**.
 - **A Docker daemon.** The development sandbox binds its socket because every story is a fact about a real
   `docker run` — that is host root by another name (anything reaching the socket can mount `/`), so it is
   granted deliberately and only when the socket exists. The empty-root run `scripts/check-static.sh` makes is a
@@ -268,12 +270,13 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
 
 The image carries the crate set and the npm cache (ADR-0106), so a session's container — no network, nothing mounted,
 `CARGO_HOME` empty — runs the commands the `rustc 1.99.1` bullet above lists, with no flag. `scripts/build.sh` too,
-and the gate is what proves it — `case_agent_offline_build` runs it under `--network none` and reads `file -b` on both
-musl artifacts inside the container. `--locked` is the flag to keep; anything that would move the lock is a host's work.
+and the gate is what proves it — `case_agent_offline_build` runs it under `--network none` and reads `file -b` on the
+musl artifact inside the container. `--locked` is the flag to keep; anything that would move the lock is a host's work.
 
 **A session's build spends disk, and that number has a key.** Measured in a session's shape (`--network none`, the
 invoking uid, a session's `--cpus 2 --memory 4096m`): `cargo build --locked`, `cargo clippy --all-targets` and
-`cargo test --no-run` write **9.2 GB** of `target/`, and both musl release builds take it to **9.6 GB** (ADR-0107).
+`cargo test --no-run` write **9.2 GB** of `target/`, and the release builds took that to **9.6 GB** when the tree
+built two architectures (ADR-0107).
 Almost all of it is debug info — a linked test binary here is 111 MB and 18 MB once stripped, because each of the
 integration binaries links the whole crate and carries its own copy of its DWARF. `session_disk_soft_gb` measures the
 **whole worktree**, 20 by default, so a session that cleans up and builds again deletes `target/` between the two
@@ -282,7 +285,7 @@ rather than meeting the watchdog mid-turn; a tree left behind is what a later se
 **`bash -c`, never `bash -lc`.** Measured in `agent-image:0.1.0`: `bash -c 'command -v cargo'` answers
 `/usr/local/cargo/bin/cargo`, and `bash -lc` answers nothing, as this host's uid and as a uid the image has no passwd
 entry for. `-l` makes bash a login shell, Debian's `/etc/profile` re-sets `PATH` to its own literal list, and the
-three prefixes the recipe's `ENV` adds — cargo, both musl.cc cross linkers — are gone with it; an arbitrary uid's
+two prefixes the recipe's `ENV` adds — cargo and the musl.cc cross linker — are gone with it; an arbitrary uid's
 `HOME` is `/` and holds no profile, so that reset is the whole of what `-l` buys a session.
 
 **A new crate is a host act, in three parts.** The vendored crate set is the lock's and nothing else, and measured
@@ -294,9 +297,9 @@ with its own sentence instead of letting every phase report the same symptom (th
 
 **A `SKIP` measures nothing.** In a container `cargo test` prints a `SKIP` for each integration binary that wants a
 Docker daemon, and `scripts/build.sh`'s last step prints one for `git_tag` (the case builds in a `git ls-files` copy, so
-there is no `.git` to `git describe`), one for the x86_64 empty-root run (this container has no Docker daemon to make
-one with) and one for the aarch64 execution (`qemu-aarch64-static`): a green suite there says the tree compiles and its
-daemon-free half passes, and the proof is `scripts/verify.sh` on a host (see "Build and gates").
+there is no `.git` to `git describe`) and one for the x86_64 empty-root run (this container has no Docker daemon to make
+one with): a green suite there says the tree compiles and its daemon-free half passes, and the proof is
+`scripts/verify.sh` on a host (see "Build and gates").
 
 ## Running it by hand, and the traps in it
 
@@ -463,7 +466,7 @@ next boot resumes them.
 
 ## Build settings that bite
 
-- **Never export `RUSTFLAGS`.** `.cargo/config.toml` sets the two linkers and `relocation-model=static` per
+- **Never export `RUSTFLAGS`.** `.cargo/config.toml` sets the linker and `relocation-model=static` per
   target, and cargo silently ignores `target.*.rustflags` when that variable is set — the build would ship a
   static-PIE binary with no error. `scripts/check-static.sh` asserts `statically linked` and an empty
   `readelf -d`, so the mistake fails loudly instead.

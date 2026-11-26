@@ -46,15 +46,12 @@ if [ "$version" = "0" ]; then
   exit 1
 fi
 
-# The binary's own version, for the provenance line. Derived from `uname -m` the way `verify.sh` does it, because
-# this repository ships two targets and a hard-coded triple would silently drop the line on the other one.
-case "$(uname -m)" in
-  x86_64) host_target=x86_64-unknown-linux-musl ;;
-  aarch64) host_target=aarch64-unknown-linux-musl ;;
-  *) host_target="" ;;
-esac
+# The binary's own version, for the provenance line. One release target, so one triple: a mapping by `uname -m`
+# would be a second copy of a set `scripts/build.sh` holds (ADR-0119), and a host this tree cannot build for leaves the
+# line empty rather than naming an artifact that is not there.
+host_target=x86_64-unknown-linux-musl
 artifact_version=""
-if [ -n "$host_target" ] && [ -x "$repo_root/dist/$host_target/holosmith" ]; then
+if [ -x "$repo_root/dist/$host_target/holosmith" ]; then
   artifact_version="$("$repo_root/dist/$host_target/holosmith" version --json 2>/dev/null |
     sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
 fi
