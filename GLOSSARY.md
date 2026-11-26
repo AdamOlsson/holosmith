@@ -1308,13 +1308,15 @@ exact argv and verifies on the next run (ADR-0086, ADR-0088). Its machine names 
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:
-The two images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
-`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run; and
-`agent-image:<version>`, the artifact plus pi at the pinned version, git and the configured toolchains, which a
-session's container runs. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and
-the context is an archive holding the Dockerfile, the running binary and — on the agent image — the crate set a
-build can vendor from (`images::Kind::context`). Its machine names are
-`images::Kind`, `images::ensure` and `images::proxy_image`/`images::agent_image`.
+The three images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
+`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run;
+`holosmith-base:<version>`, pi at the pinned version, node, git, CA certificates, openssl and `procps` and nothing
+else, which is the session image for a project that is not this repository (ADR-0114); and `agent-image:<version>`,
+the same session plus the artifact, this repository's toolchain and the configured toolchains, which a session's
+container runs. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and the context is
+an archive holding the Dockerfile, the running binary and — on the agent image — the crate set a build can vendor from
+(`images::Kind::context`). Its machine names are `images::Kind`, `images::ensure` and
+`images::proxy_image`/`images::base_image`/`images::agent_image`.
 _Avoid_: Container image, docker image, image pull, base image
 
 **Image label**:

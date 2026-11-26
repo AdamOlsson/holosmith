@@ -29,7 +29,7 @@
 //! # What it keeps, and why that is the interesting half
 //!
 //! The data root (`app.db`, every session's `session.log`, `secrets/keys.toml`, `secrets/vapid.toml`), the
-//! projects and their worktrees and branches, the two images — and **the sessions' own containers and networks**.
+//! projects and their worktrees and branches, the images — and **the sessions' own containers and networks**.
 //! That last one is a decision rather than an omission: a session's `agents_<id>` network and `s_<id>` container
 //! belong to the row that describes them, so a boot's reconcile owns them (ADR-0053), and a plain `uninstall` that
 //! killed a live session would destroy a turn it was never asked about. The `data: kept:` line says so in words.

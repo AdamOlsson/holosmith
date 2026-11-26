@@ -25,8 +25,8 @@
 # Nine phases, cheapest first: cargo fmt --check, cargo clippy --all-targets -- -D warnings,
 # cargo test, `cargo test --test schema_previous` (the expand/contract rule), `case_gate_quick` (the worker
 # gate's own contract — its names, its refusals, its footer, and one real run of it), `case_gate_cleanup` (the
-# cleanup script's own contract — the marker it kills by, the prefix it does not, the lock, and the refusals that keep a
-# heuristic from being a licence to kill),
+# cleanup script's own contract — the marker it kills by, the prefix it does not, the lock, the refusals that keep a
+# heuristic from being a licence to kill, and a registered checkout this host cannot see skipped rather than refused),
 # scripts/build.sh (which runs scripts/build-web.sh and scripts/check-static.sh),
 # scripts/check-embed.sh, then serve: dist/<host-triple>/holosmith on a random port with a temp
 # config and a temp data dir, answering /api/health, the schema version, the app shell, the 404
@@ -8925,7 +8925,7 @@ s.close()
 PY
 }
 
-# fake_product_images <bin dir> <argv log> <state dir>: the `docker` a promotion's **two product images** are read and
+# fake_product_images <bin dir> <argv log> <state dir>: the `docker` a promotion's **product images** are read and
 # built through, and nothing else. Every other question — the smoke run's own image, that session's container and
 # network — is `exec`'d to the real daemon, so a promotion under this stand-in still runs the real smoke test. The
 # labels it remembers are the `--build-arg` pairs it was given, which is how a *second* promotion reads those images as
@@ -8962,7 +8962,7 @@ case "\$1" in
       esac
     done
     case "\$tag" in
-      holosmith-proxy:*|agent-image:*)
+      holosmith-proxy:*|holosmith-base:*|agent-image:*)
         cat >/dev/null
         printf '{%s"faked":"yes"}' "\$json" >"$state/\$tag.json"
         printf 'faked the build of %s\n' "\$tag"
@@ -8975,12 +8975,12 @@ case "\$1" in
     format=""
     for argument in "\$@"; do
       case "\$argument" in
-        holosmith-proxy:*|agent-image:*) tag="\$argument" ;;
+        holosmith-proxy:*|holosmith-base:*|agent-image:*) tag="\$argument" ;;
         *Config.Labels*) format="\$argument" ;;
       esac
     done
     case "\$tag" in
-      holosmith-proxy:*|agent-image:*)
+      holosmith-proxy:*|holosmith-base:*|agent-image:*)
         [ -f "$state/\$tag.json" ] || exit 1
         case "\$format" in
           "") printf 'sha256:faked\n' ;;
@@ -10766,7 +10766,7 @@ case_docker_preflight() {
 #
 # The **offline** half answers `GET /_ping` from a socket it starts, so step 1 passes on a machine with no
 # daemon, and asserts four things: the dry run lists the six steps in the spec's order, step 3 planning a build
-# of both images, steps 5 and 6 planning what they would do (none of them is a skip, and the
+# of every image, steps 5 and 6 planning what they would do (none of them is a skip, and the
 # report has no `incomplete` line), and leaves the install root **absent**; a run whose `docker_host` names a
 # socket that cannot exist stops at step 1 and prints the resume command as its last line; a run that gets past
 # step 1 and then fails step 3 — that same `_ping` socket answers the ping and nothing a build needs — leaves
@@ -10777,7 +10777,7 @@ case_docker_preflight() {
 # The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
 # which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
 # `agent_image` names something else): a real install into a root under `target/` — step 2's paths with their
-# modes, step 3's two images, step 4's three containers, step 5's unit and step 6's health — and then the same command
+# modes, step 3's images, step 4's three containers, step 5's unit and step 6's health — and then the same command
 # again, where all six steps say `satisfied`, the tree's listing and the installed config's bytes are identical and
 # `keys.toml` was not rewritten. That is the acceptance's "the second run changes nothing", as a comparison rather
 # than an absence of output. Step 6's answer is `health_responder`'s: this machine has neither a `tailscaled`
@@ -11790,28 +11790,33 @@ SHIM
   rm -rf "$root"
 }
 
-# the step 3: the two images, built from the Dockerfiles embedded in the artifact, and what is inside them.
+# the step 3: the three images, built from the Dockerfiles embedded in the artifact, and what is inside them.
 #
-# This is the one case whose subject is the *build*: `holosmith-proxy:<version>` and `agent-image:<version>` are what
-# step 4's proxies run and what a session's container runs, so both the labels a later deploy compares and the
-# images' own contents are measured here, against a real daemon. It owns the **absent** state — it removes both
-# tags first — because a build that only ever ran on a machine that already had the images would prove nothing.
+# This is the one case whose subject is the *build*: `holosmith-proxy:<version>` is what step 4's proxies run,
+# `agent-image:<version>` is what a session's container runs, and `holosmith-base:<version>` is the same session
+# without this repository's toolchain (ADR-0114) — so both the labels a later deploy compares and the images' own
+# contents are measured here, against a real daemon. It owns the **absent** state — it removes all three tags first —
+# because a build that only ever ran on a machine that already had the images would prove nothing.
 #
-# Four measurements, one per claim:
+# Five measurements, one per claim:
 #
-#   labels    both tags carry version, git tag and pinned pi; the agent image carries the toolchain list as well.
-#             That is the read step 3's skip rule and `doctor` make (ADR-0057).
+#   labels    every tag carries version, git tag, pinned pi and the binary's digest; the agent image carries the
+#             toolchain list as well, and the proxy and base images carry none. That is the read step 3's skip rule
+#             and `doctor` make (ADR-0057).
 #   agent     inside the image: `pi --version` is the pin, git answers, both toolchains are installed, the uid is
 #             1000 (ADR-0035), and this binary runs `container snapshot --help` — the helper subcommand a session
 #             needs and the one thing a hand-built `pi-agent:local` does not have.
+#   base      inside the image, as a uid that is neither root nor the image's own user (a session's shape, ADR-0087):
+#             `pi --version` is the pin, git answers, the isolation probe's `node -e` runs, and `command -v cargo`
+#             answers nothing — the absence is the contract, so it is measured rather than asserted.
 #   proxy     the proxy image serves the proxies and runs as a user that is not root: `hs_egress` refuses a host that
 #             is not on its allow-list and `hs_key` refuses a provider path it does not know. Neither question needs TLS
 #             or the internet, and `proxy mcp` — the third mode of the same binary — is `case_mcp_proxy`'s question
 #             against the shipped artifact: what the image is asked here is that a container from it answers at all.
-#   again     the same deploy again says `satisfied` and leaves both image ids unchanged — the acceptance's "a
+#   again     the same deploy again says `satisfied` and leaves all three image ids unchanged — the acceptance's "a
 #             second run changes nothing", for the step that is the most expensive to get wrong.
 #
-# It **leaves both images** and removes only its own containers and its scratch root: every later case's `serve`
+# It **leaves all three images** and removes only its own containers and its scratch root: every later case's `serve`
 # boot starts the proxies from them, and removing an image a running container came from would leave that container
 # unable to restart. `case_server_deploy`'s online half removes the tags again because *it* asserts `changed`; the
 # order in `serve_cases` is what makes both honest.
@@ -11820,7 +11825,8 @@ SHIM
 # same three things through the production `Images` path, so a skipped gate is not a silent gap.
 case_server_images() {
   local name=case_server_images root="$repo_root/target/verify-images-$$"
-  local proxy agent version tag pin plain status labels id_before control preview line answer
+  local proxy base agent version tag pin plain status labels id_before control preview line answer
+  local base_uid probe_uid absent code
   local egress_ip key_ip binds container package shims log state
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (tests/images.rs builds a test tag and reads it back)\n' "$name"
@@ -11839,15 +11845,16 @@ case_server_images() {
   [ -n "$version" ] && [ -n "$tag" ] && [ -n "$pin" ] && [ -n "$sha" ] ||
     fail "$name/version" "the artifact's version report is incomplete: $plain"
   proxy="holosmith-proxy:$version"
+  base="holosmith-base:$version"
   agent="agent-image:$version"
 
   # This case owns the absent state: the deploy's own proxy containers go first (a running container pins the image
-  # it was started from, so an untag with them up fails and the build that follows would be a no-op), then both tags
-  # are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
+  # it was started from, so an untag with them up fails and the build that follows would be a no-op), then all three
+  # tags are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
   # case exists to rule out.
   timeout 120 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
-  timeout 120 docker image rm -f "$proxy" "$agent" >/dev/null 2>&1 || true
-  for image in "$proxy" "$agent"; do
+  timeout 120 docker image rm -f "$proxy" "$base" "$agent" >/dev/null 2>&1 || true
+  for image in "$proxy" "$base" "$agent"; do
     if docker image inspect "$image" >/dev/null 2>&1; then
       fail "$name/absent" "$image survived its removal, so the build below would not be measured"
     fi
@@ -11892,10 +11899,10 @@ case_server_images() {
     fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
   assertions=$((assertions + 1))
   grep -q '^3\. images: changed: ' "$WORK/$name.deploy.out" ||
-    fail "$name/deploy/step3" "step 3 did not build the two images: $(cat "$WORK/$name.deploy.out")"
+    fail "$name/deploy/step3" "step 3 did not build the three images: $(cat "$WORK/$name.deploy.out")"
   assertions=$((assertions + 1))
 
-  # The labels, on both tags: the three facts this binary knows about itself.
+  # The labels, on every tag: the four facts this binary knows about itself.
   for label in version git-tag pi-version binary-sha256; do
     case "$label" in
       version) wanted="$version" ;;
@@ -11903,7 +11910,7 @@ case_server_images() {
       pi-version) wanted="$pin" ;;
       binary-sha256) wanted="$sha" ;;
     esac
-    for image in "$proxy" "$agent"; do
+    for image in "$proxy" "$base" "$agent"; do
       labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)" ||
         fail "$name/labels" "$image is not on this machine after the build"
       case "$labels" in
@@ -11918,13 +11925,15 @@ case_server_images() {
     *'"org.holosmith.toolchains":"python3 ripgrep"'*) assertions=$((assertions + 1)) ;;
     *) fail "$name/labels/toolchains" "the agent image does not carry its toolchain list: $labels" ;;
   esac
-  labels="$(docker image inspect --format '{{json .Config.Labels}}' "$proxy" 2>/dev/null)"
-  case "$labels" in
-    *'"org.holosmith.toolchains"'*)
-      fail "$name/labels/proxy-toolchains" "the proxy image carries the agent image's toolchain label: $labels"
-      ;;
-  esac
-  assertions=$((assertions + 1))
+  for image in "$proxy" "$base"; do
+    labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)"
+    case "$labels" in
+      *'"org.holosmith.toolchains"'*)
+        fail "$name/labels/toolchains" "$image carries the agent image's toolchain label: $labels"
+        ;;
+    esac
+    assertions=$((assertions + 1))
+  done
 
   # The agent image's contents, each one a fact a session depends on.
   answer="$(timeout 300 docker run --rm --network none --entrypoint pi "$agent" --version 2>&1)" ||
@@ -11951,6 +11960,55 @@ case_server_images() {
     "$agent" container snapshot --help >/dev/null 2>&1 ||
     fail "$name/agent/snapshot" 'this binary: `container snapshot --help` does not run in the agent image'
   assertions=$((assertions + 1))
+
+  # ---- the base image: the same session without this repository's toolchain (ADR-0114) ------------------------
+  #
+  # **The uid is neither 0 nor the image's own user**, and that is the measurement ADR-0087 asks for: a session's
+  # container runs `--user <the data root's owner>`, a uid with no passwd entry and `HOME` at `/`, so an image that
+  # needs `$HOME` fails here. The image's own user is read rather than assumed, so the choice cannot silently become
+  # it on a machine whose first uid is not 1000.
+  base_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$base" -u 2>&1)"
+  case "$base_uid" in
+    '' | *[!0-9]*) fail "$name/base/uid" "the base image's uid could not be read: $base_uid" ;;
+  esac
+  [ "$base_uid" != "0" ] ||
+    fail "$name/base/root" "the base image runs as root, so a session's files are root's"
+  probe_uid=1000
+  if [ "$probe_uid" = "$base_uid" ]; then probe_uid=1001; fi
+  answer="$(timeout 300 docker run --rm --network none --user "$probe_uid:$probe_uid" --entrypoint pi "$base" \
+    --version 2>&1)" ||
+    fail "$name/base/pi" '`pi --version` did not run in the base image as uid '"$probe_uid: $answer"
+  check "$name/base/pi/version" "$pin" "$(sed -n '1s/^[^0-9]*//p' <<<"$answer" | tr -d '[:space:]')"
+  timeout 120 docker run --rm --network none --user "$probe_uid:$probe_uid" --entrypoint git "$base" --version \
+    >/dev/null 2>&1 ||
+    fail "$name/base/git" "git does not run in the base image as uid $probe_uid"
+  assertions=$((assertions + 1))
+  # The isolation probe is `node -e <script>` inside this image at every boot (ADR-0044), so node has to be there and
+  # the tree's own probe has to run: on `--network none` nothing is reachable, which is the probe's exit 0. The
+  # target is the real probe's first one, an address no network can route to from in here.
+  answer="$(timeout 120 docker run --rm --network none --user "$probe_uid:$probe_uid" --entrypoint node "$base" \
+    -e "$(cat "$repo_root/crates/holosmith/templates/selftest-probe.js")" 1.1.1.1:443 2>&1)" ||
+    fail "$name/base/probe" "the isolation probe does not run in the base image: $answer"
+  assertions=$((assertions + 1))
+  # **The absence, measured**: no cargo, no rustc, no cross linker, no npm cache, no vendored crate set. This is the
+  # half of the contract that makes the image generic, and a `COPY` or an `apt-get` that crept in would be here.
+  for absent in cargo rustc x86_64-linux-musl-gcc; do
+    # `|| code=$?` because a missing program is this check's *pass*: 127 is what `command -v` answers, and under
+    # `set -e` a bare assignment holding a failed child would end the run.
+    code=0
+    answer="$(timeout 120 docker run --rm --network none --user "$probe_uid:$probe_uid" --entrypoint sh "$base" \
+      -c "command -v $absent" 2>&1)" || code=$?
+    [ -z "$answer" ] || fail "$name/base/$absent" "$absent answers '$answer' in the base image"
+    [ "$code" -ne 0 ] ||
+      fail "$name/base/$absent/status" "the base image answers status 0 for a command -v $absent"
+    assertions=$((assertions + 1))
+  done
+  for absent in /opt/cargo-vendor /opt/npm-cache /.cargo/config.toml /usr/local/bin/holosmith; do
+    if timeout 120 docker run --rm --network none --entrypoint test "$base" -e "$absent" >/dev/null 2>&1; then
+      fail "$name/base/path" "$absent is in the base image, and its contract is that it holds no toolchain and no program of ours"
+    fi
+    assertions=$((assertions + 1))
+  done
   # Nor is the proxy image's own user root: a root invocation is refused before dispatch (ADR-0090), so an image
   # whose user is uid 0 is a proxy that cannot start at all. The egress container is the one that relies on the
   # image's own user — it passes no `--user` — which is what makes this the check that keeps that path honest.
@@ -12011,8 +12069,9 @@ case_server_images() {
     esac
   done
 
-  # The second deploy: `satisfied`, and neither image was rebuilt.
-  id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
+  # The second deploy: `satisfied`, and no image was rebuilt.
+  id_before="$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$base") \
+    $(docker image inspect --format '{{.Id}}' "$agent")"
   status=0
   PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.again.out" 2>&1 || status=$?
@@ -12022,8 +12081,8 @@ case_server_images() {
   grep -q '^3\. images: satisfied: ' "$WORK/$name.again.out" ||
     fail "$name/again/step3" "the second run's step 3 is not satisfied: $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
-  check "$name/again/ids" "$id_before" \
-    "$(docker image inspect --format '{{.Id}}' "$proxy") $(docker image inspect --format '{{.Id}}' "$agent")"
+  check "$name/again/ids" "$id_before" "$(docker image inspect --format '{{.Id}}' "$proxy") \
+    $(docker image inspect --format '{{.Id}}' "$base") $(docker image inspect --format '{{.Id}}' "$agent")"
 
   # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
   # the label comparison read back through its other caller — and it runs the self-test, which is the measurement
@@ -13970,7 +14029,7 @@ case_server_deploy() {
     grep -q '^2\. files: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/plan" "the dry run does not say what step 2 would do: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
-    # Step 3 is that story's, so the dry run plans it: two images to build, and neither is on this machine.
+    # Step 3 is that story's, so the dry run plans it: images to build, and none of them is on this machine.
     grep -q '^3\. images: needs: ' "$WORK/$name.dry.out" ||
       fail "$name/dry/images" "the dry run does not plan step 3: $(cat "$WORK/$name.dry.out")"
     assertions=$((assertions + 1))
@@ -14133,8 +14192,10 @@ case_server_deploy() {
   # `hs_egress`/`hs_key`/`hs_mcp` are the machine's names: a leftover from an earlier case would make this case's first
   # run read `satisfied`, so it takes them over and removes its own at the end.
   timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
-  # Step 3 builds `agent-image:<version>` and `holosmith-proxy:<version>`, and this case asserts `changed`: it
-  # removes both tags first, because `case_server_images` deliberately leaves them. The rebuild is layer-cached.
+  # Step 3 builds `holosmith-proxy:<version>`, `holosmith-base:<version>` and `agent-image:<version>`, and this case
+  # asserts `changed`: it removes the two step 4 depends on first, because `case_server_images` deliberately leaves
+  # them. The base image stays — the rebuild is layer-cached either way, and the proxy is the tag that must be absent
+  # for `changed` to mean what it says.
   version="$("$artifact" version | sed -n 's/^version //p')"
   [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
   timeout 120 docker image rm -f "holosmith-proxy:$version" "agent-image:$version" >/dev/null 2>&1 || true
@@ -14169,7 +14230,7 @@ case_server_deploy() {
     fail "$name/online/step2" "step 2 did not create the files: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
   grep -q '^3\. images: changed: ' "$WORK/$name.online.out" ||
-    fail "$name/online/step3" "step 3 did not build the two images: $(cat "$WORK/$name.online.out")"
+    fail "$name/online/step3" "step 3 did not build the images: $(cat "$WORK/$name.online.out")"
   assertions=$((assertions + 1))
   grep -q '^4\. proxies: changed: ' "$WORK/$name.online.out" ||
     fail "$name/online/step4" "step 4 did not start the proxies: $(cat "$WORK/$name.online.out")"
@@ -16421,7 +16482,7 @@ SHIM
 case_gate_cleanup() {
   local name=case_gate_cleanup root="$repo_root/target/verify-gate-cleanup-$$"
   local script="$repo_root/scripts/gate-cleanup.sh"
-  local out="$root/out" err="$root/err" empty="$root/empty" absent="$root/absent"
+  local out="$root/out" err="$root/err" empty="$root/empty" absent="$root/absent" scratch="$root/elsewhere"
   local dead live live_start mark weird weird_start holder faker rc=0 pid n
   local legacy_a legacy_b legacy_c legacy_op legacy_out legacy_ng mktemp_b mktemp_c mktemp_out withheld=0
   local before=$assertions
@@ -16746,6 +16807,31 @@ case_gate_cleanup() {
   rc=0
   "$script" --worktree "$absent" >"$out" 2>"$err" || rc=$?
   check "${name}/misuse/absent" 2 "$rc"
+
+  # 17. A registered checkout this host cannot see is skipped, and only a root the caller names is refused. The
+  # repository is shared: a session's container path (`/work`, `/home/node/...`) stays in `git worktree list` after the
+  # container that made it is gone, and a gate that stopped over one would measure nothing at all on the machine that
+  # runs several sessions. Measured in a scratch repository of its own, because `git worktree list` is the
+  # repository's answer and this arm must not depend on whose registrations this machine happens to carry.
+  mkdir -p "$scratch/scripts"
+  cp "$script" "$scratch/scripts/" && chmod 0755 "$scratch/scripts/gate-cleanup.sh" ||
+    fail "${name}/unseen/copy" "could not copy the script into a scratch repository"
+  git -C "$scratch" init --quiet >/dev/null 2>&1 ||
+    fail "${name}/unseen/init" "could not make a scratch repository"
+  git -C "$scratch" -c user.email=gate@example -c user.name=gate commit --quiet --allow-empty -m scratch >/dev/null 2>&1 ||
+    fail "${name}/unseen/commit" "could not make the scratch repository's first commit"
+  git -C "$scratch" worktree add --quiet "$scratch/gone" >/dev/null 2>&1 ||
+    fail "${name}/unseen/register" "could not register a worktree in the scratch repository"
+  rm -rf "$scratch/gone"
+  rc=0
+  "$scratch/scripts/gate-cleanup.sh" --dry-run >"$out" 2>"$err" || rc=$?
+  check "${name}/unseen/exit" 0 "$rc"
+  has "$err" "skipping a registered worktree this host cannot see: $scratch/gone" "${name}/unseen/sentence"
+  rc=0
+  "$scratch/scripts/gate-cleanup.sh" --worktree "$scratch/gone" --dry-run >"$out" 2>"$err" || rc=$?
+  check "${name}/unseen/named_exit" 2 "$rc"
+  has "$err" "not a directory: $scratch/gone" "${name}/unseen/named_sentence"
+  rm -rf "$scratch"
 
   for pid in ${fakes[@]+"${fakes[@]}"}; do
     kill "$pid" 2>/dev/null || true

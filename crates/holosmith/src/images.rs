@@ -1,4 +1,4 @@
-//! The two images `server deploy`'s step 3 builds, from the Dockerfiles embedded here.
+//! The three images `server deploy`'s step 3 builds — proxy, base and agent — from the Dockerfiles embedded here.
 //!
 //! The Dockerfiles are `include_str!`ed rather than shipped beside the binary: a deploy runs on a machine that
 //! has the artifact and nothing else, so the recipe has to be *inside* it, and `scripts/check-static.sh` greps
@@ -10,7 +10,7 @@
 //! - **The daemon is handed a tar on stdin**, not a directory: `docker build -` reads a context from an
 //!   archive, which is the only way to build without a directory on disk that holds a copy of this binary. What
 //!   travels in it besides the Dockerfile and the binary is [`Kind::context`]'s answer — the agent image's crate
-//!   set, and nothing for the proxy.
+//!   set, and nothing for the proxy or the base.
 //! - **The image's labels are the read.** `server deploy`'s second run must be honestly `satisfied`, and the
 //!   five `org.holosmith.*` labels are what says an image was built by *this* binary — not a tag, which any
 //!   `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of them is a
@@ -35,6 +35,15 @@ use crate::version::VersionInfo;
 
 /// The proxy image's Dockerfile, as the file in `crates/holosmith/images/`.
 pub const PROXY_DOCKERFILE: &str = include_str!("../images/proxy.Dockerfile");
+
+/// The **generic** session image's Dockerfile: pi at the pinned version, node under it, git, CA certificates,
+/// `openssl` and `procps`, and nothing else.
+///
+/// A third recipe beside the proxy's and the agent's, and the agent image is the same session with this repository's
+/// toolchain in it — the two answer different projects rather than different moments of one. It carries no binary at
+/// all, which is the one way its build differs from the other two; `Kind::Base.context` is empty for the same reason
+/// the proxy's is.
+pub const BASE_DOCKERFILE: &str = include_str!("../images/base.Dockerfile");
 
 /// The agent image's Dockerfile, for the same reason.
 pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
@@ -90,11 +99,14 @@ pub fn smoke_image() -> String {
     format!("holosmith-smoke:{}", crate::VERSION)
 }
 
-/// Where the binary lives inside both images (`--entrypoint`, and `holosmith container snapshot`).
+/// Where the binary lives inside the proxy and agent images (`--entrypoint`, and `holosmith container snapshot`).
+///
+/// The base image carries no binary: the three `--entrypoint` sites are all proxy containers, and the one
+/// in-container entry point left, `holosmith container snapshot`, has no caller in the product path.
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
-/// The five labels an image carries (four on the proxy, plus the toolchain list on the agent), all under this
-/// build's own namespace.
+/// The labels an image carries: the four every image has, plus the toolchain list on the agent image alone, all
+/// under this build's own namespace.
 ///
 /// Read back by step 3's skip rule and by `doctor`, so the spelling is a contract: an image built by another
 /// tool and labelled differently is "not built from this binary's Dockerfile" rather than "close enough".
@@ -134,15 +146,21 @@ pub fn proxy_image() -> String {
     Kind::Proxy.image_of(crate::VERSION)
 }
 
+/// `holosmith-base:<version>`: the generic session image, which a project that is not this repository runs in.
+pub fn base_image() -> String {
+    Kind::Base.image_of(crate::VERSION)
+}
+
 /// `agent-image:<version>`: the image a session's container runs, the same name `agent_image` defaults to.
 pub fn agent_image() -> String {
     Kind::Agent.image_of(crate::VERSION)
 }
 
-/// Which of the two images.
+/// Which of the three images step 3 builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Proxy,
+    Base,
     Agent,
 }
 
@@ -151,19 +169,19 @@ impl Kind {
     pub fn dockerfile(self) -> &'static str {
         match self {
             Self::Proxy => PROXY_DOCKERFILE,
+            Self::Base => BASE_DOCKERFILE,
             Self::Agent => AGENT_DOCKERFILE,
         }
     }
 
     /// The extra entries this image's build context carries after its Dockerfile and its binary.
     ///
-    /// The agent image's are `AGENT_CONTEXT`, the six files a build vendors this tree's crates from; the proxy's are
-    /// none, because its recipe installs no Rust for a build context to reach. An empty slice rather than an
-    /// `Option`, so "this context
-    /// has no extra entries" is a list of length zero at every place one is read.
+    /// The agent image's are `AGENT_CONTEXT`, the six files a build vendors this tree's crates from; the proxy's and
+    /// the base's are none, because neither recipe installs a Rust build for a context to reach. An empty slice rather
+    /// than an `Option`, so "this context has no extra entries" is a list of length zero at every place one is read.
     pub fn context(self) -> &'static Context {
         match self {
-            Self::Proxy => &[],
+            Self::Proxy | Self::Base => &[],
             Self::Agent => &AGENT_CONTEXT,
         }
     }
@@ -181,21 +199,19 @@ impl Kind {
     pub fn image_of(self, version: &str) -> String {
         match self {
             Self::Proxy => format!("holosmith-proxy:{version}"),
+            Self::Base => format!("holosmith-base:{version}"),
             Self::Agent => format!("agent-image:{version}"),
         }
     }
 
-    /// The label keys this image carries: the proxy's three, and the agent's plus its toolchain list.
-    ///
-    /// A list rather than four constants compared by hand, so that "which labels does this image have" is one
-    /// answer that [`Expectation::mismatches`] and the tests both read.
-    /// The label keys this image carries: the proxy's four, and the agent's plus its toolchain list.
+    /// The label keys this image carries: the four every image has, and the agent's plus its toolchain list.
     ///
     /// A list rather than five constants compared by hand, so that "which labels does this image have" is one
-    /// answer that [`Expectation::mismatches`] and the tests both read.
+    /// answer that [`Expectation::mismatches`] and the tests both read. The base image is in the first arm with the
+    /// proxy: it carries the digest of the binary a build would have copied, and installs no toolchain list.
     pub fn tags(self) -> &'static [&'static str] {
         match self {
-            Self::Proxy => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_BINARY],
+            Self::Proxy | Self::Base => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_BINARY],
             Self::Agent => &[
                 LABEL_VERSION,
                 LABEL_GIT_TAG,
@@ -211,11 +227,15 @@ impl Kind {
 ///
 /// Built from a [`VersionInfo`] — which is *this* process's values for the two callers that build images for the
 /// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion
-/// — from the config's `agent_toolchains`, and from a **digest of the binary bytes the build will copy**: an image
+/// — from the config's `agent_toolchains`, and from a **digest of the binary the build is made from**: an image
 /// is current when its labels are exactly this, which is why nothing here reads a build timestamp or an image id —
 /// a rebuild of identical inputs would change both and still be current. The binary is in the list because it is
 /// the one input a tag cannot describe: two builds of the same commit (or of the same dirty tree) carry the same
 /// `git describe`, and an image built from the older one would otherwise read as current.
+///
+/// Every image carries the digest, including the base image, whose recipe copies no binary at all: the label is the
+/// **build's** fact — these bytes went into this recipe — and a rule that skipped it there would answer `satisfied`
+/// for an image built from the previous artifact as readily as the agent image would.
 ///
 /// The `kind` is a field rather than something the toolchain list implies, because the **tag** the image is read and
 /// built under is `kind`'s and now depends on the release's version: a promotion to 0.2.0 asks the daemon for
@@ -233,7 +253,8 @@ pub struct Expectation {
 }
 
 impl Expectation {
-    /// This **running binary's** values for `kind`, with the toolchains only where the Dockerfile has them.
+    /// This **running binary's** values for `kind`, with the toolchains only where the Dockerfile has them — the
+    /// agent image, and no other.
     ///
     /// It reads `binary`, because the digest is a property of those bytes and nothing else: a `Expectation`
     /// without one would be a skip rule blind to the very thing the acceptance names, so the constructor cannot
@@ -909,9 +930,9 @@ pub fn read(images: &dyn Images, expectation: &Expectation) -> Status {
     }
 }
 
-/// The images of `release` that are not on this machine or not built from its bytes, proxy first.
+/// The images of `release` that are not on this machine or not built from its bytes, proxy, base, agent.
 ///
-/// **One function with two callers**, because acceptance bullet 4 ("rebuilds the two images only when the binary or
+/// **One function with two callers**, because acceptance bullet 4 ("rebuilds the images only when the binary or
 /// a pinned version changed") has to mean one thing for `server deploy`'s step 3 and for a promotion: the read is
 /// the labels, the reason is the read's own sentence, and an empty answer is "nothing to build". The digest is the
 /// caller's because both already have one (the deploy hashes its own bytes once; a promotion has the candidate's
@@ -923,7 +944,7 @@ pub fn outstanding(
     digest: &str,
 ) -> Vec<(Kind, String)> {
     let mut pending: Vec<(Kind, String)> = Vec::new();
-    for kind in [Kind::Proxy, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
         let expectation = Expectation::of_release(kind, config, release, digest);
         // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
         // one is.
@@ -944,14 +965,15 @@ pub fn outstanding(
 /// Docker's `amd64`/`arm64` and the target triple's `x86_64`/`aarch64` — before the first build, and anything
 /// else is compared verbatim rather than guessed at.
 pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String> {
-    // A daemon that cannot answer is the same failure as a mismatch and needs the same sentence's subject: the two
-    // images nothing will build. Docker's own words about `docker version` name neither of them.
+    // A daemon that cannot answer is the same failure as a mismatch and needs the same sentence's subject: the three
+    // images nothing will build. Docker's own words about `docker version` name none of them.
     let arch = images.daemon_arch().map_err(|said| {
         format!(
             "no image was built, because this machine's daemon did not say which architecture it builds for \
-             ({said}): {} and {} are built here, and a build for another architecture is an image whose entrypoint \
-             could not start",
+             ({said}): {}, {} and {} are built here, and a build for another architecture is an image whose \
+             entrypoint could not start",
             proxy_image(),
+            base_image(),
             agent_image()
         )
     })?;
@@ -965,19 +987,21 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
         return Ok(arch);
     }
     Err(format!(
-        "this binary is {binary} and this machine's daemon builds {arch}: {} and {} would be {arch} images with \
-         a {binary} holosmith inside, whose entrypoint could not start — build this machine's artifact, or \
+        "this binary is {binary} and this machine's daemon builds {arch}: {}, {} and {} would be {arch} images \
+         with a {binary} holosmith inside, whose entrypoint could not start — build this machine's artifact, or \
          deploy from the build for {built}",
         proxy_image(),
+        base_image(),
         agent_image()
     ))
 }
 
-/// Build the images `pending` names, proxy first, answering the line's sentence; `Err` is the step's failure.
+/// Build the images `pending` names, proxy, base, agent, answering the line's sentence; `Err` is the step's failure.
 ///
-/// The order is the spec's: the proxy image is what step 4 starts, so a machine that runs out of bounds or disk
-/// has the image its proxies need before the larger one. The guard runs once, before the first build, because
-/// both images are built by the same daemon and one mismatch is enough to stop.
+/// The order is the spec's: the proxy image is what step 4 starts, so a machine that runs out of bounds or disk has
+/// the image its proxies need before the larger ones, and the base comes before the agent because it is the cheap
+/// half of the same session. The guard runs once, before the first build, because every image is built by the same
+/// daemon and one mismatch is enough to stop.
 ///
 /// `release` is the version the images are built **for** and `binary` the bytes that go inside them: the same pair
 /// for `server deploy` (this process, its own bytes) and for a promotion (the candidate, its `.sha256`). The two

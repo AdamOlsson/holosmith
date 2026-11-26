@@ -176,7 +176,7 @@ impl images::Images for Recorder {
 
     fn labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
         self.record(format!("labels:{image}"));
-        // Nothing built yet, so both images are outstanding and both are built from the candidate's bytes.
+        // Nothing built yet, so every image is outstanding and each is built from the candidate's bytes.
         Ok(None)
     }
 

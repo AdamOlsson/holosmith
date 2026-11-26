@@ -303,11 +303,11 @@ for target in "${targets[@]}"; do
     fail "$bin carries the placeholder page: it was built without web/dist (run scripts/build.sh)"
   fi
 
-  # Both Dockerfiles are `include_str!`ed into the binary, because a deploy runs on a machine that has
+  # Every Dockerfile is `include_str!`ed into the binary, because a deploy runs on a machine that has
   # the artifact and nothing else. Each file's marker comment is the evidence: read from the source, for the
   # placeholder marker's reason — a reworded marker must fail here loudly rather than leave this grep looking for
   # a string no file carries any more.
-  for dockerfile in proxy agent; do
+  for dockerfile in proxy base agent; do
     marker="$(sed -n "s/.*# holosmith: embedded \\(.*\\) image.*/\\1/p" \
       "crates/holosmith/images/$dockerfile.Dockerfile")"
     [ "$marker" = "$dockerfile" ] ||

@@ -52,7 +52,7 @@ const ENTRY_IN_CONTEXT: &str = "build-entry.sh";
 /// toolchains. The value is the SHA-256 of both files, so any edit to either one is a rebuild.
 pub const LABEL_RECIPE: &str = "org.holosmith.builder-recipe-sha256";
 
-/// The image's name, tagged with this binary's version like the two product images.
+/// The image's name, tagged with this binary's version like the product images.
 pub const IMAGE_NAME: &str = "holosmith-builder";
 
 /// One image build's bound. Six minutes of downloads on a cold machine here, so half an hour is generous and still
@@ -101,7 +101,7 @@ pub fn recipe() -> String {
 /// The ustar context the daemon reads: the recipe under the two names the context has.
 ///
 /// `images::archive`'s shape and its reason — the daemon may not share this process's filesystem, so a *path* is
-/// not a context. It carries no binary, which is one of the ways this archive differs from the two product images':
+/// not a context. It carries no binary, which is one of the ways this archive differs from the product images':
 /// those are built *from* this program, and this one builds it.
 pub fn archive() -> Vec<u8> {
     let mut out = Vec::new();

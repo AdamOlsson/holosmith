@@ -1,4 +1,4 @@
-//! The two embedded Dockerfiles, the label read and the build's own shapes (ADR-0057).
+//! The three embedded Dockerfiles, the label read and the build's own shapes (ADR-0057).
 //!
 //! Two halves, and the split is the design:
 //!
@@ -183,7 +183,7 @@ Dockerfile:2
 --------------------
 ERROR: failed to build: failed to solve: process \"/bin/sh -c curl -fsSL https://registry.example/thing.json\" did not complete successfully: exit code: 6";
 
-// ---- the two files, and the names built from them ------------------------------------------
+// ---- the three files, and the names built from them ------------------------------------------
 
 #[test]
 fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
@@ -191,9 +191,13 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
     // the binary ships: a move or a rename breaks the build, and a copy that drifted breaks this test.
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("images");
     let pin = include_str!("../../../pins/pi.txt").trim();
-    for (file, word, embedded) in [
-        ("proxy.Dockerfile", "proxy", images::PROXY_DOCKERFILE),
-        ("agent.Dockerfile", "agent", images::AGENT_DOCKERFILE),
+    // The recipe's place for the binary, and the one recipe that has none. `true` is the two images the proxy
+    // containers' `--entrypoint` reaches; the base image copies nothing, and that is asserted in its own direction
+    // below rather than excused from the loop: an assertion that skipped it would not notice a `COPY` appearing.
+    for (file, word, embedded, copies_binary) in [
+        ("proxy.Dockerfile", "proxy", images::PROXY_DOCKERFILE, true),
+        ("base.Dockerfile", "base", images::BASE_DOCKERFILE, false),
+        ("agent.Dockerfile", "agent", images::AGENT_DOCKERFILE, true),
     ] {
         let on_disk = std::fs::read_to_string(directory.join(file))
             .unwrap_or_else(|error| panic!("{file} is not readable: {error}"));
@@ -216,10 +220,19 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
                 .any(|line| line.starts_with("FROM ") && line.contains("@sha256:")),
             "the {word} Dockerfile names a base it cannot re-resolve identically"
         );
-        assert!(
-            embedded.contains(images::BINARY_IN_IMAGE),
-            "the {word} Dockerfile copies the binary somewhere else than `BINARY_IN_IMAGE` says"
-        );
+        if copies_binary {
+            assert!(
+                embedded.contains(images::BINARY_IN_IMAGE),
+                "the {word} Dockerfile copies the binary somewhere else than `BINARY_IN_IMAGE` says"
+            );
+        } else {
+            assert!(
+                !embedded.contains("COPY") && !embedded.contains(images::BINARY_IN_IMAGE),
+                "the {word} Dockerfile copies something into an image whose contract is that it holds no program of \
+                 ours: the binary's three `--entrypoint` sites are all proxy containers, and the in-container \
+                 `container snapshot` entry point has no caller in the product path"
+            );
+        }
         // The pinned pi version arrives as a build argument. A literal in the file would be a second source for the
         // pin, which `tests/pin_single_source.rs` refuses.
         assert!(
@@ -227,8 +240,72 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
             "the {word} Dockerfile spells the pinned pi version ({pin}) instead of taking it as an argument"
         );
     }
-    // The two files are different recipes, so a reader must not be able to swap one for the other unnoticed.
+    // The files are different recipes, so a reader must not be able to swap one for another unnoticed.
     assert_ne!(images::PROXY_DOCKERFILE, images::AGENT_DOCKERFILE);
+    assert_ne!(images::BASE_DOCKERFILE, images::AGENT_DOCKERFILE);
+    assert_ne!(images::BASE_DOCKERFILE, images::PROXY_DOCKERFILE);
+}
+
+#[test]
+fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_absent() {
+    // **Same base, by the same digest.** A session that moves from the base image to the agent image must not move to
+    // another distribution, and the smoke image's `the_smoke_recipe_names_the_agent_images_base` reads the agent
+    // recipe's last `FROM`: one line feeds both, so the comparison is against that line and not against the rust
+    // stage above it.
+    let last_base = |recipe: &str| -> String {
+        recipe
+            .lines()
+            .rfind(|line| line.starts_with("FROM "))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        last_base(images::BASE_DOCKERFILE),
+        last_base(images::AGENT_DOCKERFILE),
+        "the base image's base is not the agent image's"
+    );
+
+    // **The absence is the contract**, so it is asserted rather than assumed: nothing this recipe *does* installs a
+    // compiler, a Rust toolchain, a cross linker, a crate set or an npm cache, and no label claims a toolchain list.
+    // The instructions are read rather than the whole file, because the header names each of them in the sentence
+    // that says why it is not here.
+    let blocks = instructions(images::BASE_DOCKERFILE);
+    let recipe = blocks.join(" ");
+    for absent in [
+        "build-essential",
+        "rustup",
+        "cargo",
+        "file",
+        "cargo-vendor",
+        "npm-cache",
+        ".cargo/config.toml",
+        "LABEL org.holosmith.toolchains",
+        "HOLOSMITH_TOOLCHAINS",
+    ] {
+        assert!(
+            !recipe.contains(absent),
+            "the base recipe carries `{absent}` in an instruction, which is the agent image's half of the contract"
+        );
+    }
+    // What it does carry, each entry a program some code already spawns or probes for.
+    let (_, apt) = instruction(&blocks, "apt-get install");
+    for package in ["ca-certificates", "git", "openssl", "procps"] {
+        assert!(
+            apt.split_whitespace().any(|word| word == package),
+            "the base recipe's apt line does not install {package}: {apt}"
+        );
+    }
+    // pi at the pinned version, as the build argument `agent::version_of` compares against `pins/pi.txt`.
+    assert!(
+        images::BASE_DOCKERFILE.contains("@earendil-works/pi-coding-agent@${HOLOSMITH_PI_VERSION}"),
+        "the base recipe does not install pi at the version it is handed"
+    );
+    // `PI_CODING_AGENT_DIR` is an absolute path because a session's `HOME` is `/` and belongs to no writable place
+    // (ADR-0087): nothing in this image may need `$HOME`.
+    assert!(
+        images::BASE_DOCKERFILE.contains("PI_CODING_AGENT_DIR=/tmp/pi-agent"),
+        "the base recipe leaves pi's agent directory at the `$HOME` a session does not have"
+    );
 }
 
 // ---- the agent recipe's shape, asserted without a daemon --------------------------------------
@@ -481,6 +558,10 @@ fn the_image_names_carry_this_binarys_version() {
         format!("holosmith-proxy:{}", holosmith::VERSION)
     );
     assert_eq!(
+        images::base_image(),
+        format!("holosmith-base:{}", holosmith::VERSION)
+    );
+    assert_eq!(
         images::agent_image(),
         format!("agent-image:{}", holosmith::VERSION)
     );
@@ -507,10 +588,17 @@ fn the_image_names_carry_this_binarys_version() {
         4,
         "the proxy image carries no toolchain label"
     );
+    assert_eq!(
+        Kind::Base.tags().len(),
+        4,
+        "the base image installs no toolchain, so it carries no toolchain label"
+    );
     assert_eq!(Kind::Agent.tags().len(), 5);
     assert_eq!(Kind::Proxy.image(), images::proxy_image());
+    assert_eq!(Kind::Base.image(), images::base_image());
     assert_eq!(Kind::Agent.image(), images::agent_image());
     assert_eq!(Kind::Proxy.dockerfile(), images::PROXY_DOCKERFILE);
+    assert_eq!(Kind::Base.dockerfile(), images::BASE_DOCKERFILE);
     assert_eq!(Kind::Agent.dockerfile(), images::AGENT_DOCKERFILE);
 }
 
@@ -640,7 +728,7 @@ fn a_mismatch_names_the_key_and_both_values() {
     }
 
     // Arm four: another toolchain list. The proxy image has no such label at all, so the same image passes its
-    // expectation — which is the difference between the two images in one assertion.
+    // expectation — which is the difference between the agent image and the other two in one assertion.
     let mut toolchains = labels.clone();
     toolchains.insert(images::LABEL_TOOLCHAINS.to_string(), "python3".to_string());
     let sentences = agent.mismatches(&toolchains);
@@ -652,8 +740,11 @@ fn a_mismatch_names_the_key_and_both_values() {
         "{}",
         sentences[0]
     );
-    let proxy = expectation(Kind::Proxy, &config);
-    assert_eq!(proxy.mismatches(&toolchains), Vec::<String>::new());
+    // The base image is the same arm for the same reason: no toolchain list, so no key to compare.
+    for kind in [Kind::Proxy, Kind::Base] {
+        let other = expectation(kind, &config);
+        assert_eq!(other.mismatches(&toolchains), Vec::<String>::new());
+    }
 }
 
 // ---- the archive the daemon reads ----------------------------------------------------------
@@ -809,19 +900,23 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
         "tar does not see the binary's 700 bytes: {listing}"
     );
 
-    // The proxy image's context is the two entries alone: its recipe installs no Rust, so there is no crate set
-    // for it to read.
-    let proxy = images::archive(images::PROXY_DOCKERFILE, Kind::Proxy.context(), &binary)
-        .expect("the archive is written");
-    let names: Vec<String> = tar_lists(&dir, "proxy-context.tar", &proxy, "-tf")
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        names,
-        ["Dockerfile", "holosmith"],
-        "the proxy image's context is not the two entries"
-    );
+    // The proxy and base images' contexts are the two entries alone: neither recipe installs a Rust build, so there
+    // is no crate set for either to read. The base image's archive still holds the binary's bytes because the
+    // archive is one shape for every kind — and it is the one recipe that never `COPY`s them, so what a build sends
+    // and what the image holds are two different questions for it.
+    for (kind, name) in [(Kind::Proxy, "proxy"), (Kind::Base, "base")] {
+        let sent = images::archive(kind.dockerfile(), kind.context(), &binary)
+            .expect("the archive is written");
+        let names: Vec<String> = tar_lists(&dir, &format!("{name}-context.tar"), &sent, "-tf")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            names,
+            ["Dockerfile", "holosmith"],
+            "the {name} image's context is not the two entries"
+        );
+    }
 }
 
 #[test]
@@ -855,11 +950,13 @@ fn the_agent_context_is_the_six_files_the_tree_has_on_disk() {
             "{path} in the binary is not the file on disk, so an edit did not reach the image"
         );
     }
-    // The proxy image builds no Rust, so its context has no second entry to send.
-    assert!(
-        Kind::Proxy.context().is_empty(),
-        "the proxy image's context carries entries its recipe cannot read"
-    );
+    // The proxy and base images build no Rust, so their contexts have no second entry to send.
+    for kind in [Kind::Proxy, Kind::Base] {
+        assert!(
+            kind.context().is_empty(),
+            "the {kind:?} image's context carries entries its recipe cannot read"
+        );
+    }
 }
 
 #[test]
@@ -1166,7 +1263,11 @@ fn the_architecture_guard_compares_two_vocabularies() {
             "the refusal does not name {fact}: {sentence}"
         );
     }
-    for fact in [images::proxy_image(), images::agent_image()] {
+    for fact in [
+        images::proxy_image(),
+        images::base_image(),
+        images::agent_image(),
+    ] {
         assert!(
             sentence.contains(&fact),
             "the refusal does not name {fact}: {sentence}"
@@ -1450,14 +1551,14 @@ fn promoted() -> VersionInfo {
     }
 }
 
-/// The two images' label maps for `release`, keyed by tag, the way `docker image inspect` would answer them.
+/// The images' label maps for `release`, keyed by tag, the way `docker image inspect` would answer them.
 fn labelled(
     config: &Config,
     release: &VersionInfo,
     digest: &str,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut images_by_tag = BTreeMap::new();
-    for kind in [Kind::Proxy, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
         let expectation = Expectation::of_release(kind, config, release, digest);
         images_by_tag.insert(expectation.tag(), labels_of(&expectation));
     }
@@ -1470,8 +1571,8 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     let digest = images::own_digest().expect("the test binary is readable");
     let release = promoted();
 
-    // Arm one: both images already carry this release's labels. Nothing to build, and the read asked about the
-    // **candidate's** tags — `holosmith-proxy:9.9.9`, not the running binary's 0.1.0.
+    // Arm one: every image already carries this release's labels. Nothing to build, and the read asked about the
+    // **candidate's** tags — `holosmith-proxy:9.9.9`, not the running binary's 0.1.0 — in the order they are built.
     let fake = Tagged::answering(labelled(&config, &release, &digest));
     let pending = images::outstanding(&fake, &config, &release, &digest);
     assert!(pending.is_empty(), "{pending:?}");
@@ -1479,16 +1580,19 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
         fake.asked(),
         [
             format!("holosmith-proxy:{}", release.version),
+            format!("holosmith-base:{}", release.version),
             format!("agent-image:{}", release.version)
         ],
         "the read asked about the wrong tags"
     );
 
-    // Arm two: a different binary's bytes. Both images are stale — the digest is the one input a tag cannot
-    // describe (ADR-0057), and a promotion has to rebuild for the bytes it is making live.
+    // Arm two: a different binary's bytes. Every image is stale — the digest is the one input a tag cannot
+    // describe (ADR-0057), and a promotion has to rebuild for the bytes it is making live. The base image's label
+    // counts here even though its recipe copies no binary: the label is the build's fact, and a rule that skipped it
+    // there would leave a promotion serving an image built from the previous artifact.
     let fake = Tagged::answering(labelled(&config, &release, "0".repeat(64).as_str()));
     let pending = images::outstanding(&fake, &config, &release, &digest);
-    assert_eq!(pending.len(), 2, "{pending:?}");
+    assert_eq!(pending.len(), 3, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
             reason.contains("binary-sha256"),
@@ -1496,14 +1600,14 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
         );
     }
 
-    // Arm three: the pin changed. **Both** recipes carry it (the proxy image labels the pin its Dockerfile was
-    // built against, because a proxy that reaches a provider is the thing a pin bump is usually about), so both are
-    // stale — the acceptance's "or a pinned version changed", measured in its own direction.
+    // Arm three: the pin changed. **Every** recipe carries it (the proxy image labels the pin its Dockerfile was
+    // built against, because a proxy that reaches a provider is the thing a pin bump is usually about), so all three
+    // are stale — the acceptance's "or a pinned version changed", measured in its own direction.
     let mut newer_pin = release.clone();
     newer_pin.pi_version = "0.0.0-not-the-pin".to_string();
     let fake = Tagged::answering(labelled(&config, &release, &digest));
     let pending = images::outstanding(&fake, &config, &newer_pin, &digest);
-    assert_eq!(pending.len(), 2, "{pending:?}");
+    assert_eq!(pending.len(), 3, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
             reason.contains("pi-version"),
@@ -1511,13 +1615,13 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
         );
     }
 
-    // Arm four: a version this machine has never built. Both tags are missing, which is a build rather than a
+    // Arm four: a version this machine has never built. Every tag is missing, which is a build rather than a
     // comparison — the same answer a first deploy gives.
     let mut newer = release.clone();
     newer.version = "10.0.0".to_string();
     let fake = Tagged::answering(BTreeMap::new());
     let pending = images::outstanding(&fake, &config, &newer, &digest);
-    assert_eq!(pending.len(), 2, "{pending:?}");
+    assert_eq!(pending.len(), 3, "{pending:?}");
     for (_, reason) in &pending {
         assert!(reason.contains("is not on this machine"), "{reason}");
     }

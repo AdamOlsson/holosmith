@@ -38,7 +38,7 @@ Both run ahead of the phases, and neither is counted as one.
 | `test` | `cargo test`, with `HOLOSMITH_REQUIRE_WEB=1` when `web/dist` is present | 430 s warm | 740 unit tests and 72 integration binaries, against a real daemon where one is there; 94 s of the 430 is relinking |
 | `migrations` | `cargo test --test schema_previous` | 2 s | the previous release's schema is still a subset of this build's |
 | `quick` | `case_gate_quick` | 16 s | the worker gate's contract — its names, refusals, footer — and one real run of it |
-| `cleanup` | `case_gate_cleanup` | 7 s | the cleanup script's contract: the marker it kills by, the prefix it does not, the lock |
+| `cleanup` | `case_gate_cleanup` | 7 s | the cleanup script's contract: the marker it kills by, the prefix it does not, the lock, and a registered checkout this host cannot see skipped rather than refused |
 | `build` | `scripts/build.sh` | 188 s warm, 317 s after a change | `npm test`, the web build, both musl artifacts, and `check-static.sh` (statically linked, empty `readelf -d`, plus two empty-root container runs and the aarch64 one under qemu) |
 | `embed` | `scripts/check-embed.sh` | 52 s | app present, app absent (placeholder), app required and absent (red) |
 | `serve` | every case in `serve_cases` (112) against `dist/<host-triple>/holosmith` | 1952 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
@@ -70,7 +70,7 @@ names the check behind every verdict.
 | docker backend | 8 | 37 s | the preflight, the hardened `.git` mounts on a real daemon, an agent launch, a resume, a turn, reconcile and its orphan sweep, the isolation selftest |
 | proxies | 7 | 14 s | key, MCP and egress proxies by their bytes (with a stand-in `openssl`), the Internet-access toggle on two real networks, the preview listener |
 | doctor and disk | 5 | 21 s | `--quick`, the tool-key finding, `--full`, the disk floor and the disk quota |
-| images and builds | 6 | 1584 s | the two product images, the session's toolchain in a container, the containerised release build, an offline build, the smoke run |
+| images and builds | 6 | 1584 s | the three product images, the session's toolchain in a container, the containerised release build, an offline build, the smoke run |
 | promotion and release | 3 of 4 (`upgrade` skipped here) | 53 s | `upgrade`'s arms, `rollback`'s four arms, a promotion from the app and the update it performs |
 | deploy, install, service | 9 of 10 (`server_service` failed here) | 38 s | `server deploy`, the three install renderings, the root refusal, the unit and the keys, `deploy --ssh`, `status`, `logs`, `uninstall` |
 
@@ -106,7 +106,7 @@ A `SKIP` with its reason is a fact about *this machine*, never a defect in the t
 | `$HOLOSMITH_TEST_IMAGE` (default `pi-agent:local`) | the mount and reconcile cases, and the two install cases |
 | python3 | the cases that read a database or speak a socket by hand, and `case_web_update` (it needs `free_port`) |
 | `qemu-aarch64-static` | the aarch64 execution inside `build.sh` |
-| a network for one pinned base | the two product images: a host that cannot fetch is red here, not quiet |
+| a network for one pinned base | the three product images: a host that cannot fetch is red here, not quiet |
 | a path short enough for `AF_UNIX` | `case_upgrade` and `case_web_update`, which bind a socket under the checkout and print `SKIP … the socket path is <n> bytes and AF_UNIX caps one at 107` instead |
 
 ## Four traps this run hit, in the order they bite

@@ -56,7 +56,7 @@ use crate::images;
 pub const LINE_PREFIX: &str = "deploy: ssh: ";
 
 /// How long `ssh` may spend connecting before the child fails. The deploy that follows may legitimately take
-/// minutes (step 3 builds two images), so the bound is on the **connect**, which is the part that would otherwise
+/// minutes (step 3 builds three images), so the bound is on the **connect**, which is the part that would otherwise
 /// hang on a machine that is asleep.
 pub const CONNECT_TIMEOUT: u32 = 20;
 

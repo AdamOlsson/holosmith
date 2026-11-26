@@ -256,7 +256,7 @@ pub enum DeployStep {
     /// 2. The install tree under the root: the config file, the data root, the secrets (with the provider and the
     ///    VAPID keys), and the read of whether the account running this deploy may open the daemon's socket.
     Files,
-    /// 3. The two images embedded in the binary.
+    /// 3. The three images embedded in the binary.
     Images,
     /// 4. The `egress` network and the machine's three proxies.
     Proxies,
@@ -311,7 +311,7 @@ impl DeployStep {
 
     /// What the step is about to do, present tense, for the begin line [`Progress::begin`] carries.
     ///
-    /// The phrase exists for the one silence a report cannot break: step 3 builds two images and the first build
+    /// The phrase exists for the one silence a report cannot break: step 3 builds three images and the first build
     /// downloads pi, so a first install is minutes of nothing. A phrase is a **duration expectation** as much as a
     /// description — "a first install downloads pi, so this takes minutes" is what tells a reader that the silence is
     /// work rather than a hang — which is why it lives here, beside [`Self::word`], and not in a caller's formatting.
@@ -322,7 +322,7 @@ impl DeployStep {
             Self::Preflight => "asking `doctor --quick` about this machine",
             Self::Files => "reading and writing the install tree, the config and the secrets",
             Self::Images => {
-                "building the two images — a first install downloads pi, so this takes minutes"
+                "building the three images — a first install downloads pi, so this takes minutes"
             }
             Self::Proxies => "starting the `egress` network and the machine's three proxies",
             Self::Service => "writing the systemd unit",
@@ -1765,7 +1765,7 @@ fn failed_with_fix(step: DeployStep, sentence: String, fix: String) -> Line {
     }
 }
 
-/// Step 3: the two images, built from the Dockerfiles embedded in this binary (ADR-0057).
+/// Step 3: the three images, built from the Dockerfiles embedded in this binary (ADR-0057, ADR-0114).
 ///
 /// The answer is the step's line **and** whether the build that stopped it could not fetch a pinned source: that second
 /// bit is the one failure here that is not a verdict about the tree, and [`Report::unanswered`] carries it to
@@ -1792,7 +1792,8 @@ fn images_line(
         Ok(digest) => digest,
         Err(sentence) => return (failed(DeployStep::Images, sentence), false),
     };
-    // Both expectations up front, so the loop below and the `satisfied` sentence read the same two values.
+    // The agent image's expectation is built here as well as `outstanding`'s own, because the `satisfied` sentence
+    // reads its toolchain list and its values: one spelling of what step 3 would build, for both sentences.
     //
     // `outstanding` is the read's one home: a promotion asks the same question for another release's
     // version and digest, so the *rule* -- labels, proxy first, the read's own sentence as the reason -- must not
@@ -1802,18 +1803,19 @@ fn images_line(
     let pending: Vec<(ImageKind, String)> = images::outstanding(machine, config, &release, &digest);
     let remark = image_remark(config);
     if pending.is_empty() {
-        // The proxy image carries four labels and the agent image five — the toolchain list is the agent's, because
-        // the proxy installs no toolchain — so the sentence gives the shared four one clause and the agent's list
-        // its own. The digest is clipped: a line an operator reads with 64 hex characters in it is a line nobody
-        // finishes, and the twelve characters it does carry are enough to see two builds differ.
+        // The proxy and the base image carry four labels and the agent image five — the toolchain list is the agent's,
+        // because neither other recipe installs a toolchain — so the sentence gives the shared four one clause and the
+        // agent's list its own. The digest is clipped: a line an operator reads with 64 hex characters in it is a line
+        // nobody finishes, and the twelve characters it does carry are enough to see two builds differ.
         return (
             Line {
                 step: DeployStep::Images,
                 word: Word::Satisfied,
                 sentence: format!(
-                    "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, and \
-                     the agent image's toolchains {}{remark}",
+                    "{}, {} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, \
+                     and the agent image's toolchains {}{remark}",
                     ImageKind::Proxy.image(),
+                    ImageKind::Base.image(),
                     ImageKind::Agent.image(),
                     agent.version,
                     agent.git_tag,
