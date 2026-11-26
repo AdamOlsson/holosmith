@@ -1,11 +1,17 @@
 # holosmith: embedded agent image
 #
-# This is the image a session's container runs: pi at the pinned version, git, the toolchains the config names
-# in `agent_toolchains`, and this binary for the helper subcommands (`container snapshot`, `proxy`).
+# This is this repository's own session image: pi at the pinned version, git, the Debian packages below that the gate
+# needs, and this binary for the helper subcommands (`container snapshot`, `proxy`). A machine whose projects are this
+# tree points `base_image` at it; the generic `base.Dockerfile` is the default, and a project that needs a package of
+# its own builds an image `FROM` that one — a `docker/Dockerfile` of its own, `docker build -t <name> …` — and
+# names it in `base_image`, rather than configuring a package list here.
 #
-# It also carries the Rust toolchain — rustc, cargo, rustfmt, clippy, both musl targets and both musl.cc cross
-# linkers — as part of the **fixed** set, not as an `agent_toolchains` entry: the tree a session works on is written
-# in Rust, so `cargo fmt`, `cargo clippy` and `cargo test` are the same three commands in there as on a host.
+# Everything this recipe installs is **fixed**. There is no package key and no toolchain label: a package a project
+# needs goes in the image it builds for itself from its own `docker/Dockerfile`, which `base_image` then names, and
+# the set here is what this repository's own gate and tree are measured to need. The Rust toolchain — rustc, cargo,
+# rustfmt, clippy, both musl targets and both musl.cc cross linkers — is the largest part of it: the tree a session
+# works on is written in Rust, so `cargo fmt`, `cargo clippy` and `cargo test` are the same three commands in there as
+# on a host.
 #
 # **The Docker daemon stays outside, and the gate is not therefore a host's work alone.** A session's container carries
 # no daemon, because a container with the socket can reach the host as root, and that is the isolation this product is:
@@ -85,10 +91,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/tmp/cargo \
     PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:/opt/aarch64-linux-musl-cross/bin:${PATH}
 
-# The two facts a `RUN` below spends, declared above it because an `ARG` is in scope of every instruction after it:
-# `HOLOSMITH_PI_VERSION` is the pi version the install step pins, and `HOLOSMITH_TOOLCHAINS` is the *configurable*
-# package list, which never names the Rust toolchain — rust is part of this recipe, so a machine cannot remove it and
-# its version is the `FROM` line's rather than a config value's.
+# The one fact a `RUN` below spends, declared above it because an `ARG` is in scope of every instruction after it:
+# `HOLOSMITH_PI_VERSION` is the pi version the install step pins. Every package this recipe installs is a literal in
+# the line below, and a bump of the toolchain's own version is the `FROM` line's.
 #
 # **A build argument's scope is a cache boundary.** A `RUN` is in scope of every argument declared above it, and
 # BuildKit puts that scope in the instruction's cache key whether or not the instruction names the value. So an
@@ -98,16 +103,23 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 # what every release hands this recipe, and neither may cost a rebuild of the toolchain or the pinned downloads
 # (ADR-0115).
 ARG HOLOSMITH_PI_VERSION
-ARG HOLOSMITH_TOOLCHAINS
 
 # `build-essential` is the `cc` the `cc` crate needs for bundled SQLite — a session that runs `cargo test` compiles
 # it from source — `curl` is what fetches the two musl.cc tarballs below, at image-build time, and `file` is what
 # `scripts/check-static.sh` reads an artifact's link state with (`file -b`), so `scripts/build.sh` — whose last step
 # that script is — cannot finish in a session without it. The `readelf` it also runs arrives with `build-essential`.
 # `procps` is `/bin/kill`, the child the header says `smoke` needs and cannot get from a shell builtin.
+#
+# **`python3` and `ripgrep` are fixed here rather than configurable, and `python3` is the reason they cannot leave.**
+# `scripts/verify-in-container.sh` runs this image as the gate's own machine, and `scripts/verify.sh` asks
+# `command -v python3` before every case that speaks a socket or reads a database by hand — each of those guards turns
+# its measurement into a `SKIP` when the program is missing, and a `SKIP` measures nothing. So the package is part of
+# the recipe: an image without it is a gate that quietly runs fewer cases. `ripgrep` has no reader here at all and
+# moves with it rather than being separated; a package of a *project's* own goes in the image that project builds for
+# itself from its own `docker/Dockerfile`, which `base_image` then names.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential ca-certificates curl file git openssl procps \
-      ${HOLOSMITH_TOOLCHAINS} \
+      python3 ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
 # **Load-bearing**: `rust:1.99.1-bookworm` ships rustup's minimal profile, which is rustc, cargo and the standard
@@ -234,12 +246,13 @@ ENV npm_config_cache=/opt/npm-cache \
 
 COPY holosmith /usr/local/bin/holosmith
 
-# The facts this binary knows about itself plus the toolchain list, passed in as build arguments and written as
-# labels: `server deploy` compares them with its own values to decide whether an image is current, and `doctor`
-# prints them. The binary's digest is among them because a git tag cannot tell two builds of the same commit (or
-# of the same dirty tree) apart, and the deploy's skip rule is about the *binary*.
+# The facts this binary knows about itself, passed in as build arguments and written as labels: `server deploy`
+# compares them with its own values to decide whether an image is current, and `doctor` prints them. The binary's
+# digest is among them because a git tag cannot tell two builds of the same commit (or of the same dirty tree) apart,
+# and the deploy's skip rule is about the *binary*. There is no label for the package set: the set is a literal in
+# this recipe, so the recipe's own digest — which this binary embeds — is what says it changed.
 #
-# Declared **here**, after the last `RUN`, for the reason stated with the two arguments above: a value nothing above
+# Declared **here**, after the last `RUN`, for the reason stated with the argument above: a value nothing above
 # this line reads may not be in the cache key of a step that does not read it (ADR-0115).
 ARG HOLOSMITH_VERSION
 ARG HOLOSMITH_GIT_TAG
@@ -248,8 +261,7 @@ ARG HOLOSMITH_BINARY_SHA256
 LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.git-tag="${HOLOSMITH_GIT_TAG}" \
       org.holosmith.pi-version="${HOLOSMITH_PI_VERSION}" \
-      org.holosmith.binary-sha256="${HOLOSMITH_BINARY_SHA256}" \
-      org.holosmith.toolchains="${HOLOSMITH_TOOLCHAINS}"
+      org.holosmith.binary-sha256="${HOLOSMITH_BINARY_SHA256}"
 
 USER node
 ENV PI_CODING_AGENT_DIR=/tmp/pi-agent

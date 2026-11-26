@@ -3,9 +3,9 @@
 //! The command is two depths of **one list**, because that is how the spec uses it: `doctor --quick` is what
 //! `server deploy` step 1 runs and what the unit file runs as `ExecStartPre` (item 10 §5), and `doctor --full`
 //! is item 10 §7 — run *after* the deploy, once the machine is already serving — which adds the egress
-//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state, the
-//! agent image's pi version and one line per tool row saying whether the key this machine stores for it still
-//! answers ([`tool_key`], ADR-0101).
+//! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state, the pi
+//! version and labels of the image `base_image` names, and one line per tool row saying whether the key this
+//! machine stores for it still answers ([`tool_key`], ADR-0101).
 //!
 //! Three rules hold the design together:
 //!
@@ -249,7 +249,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
         // the unit's `ExecStartPre` (item 10 §5), and a machine whose notification channel is missing must still boot.
         // See [`openssl`].
         findings.push(openssl(&tools.preflight.openssl));
-        let image = config.agent_image.as_str();
+        let image = config.base_image.as_str();
         // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
         // asked them at all (item 10 §6), and a server whose daemon did not answer is a different fact. Saying
         // "the docker check above failed" on a hub would name a line the report does not have.
@@ -278,7 +278,7 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
             docker_ok,
             because,
         ));
-        findings.push(image_check(config, machine, image, docker_ok, because));
+        findings.push(image_check(machine, image, docker_ok, because));
         // One finding per tool row, after the container questions so those stay contiguous. A stored tool key is a
         // value `serve` reads per request, so whether it still answers is the one fact a rotation cannot show
         // without a session: `doctor --full` asks it here (ADR-0101).
@@ -1198,25 +1198,20 @@ fn proxy(
     )
 }
 
-/// Whether the configured agent image runs the pi this binary is built for **and carries this binary's labels**
-/// (spec's build-and-release note: "`doctor` fails if the agent image's pi differs from it").
+/// Whether the configured session image — the one `base_image` names — runs the pi this binary is built for **and
+/// carries this binary's labels** (spec's build-and-release note: "`doctor` fails if the agent image's pi differs
+/// from it").
 ///
 /// The pi question is the same two functions asserts with at a launch — [`agent::version_of`] and
 /// [`agent::version_check`] — asked on demand, so the sentence an operator reads here is the one a session would
 /// fail with. The labels are the second half the pi version cannot answer: an image can run the pinned pi and
-/// still carry toolchains or a git tag that this binary did not build, which is why `server deploy`'s step 3
+/// still carry a git tag or a digest that this binary did not build, which is why `server deploy`'s step 3
 /// compares the same four keys (ADR-0057).
 ///
 /// An image with **no** Holosmith labels at all is a pass, on the pi sentence plus a remark saying what could not
 /// be compared: `pi-agent:local` is a supported way to run a session, and a doctor that failed on it would
 /// refuse a machine the spec allows.
-fn image_check(
-    config: &Config,
-    machine: &dyn Machine,
-    image: &str,
-    docker_ok: bool,
-    because: &str,
-) -> Finding {
+fn image_check(machine: &dyn Machine, image: &str, docker_ok: bool, because: &str) -> Finding {
     if !docker_ok {
         return Finding::unknown(
             Check::Image,
@@ -1232,8 +1227,8 @@ fn image_check(
             return Finding::fail(
                 Check::Image,
                 format!(
-                    "the agent image {image} did not run ({said}): build it with `holosmith server deploy`'s \
-                     step 3, or point `agent_image` at an image that has pi"
+                    "the session image {image} did not run ({said}): build it with `holosmith server deploy`'s \
+                     step 3, or point `base_image` at an image that has pi"
                 ),
             );
         }
@@ -1246,7 +1241,7 @@ fn image_check(
     // a doctor that compared the label set without one could not tell an image built from last week's artifact from
     // one built from this one (ADR-0057).
     let expected = match crate::images::own_digest() {
-        Ok(digest) => Expectation::of_digest(Kind::Agent, config, &digest),
+        Ok(digest) => Expectation::of_digest(Kind::Base, &digest),
         Err(sentence) => return Finding::fail(Check::Image, sentence),
     };
     match machine.image_labels(image) {
@@ -1256,7 +1251,7 @@ fn image_check(
         Ok(None) => Finding::fail(
             Check::Image,
             format!(
-                "the agent image {image} ran `pi --version` and then was not there when its labels were read: the \
+                "the session image {image} ran `pi --version` and then was not there when its labels were read: the \
                  daemon is answering two questions about the same image inconsistently"
             ),
         ),
@@ -1266,7 +1261,7 @@ fn image_check(
         Ok(Some(labels)) if expected.unbuilt(&labels) => Finding::pass(
             Check::Image,
             format!(
-                "the agent image {image} runs pi {found}, which is the pinned one, and it carries no Holosmith \
+                "the session image {image} runs pi {found}, which is the pinned one, and it carries no Holosmith \
                  labels: it was not built from this binary's Dockerfile, so there is nothing to compare"
             ),
         ),
@@ -1276,21 +1271,20 @@ fn image_check(
                 return Finding::pass(
                     Check::Image,
                     format!(
-                        "the agent image {image} runs pi {found} and carries this binary's labels (version {}, \
-                         git tag {}, pi {}, binary sha256 {}…, toolchains {})",
+                        "the session image {image} runs pi {found} and carries this binary's labels (version {}, \
+                         git tag {}, pi {}, binary sha256 {}…)",
                         expected.version,
                         expected.git_tag,
                         expected.pi_version,
                         &expected.binary[..12],
-                        expected.toolchains.unwrap_or_default().join(" ")
                     ),
                 );
             }
             Finding::fail(
                 Check::Image,
                 format!(
-                    "the agent image {image} is not this binary's build: {} — `holosmith server deploy`'s step 3 \
-                     rebuilds it, or point `agent_image` at another image",
+                    "the session image {image} is not this binary's build: {} — `holosmith server deploy`'s step 3 \
+                     rebuilds it, or point `base_image` at another image",
                     mismatches.join("; ")
                 ),
             )
@@ -1300,7 +1294,7 @@ fn image_check(
         Err(said) => Finding::fail(
             Check::Image,
             format!(
-                "the agent image {image} runs pi {found}, but its labels could not be read ({said}): building it \
+                "the session image {image} runs pi {found}, but its labels could not be read ({said}): building it \
                  with `holosmith server deploy`'s step 3 is the fix a label read that failed points at"
             ),
         ),
@@ -1577,20 +1571,19 @@ mod tests {
     #[test]
     fn a_missing_image_names_the_build_and_the_key() {
         let finding = image_check(
-            &Config::default(),
             &NoDaemon,
-            "agent-image:test",
+            "holosmith-base:test",
             true,
             "the docker check above failed",
         );
         assert_eq!(finding.outcome, Outcome::Fail);
         assert!(
-            finding.sentence.contains("agent-image:test"),
+            finding.sentence.contains("holosmith-base:test"),
             "{}",
             finding.sentence
         );
         assert!(
-            finding.sentence.contains("agent_image"),
+            finding.sentence.contains("base_image"),
             "{}",
             finding.sentence
         );

@@ -684,7 +684,7 @@ fn the_expectation_a_promotion_builds_carries_the_candidates_values() {
         return;
     };
     let digest = images::digest(&world.candidate).expect("the candidate is readable");
-    let expectation = Expectation::of_release(Kind::Proxy, &world.config, &world.info, &digest);
+    let expectation = Expectation::of_release(Kind::Proxy, &world.info, &digest);
     assert_eq!(expectation.version, world.info.version);
     assert_eq!(expectation.git_tag, world.info.git_tag);
     assert_eq!(expectation.pi_version, world.info.pi_version);

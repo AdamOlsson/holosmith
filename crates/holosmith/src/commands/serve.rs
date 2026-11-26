@@ -167,7 +167,7 @@ pub fn run(args: ServeArgs) -> ExitCode {
             // a machine that cannot verify is not the same fact as a machine that was measured to leak (and a
             // machine whose image is not built yet must still serve) — ADR-0044.
             let names = crate::selftest::Names::of(&loaded.config);
-            let outcome = crate::selftest::run(&docker, &names, &loaded.config.agent_image);
+            let outcome = crate::selftest::run(&docker, &names, &loaded.config.base_image);
             if let Some(complaint) = outcome.complaint() {
                 complaints.push(complaint);
             }

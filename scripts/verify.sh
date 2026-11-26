@@ -860,7 +860,7 @@ case_agent_launch() {
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
   # The image is a key, and so is every limit, so the boot proves the config carries them into a real `docker
   # run`. `idle_stop_min = 0` because this boot lasts seconds and a sweeper would only be noise.
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 512\ncontainer_pids = 128\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 512\ncontainer_pids = 128\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$projects" "$image" >"$WORK/config-agent.toml"
   start_serve "$WORK/config-agent.toml" "$data"
 
@@ -1012,7 +1012,7 @@ case_docker_resume() {
   git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$projects" "$image" >"$WORK/config-resume-agent.toml"
   start_serve "$WORK/config-resume-agent.toml" "$data"
 
@@ -1143,7 +1143,7 @@ case_docker_turn() {
   git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$projects" "$image" >"$WORK/config-turn-agent.toml"
   start_serve "$WORK/config-turn-agent.toml" "$data"
 
@@ -1280,7 +1280,7 @@ case_docker_turn() {
 # shipped artifact against a real repository. The branch and the snapshot ref survive, the worktree and the
 # session directory do not, and the command the 202 carried recovers the work — the story's demo, as a gate.
 #
-# It needs the daemon and `agent_image` for the session to reach `idle` (a create provisions a real
+# It needs the daemon and `base_image` for the session to reach `idle` (a create provisions a real
 # container), so a machine without them prints one SKIP line; the keep-rule is still proven there by
 # `tests/worktree.rs`, which needs no daemon at all. The cleanup is explicit rather than a trap because a
 # gate case that fails should still not leave the next run a container to trip over.
@@ -1305,7 +1305,7 @@ case_delete_keeps_the_work() {
   git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$projects" "$image" >"$WORK/config-keeps.toml"
   start_serve "$WORK/config-keeps.toml" "$data"
 
@@ -2205,7 +2205,7 @@ case_reconcile_orphans() {
   git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work in $repo"
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$projects" "$image" >"$WORK/config-reconcile-orphans.toml"
   start_serve "$WORK/config-reconcile-orphans.toml" "$data"
 
@@ -2347,7 +2347,7 @@ case_network_selftest() {
   stop_serve
   rm -rf "$root"
   mkdir -p "$root/projects" || fail "$name/mkdir" "could not create $root"
-  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$root/projects" "$image" >"$WORK/config-selftest.toml"
   HOLOSMITH_LOG=debug
   export HOLOSMITH_LOG
@@ -3097,7 +3097,7 @@ case_internet_toggle() {
   # `allow = ["crates.io"]` on purpose: a 403 is only evidence of an allow-list if the list is not empty.
   # `[linear] mcp = "write"` on purpose too: it is what makes every start write the session's `mcp.json`, so the
   # file the assertions below read is the backend's rather than an operator's.
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n\n[linear]\nmcp = "write"\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n\n[egress]\nallow = ["crates.io"]\n\n[linear]\nmcp = "write"\n' \
     "$owner" "$projects" "$data" "$image" >"$WORK/config-toggle.toml"
   # Two real keys are present for this boot, so "the session never sees them" is measured rather than true by
   # absence: one provider key and one tool key. The session's own `models.json` and `mcp.json` carry the dummy; `hs_key`
@@ -4508,7 +4508,7 @@ case_stopped_expiry() {
   git -C "$repo" init --quiet -b main . || fail "$name/git" "git init did not work in $repo"
   git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
     --allow-empty -m "the first commit" || fail "$name/git" "git commit did not work"
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$root/projects" "$image" >"$WORK/config-expiry.toml"
   start_serve "$WORK/config-expiry.toml" "$data"
 
@@ -8958,7 +8958,6 @@ case "\$1" in
         HOLOSMITH_GIT_TAG=*) json="\$json\"org.holosmith.git-tag\":\"\${argument#*=}\"," ;;
         HOLOSMITH_PI_VERSION=*) json="\$json\"org.holosmith.pi-version\":\"\${argument#*=}\"," ;;
         HOLOSMITH_BINARY_SHA256=*) json="\$json\"org.holosmith.binary-sha256\":\"\${argument#*=}\"," ;;
-        HOLOSMITH_TOOLCHAINS=*) json="\$json\"org.holosmith.toolchains\":\"\${argument#*=}\"," ;;
       esac
     done
     case "\$tag" in
@@ -10774,9 +10773,9 @@ case_docker_preflight() {
 # **reads** step 6 (`tailscale serve status --json`), so this half puts the shim on PATH; that read and the
 # `/api/health` wait are the two machine facts a plan cannot be made without.
 #
-# The **online** half needs the daemon and an image `agent_image` names (today a `docker tag` of the test image,
-# which this case does not build — step 3 builds `agent-image:<version>`, and the line says the config's
-# `agent_image` names something else): a real install into a root under `target/` — step 2's paths with their
+# The **online** half needs the daemon and an image `base_image` names (today a `docker tag` of the test image,
+# which this case does not build — step 3 builds `holosmith-base:<version>`, and the line says the config's
+# `base_image` names something else): a real install into a root under `target/` — step 2's paths with their
 # modes, step 3's images, step 4's three containers, step 5's unit and step 6's health — and then the same command
 # again, where all six steps say `satisfied`, the tree's listing and the installed config's bytes are identical and
 # `keys.toml` was not rewritten. That is the acceptance's "the second run changes nothing", as a comparison rather
@@ -10802,7 +10801,7 @@ preview_listen = "127.0.0.1:$preview"
 control_origin = "http://localhost:$control"
 preview_origin = "http://localhost:$preview"
 docker_host = "$docker_host"
-agent_image = "$image"
+base_image = "$image"
 min_free_gb = 1
 EOF
   # 0644 because this is the file `server deploy` installs, and `perms` compares the config `--config` names against
@@ -11483,7 +11482,7 @@ disk_floor_answer() {
 #             shim still reports 15 GB, and the session is not stopped again inside this case because the next pass
 #             is five minutes away — which is the interval doing its job, not a hole.
 #
-# It needs the daemon **and** an `agent_image`, because a worktree is the Docker backend's (a stub session has no
+# It needs the daemon **and** a `base_image`, because a worktree is the Docker backend's (a stub session has no
 # worktree column at all, ADR-0015) and the row has to reach `idle` for the sweep to see it. `tests/quota.rs`
 # covers both ladder rungs, the under-the-cap arm, an unmeasurable worktree, `session_disk_soft_gb = 0` and the
 # arithmetic without a daemon, so a `SKIP` here is not the bug this case exists to catch.
@@ -11519,7 +11518,7 @@ case_disk_quota() {
   # case-specific one. It is deliberately *below* the shipped default of 20, because a cap above the stand-in's
   # answer would name a session that never crossed it (ADR-0107). `min_free_gb = 1` because
   # the gate's `/tmp` is small and this case is not about the floor.
-  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nagent_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\nturn_timeout_min = 0\nsession_disk_soft_gb = 10\n' \
+  printf 'owner = "%s"\nmax_live_sessions = 2\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\nturn_timeout_min = 0\nsession_disk_soft_gb = 10\n' \
     "$owner" "$root/projects" "$data" "$image" >"$WORK/config-disk-quota.toml"
 
   saved_path="$PATH"
@@ -11795,19 +11794,20 @@ SHIM
 # the step 3: the three images, built from the Dockerfiles embedded in the artifact, and what is inside them.
 #
 # This is the one case whose subject is the *build*: `holosmith-proxy:<version>` is what step 4's proxies run,
-# `agent-image:<version>` is what a session's container runs, and `holosmith-base:<version>` is the same session
-# without this repository's toolchain (ADR-0114) — so both the labels a later deploy compares and the images' own
+# `holosmith-base:<version>` is the session image the config defaults to, and `agent-image:<version>` is that same
+# session with this repository's toolchain (ADR-0114) — so both the labels a later deploy compares and the images' own
 # contents are measured here, against a real daemon. It owns the **absent** state — it removes all three tags first —
 # because a build that only ever ran on a machine that already had the images would prove nothing.
 #
 # Five measurements, one per claim:
 #
-#   labels    every tag carries version, git tag, pinned pi and the binary's digest; the agent image carries the
-#             toolchain list as well, and the proxy and base images carry none. That is the read step 3's skip rule
-#             and `doctor` make (ADR-0057).
-#   agent     inside the image: `pi --version` is the pin, git answers, both toolchains are installed, the uid is
-#             1000 (ADR-0035), and this binary runs `container snapshot --help` — the helper subcommand a session
-#             needs and the one thing a hand-built `pi-agent:local` does not have.
+#   labels    every tag carries version, git tag, pinned pi and the binary's digest, and **no** tag carries a
+#             toolchain label: a recipe's package set is fixed, so there is no list for a label to carry. That is the
+#             read step 3's skip rule and `doctor` make (ADR-0057).
+#   agent     inside the image: `pi --version` is the pin, git answers, python3 and ripgrep are installed (the two
+#             packages that moved out of the config and into the recipe), the uid is 1000 (ADR-0035), and this
+#             binary runs `container snapshot --help` — the helper subcommand a session needs and the one thing a
+#             hand-built `pi-agent:local` does not have.
 #   base      inside the image, as a uid that is neither root nor the image's own user (a session's shape, ADR-0087):
 #             `pi --version` is the pin, git answers, the isolation probe's `node -e` runs, and `command -v cargo`
 #             answers nothing — the absence is the contract, so it is measured rather than asserted.
@@ -11842,7 +11842,7 @@ case_server_images() {
   version="$(sed -n 's/^version //p' <<<"$plain")"
   tag="$(sed -n 's/^git_tag //p' <<<"$plain")"
   pin="$(tr -d '[:space:]' <"$repo_root/pins/pi.txt")"
-  # The fifth label's value: the artifact's own bytes. `sha256sum` is what an operator would run to check it.
+  # The digest label's value: the artifact's own bytes. `sha256sum` is what an operator would run to check it.
   sha="$(sha256sum "$artifact" | cut -d' ' -f1)"
   [ -n "$version" ] && [ -n "$tag" ] && [ -n "$pin" ] && [ -n "$sha" ] ||
     fail "$name/version" "the artifact's version report is incomplete: $plain"
@@ -11870,7 +11870,7 @@ case_server_images() {
   chmod 600 "$root/keys.toml"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
   preview="$(free_port)" || fail "$name/port" "could not ask the kernel for a second port"
-  # `deploy_config`'s shape with one difference: `agent_image` names the image this step is about to build, so a
+  # `deploy_config`'s shape with one difference: `base_image` names the image this step is about to build, so a
   # session's container would run what the deploy installed. `data_root` and `projects_root` stay at their defaults
   # because `--root` prefixes them, and this case's `--root` is under `target/` (ADR-0035's mount-source rule).
   images_config "$WORK/config-images.toml" "$control" "$preview" "$version"
@@ -11922,17 +11922,15 @@ case_server_images() {
       esac
     done
   done
-  # The fourth label, and only on the agent image: the toolchain list the config gave it.
-  labels="$(docker image inspect --format '{{json .Config.Labels}}' "$agent" 2>/dev/null)"
-  case "$labels" in
-    *'"org.holosmith.toolchains":"python3 ripgrep"'*) assertions=$((assertions + 1)) ;;
-    *) fail "$name/labels/toolchains" "the agent image does not carry its toolchain list: $labels" ;;
-  esac
-  for image in "$proxy" "$base"; do
+  # And no image carries a toolchain label, on all three: the package set is a literal in each recipe, so there is
+  # nothing for a label to carry and nothing for a skip rule to compare. This is the absence that ends where the
+  # configurable list used to be, measured rather than assumed — a label that came back would make an image read
+  # stale for a value no key configures.
+  for image in "$proxy" "$base" "$agent"; do
     labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)"
     case "$labels" in
       *'"org.holosmith.toolchains"'*)
-        fail "$name/labels/toolchains" "$image carries the agent image's toolchain label: $labels"
+        fail "$name/labels/toolchains" "$image carries a toolchain label, which no recipe writes: $labels"
         ;;
     esac
     assertions=$((assertions + 1))
@@ -12091,9 +12089,9 @@ case_server_images() {
 
   # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
   # the label comparison read back through its other caller — and it runs the self-test, which is the measurement
-  # that the agent image can be a session's image at all. This one is deliberately **not** given the shim: a
-  # Tailscale that cannot be asked is `unknown` here, which is not a failure, and the deploy above is where the
-  # origins were measured.
+  # that the image this config names can be a session's image at all. This one is deliberately **not** given the
+  # shim: a Tailscale that cannot be asked is `unknown` here, which is not a failure, and the deploy above is where
+  # the origins were measured.
   status=0
   "$artifact" doctor --full --config "$WORK/config-images.toml" --root "$root/install" \
     >"$WORK/$name.doctor.out" 2>&1 || status=$?
@@ -13934,9 +13932,10 @@ case_agent_offline_build() {
   rm -rf "$root"
 }
 
-# The config `case_server_images` deploys: `deploy_config`'s shape with `agent_image` naming the tag step 3 builds.
-# A second function rather than an argument to `deploy_config`, because that case deliberately names an image built
-# by hand — which is what makes its step 3's remark about `agent_image` a fact of that machine.
+# The config `case_server_images` deploys: `deploy_config`'s shape with `base_image` naming the tag step 3 builds,
+# `holosmith-base:<version>`. A second function rather than an argument to `deploy_config`, because that case
+# deliberately names an image built by hand — which is what makes its step 3's remark about `base_image` a fact of
+# that machine, and this one's step 3 silent about it.
 images_config() {
   local path="$1" control="$2" preview="$3" version="$4"
   cat >"$path" <<EOF
@@ -13948,7 +13947,7 @@ preview_listen = "127.0.0.1:$preview"
 control_origin = "http://localhost:$control"
 preview_origin = "http://localhost:$preview"
 docker_host = "unix:///var/run/docker.sock"
-agent_image = "agent-image:$version"
+base_image = "holosmith-base:$version"
 min_free_gb = 1
 EOF
   chmod 0644 "$path"
@@ -14762,7 +14761,7 @@ case_install() {
     printf 'operator:x:%s:%s::%s:/bin/sh\n' "$run_uid" "$run_gid" "$home"
   } >"$passwd"
   # The machine's own answers where the deploy asks for a program, so the two manager commands below are the only
-  # children whose argv this case asserts. `agent_image` names `$image`, the image the runner starts, so the config and
+  # children whose argv this case asserts. `base_image` names `$image`, the image the runner starts, so the config and
   # the container agree on a machine whose `HOLOSMITH_TEST_IMAGE` names an image that is not the default.
   deploy_config "$config" "$control" "$preview" "unix:///var/run/docker.sock" "$image" "hub"
   log="$logs/tailscale.log"
@@ -15595,7 +15594,7 @@ case_doctor_full() {
   # namespace, and the proxies mount this binary at its own path. **The two listeners are in the file**, because
   # `serve --port 0` would leave the config naming a port nothing listens on; `--root "$root"` is what points
   # `doctor` at this case's tree, its four install paths being the root's (ADR-0086 D1).
-  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\nmax_live_sessions = 1\nprojects_root = "%s"\nagent_image = "%s"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+  printf 'owner = "%s"\nrole = "server"\nbackend = "docker"\nmax_live_sessions = 1\nprojects_root = "%s"\nbase_image = "%s"\ndata_root = "%s"\ncontrol_listen = "127.0.0.1:%s"\npreview_listen = "127.0.0.1:%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
     "$owner" "$root/projects" "$image" "$data" "$control" "$preview" >"$WORK/config-doctor-full.toml"
   # 0644 for the data root's reason above: `perms` compares the config against what `server deploy` writes, and a
   # redirect under this shell's umask is 0664. The file `--config` names is the file the check reads.

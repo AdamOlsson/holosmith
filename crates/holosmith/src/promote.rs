@@ -402,13 +402,12 @@ pub fn execute(
     // The sink is the silent one, and the label names this pipeline's step rather than a deploy's: a promotion prints
     // a line per step of its own as it goes (`<verb>: images: …`), so a build's two lines would be a second spelling
     // of one progress stream — `install` is the verb whose silence the sink exists for (ADR-0092).
-    let pending = images::outstanding(steps.images(), config, &candidate.info, &candidate.digest);
+    let pending = images::outstanding(steps.images(), &candidate.info, &candidate.digest);
     match images::ensure(
         steps.images(),
         &candidate.path,
         &candidate.digest,
         &candidate.info,
-        config,
         &pending,
         "images",
         &mut progress::Silent,

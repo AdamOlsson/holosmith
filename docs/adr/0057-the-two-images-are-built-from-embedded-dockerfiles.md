@@ -13,6 +13,10 @@ The demo is the same claim from the other side: a fresh host ends with `holosmit
 decision is about, but there are **three** recipes now — `holosmith-base:<version>` is a second session image beside
 the agent image — so "the two images" everywhere below is the count this decision was written with.
 
+**Superseded in part by ADR-0117:** there is no `org.holosmith.toolchains` label any more. A recipe's package set is
+a literal in the recipe, so an image carries four labels — version, git tag, pinned pi and the binary's digest — and
+the toolchain list is not one of them.
+
 The reason a decision is needed at all is that a Dockerfile is a file and a deploy runs on a machine that has
 the artifact and nothing else. "So that there is no separate artifact to keep in sync" is a statement about
 *where the recipe lives*, and every decision below follows from putting it in the binary, together with what

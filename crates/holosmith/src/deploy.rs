@@ -1446,7 +1446,7 @@ pub(crate) fn read_name(tools: &Tools) -> Result<String, String> {
 /// first line keeps its `N. files: needs: 10 actions:` shape and a gate greps it the way it always has.
 ///
 /// `remark` is the clause a few steps carry about what the run does *not* do — the account's group membership, the
-/// unit's install line, an `agent_image` this step does not build. It sits after the count rather than after the last
+/// unit's install line, a `base_image` this step does not build. It sits after the count rather than after the last
 /// action, because it is a statement about the whole step: a reader who skimmed the list would otherwise take the
 /// actions for the run's whole effect. It starts with `; `, which is why the count's own colon gives way to it.
 fn counted(items: &[String], remark: &str) -> String {
@@ -1792,36 +1792,33 @@ fn images_line(
         Ok(digest) => digest,
         Err(sentence) => return (failed(DeployStep::Images, sentence), false),
     };
-    // The agent image's expectation is built here as well as `outstanding`'s own, because the `satisfied` sentence
-    // reads its toolchain list and its values: one spelling of what step 3 would build, for both sentences.
+    // One expectation's values are the `satisfied` sentence's, because all three images carry the same four labels:
+    // version, git tag, pinned pi and the binary's digest. One spelling of what step 3 would build, for both
+    // sentences.
     //
     // `outstanding` is the read's one home: a promotion asks the same question for another release's
     // version and digest, so the *rule* -- labels, proxy first, the read's own sentence as the reason -- must not
     // live twice.
     let release = crate::version::VersionInfo::current();
-    let agent = Expectation::of_release(ImageKind::Agent, config, &release, &digest);
-    let pending: Vec<(ImageKind, String)> = images::outstanding(machine, config, &release, &digest);
+    let built = Expectation::of_release(ImageKind::Base, &release, &digest);
+    let pending: Vec<(ImageKind, String)> = images::outstanding(machine, &release, &digest);
     let remark = image_remark(config);
     if pending.is_empty() {
-        // The proxy and the base image carry four labels and the agent image five — the toolchain list is the agent's,
-        // because neither other recipe installs a toolchain — so the sentence gives the shared four one clause and the
-        // agent's list its own. The digest is clipped: a line an operator reads with 64 hex characters in it is a line
-        // nobody finishes, and the twelve characters it does carry are enough to see two builds differ.
+        // The digest is clipped: a line an operator reads with 64 hex characters in it is a line nobody finishes,
+        // and the twelve characters it does carry are enough to see two builds differ.
         return (
             Line {
                 step: DeployStep::Images,
                 word: Word::Satisfied,
                 sentence: format!(
-                    "{}, {} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…, \
-                     and the agent image's toolchains {}{remark}",
+                    "{}, {} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…{remark}",
                     ImageKind::Proxy.image(),
                     ImageKind::Base.image(),
                     ImageKind::Agent.image(),
-                    agent.version,
-                    agent.git_tag,
-                    agent.pi_version,
-                    &agent.binary[..12],
-                    agent.toolchains.unwrap_or_default().join(" ")
+                    built.version,
+                    built.git_tag,
+                    built.pi_version,
+                    &built.binary[..12],
                 ),
                 fix: None,
             },
@@ -1857,7 +1854,7 @@ fn images_line(
     };
     let label = DeployStep::Images.label();
     match images::ensure(
-        machine, &binary, &digest, &release, config, &pending, &label, progress,
+        machine, &binary, &digest, &release, &pending, &label, progress,
     ) {
         Ok(sentence) => (
             Line {
@@ -1877,20 +1874,26 @@ fn images_line(
     }
 }
 
-/// What step 3 must say when the config's `agent_image` is not the name it builds.
+/// What step 3 must say when the config's `base_image` is not one of the names it builds.
 ///
-/// Never a failure: `agent_image` is what a session's container runs, and an operator may point it at an image
-/// built by hand (`pi-agent:local`). But a deploy that has just built `agent-image:<version>` while the config
-/// names something else has installed an image no session will use, and a line that said nothing would leave
-/// that to be discovered at a launch.
+/// Never a failure: `base_image` is the image Holosmith owns and a project extends, and an operator may point it at
+/// an image built by hand (`pi-agent:local`) — that is the escape hatch a development machine and the gate use. But
+/// a deploy that has just built step 3's three images while the config names something else has installed an image
+/// no session will use, and a line that said nothing would leave that to be discovered at a launch.
 fn image_remark(config: &Config) -> String {
-    let built = images::agent_image();
-    if config.agent_image == built {
+    // Every name the step builds is a name the config may carry: a machine whose projects are this tree names
+    // `agent-image:<version>`, and a line saying of it "which this step does not build" would be false.
+    let built = [
+        images::proxy_image(),
+        images::base_image(),
+        images::agent_image(),
+    ];
+    if built.contains(&config.base_image) {
         return String::new();
     }
     format!(
-        "; the config's `agent_image` names {}, which this step does not build",
-        config.agent_image
+        "; the config's `base_image` names {}, which this step does not build",
+        config.base_image
     )
 }
 

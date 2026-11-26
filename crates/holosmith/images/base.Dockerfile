@@ -1,8 +1,11 @@
 # holosmith: embedded base image
 #
 # The **generic** session image: pi at the pinned version, node under it, git, CA certificates, `openssl` and `procps`
-# — and nothing else. It is what a project that is not this repository runs a session in; `agent.Dockerfile` is the
-# same session with this tree's toolchain, crate set and npm cache in it.
+# — and nothing else. It is what a project that is not this repository runs a session in, and it is what the config's
+# `base_image` defaults to, so a machine that never touched the key runs its sessions in this image.
+# `agent.Dockerfile` is the same session with this tree's toolchain, crate set and npm cache in it, and a project
+# that needs a package of its own builds its own image `FROM` this one — a `docker/Dockerfile` of its own,
+# `docker build -t <name> …`, named in `base_image` — rather than configuring a list.
 #
 # Every entry below is a fact some code already relies on:
 #
@@ -70,10 +73,10 @@ RUN npm install -g --omit=dev "@earendil-works/pi-coding-agent@${HOLOSMITH_PI_VE
  && npm cache clean --force
 
 # The facts this binary knows about itself, passed in as build arguments and written as labels. `server deploy`'s
-# step 3 compares them with its own values to decide whether an image is current, and `doctor` prints the agent
-# image's as the one a session runs. There is no `HOLOSMITH_TOOLCHAINS`: this recipe installs no toolchain, so there
-# is no list to carry and no `org.holosmith.toolchains` label — a key for an empty value would be a label that says
-# nothing while costing a rebuild rule.
+# step 3 compares them with its own values to decide whether an image is current, and `doctor` compares the image a
+# machine's `base_image` names. These four are every label an image has: a recipe's package set is fixed in the recipe,
+# so there is no list to carry, and an image built by a release whose recipe differed is stale through the digest of
+# the binary that embeds that recipe.
 #
 # Declared **here**, after the last `RUN`, for the reason stated with the argument above: a value nothing above this
 # line reads may not be in the cache key of a step that does not read it (ADR-0115).

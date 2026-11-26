@@ -253,7 +253,7 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
 - **`$HOLOSMITH_TEST_IMAGE`** (default `pi-agent:local`): a Docker image with `sh`, `git` **and `node`** (the
   network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
   and the two mount/reconcile cases. The two install cases run the artifact in it too, as the machine the command hands
-  a home of its own (ADR-0108). It is run as the config's `agent_image`, so a development machine may point
+  a home of its own (ADR-0108). It is run as the config's `base_image`, so a development machine may point
   that key at an image it tagged by hand; the three product images are `holosmith-proxy:<version>`,
   `holosmith-base:<version>` and `agent-image:<version>` (ADR-0057, ADR-0114).
 - **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here. It is machine-local and
@@ -330,7 +330,7 @@ the two. Facts that cost an hour when you learn them the hard way:
   `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`). "Ready" is a protocol fact — a `get_state` command
   and the `response` that repeats its id, under a 30 s bound — and the pi version is asserted against `pins/pi.txt`
   once per process. Every start is `docker rm -f` then `docker run`, serialised per session (ADR-0037).
-- **The isolation is measured at every boot** (ADR-0044): a probe from `agent_image` on a temporary internal
+- **The isolation is measured at every boot** (ADR-0044): a probe from `base_image` on a temporary internal
   network. `Passed` is a debug line, `Unknown` (no image, no daemon, a probe that did not finish) one warn, and
   `Failed` refuses the boot with the sentence naming what was reached. `hub` and `stub` run neither, and
   `tests/selftest.rs` prints one `SKIP` without a daemon.
@@ -339,7 +339,7 @@ the two. Facts that cost an hour when you learn them the hard way:
 
 Three checks no gate may run, because they need **a real provider key**. `case_key_proxy` covers the half that
 needs none (a stand-in `openssl` on `PATH`, asserting the bytes the proxy produces), and the by-hand procedure
-is below. It needs a daemon and `agent_image`, a git repository under `projects_root`, a data root under
+is below. It needs a daemon and `base_image`, a git repository under `projects_root`, a data root under
 `target/`, and `min_free_gb` low enough for the machine.
 
 - **Never put the key on argv**: `… holosmith key set <provider>` reads it from **stdin**.

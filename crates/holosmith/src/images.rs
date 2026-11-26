@@ -28,7 +28,6 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::config::Config;
 use crate::docker::Docker;
 use crate::progress::Progress;
 use crate::version::VersionInfo;
@@ -51,9 +50,9 @@ pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
 /// The **smoke** image's recipe (spec item 10 step 2): the candidate as `pi`, on the agent image's base.
 ///
 /// A third recipe rather than a variant of the agent image, because the two answer different questions: the agent
-/// image is what a session runs in production (pi at the pinned version, git, the toolchains), and this one exists so
-/// a *candidate binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`, never by
-/// `server deploy` — it is not what a promotion ships, and the ADR says so.
+/// image is what a session runs in production (pi at the pinned version, git, this repository's toolchain), and this
+/// one exists so a *candidate binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`,
+/// never by `server deploy` — it is not what a promotion ships, and the ADR says so.
 pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
 
 /// The entries a build context carries, each written under the path it is named by, with the text the daemon reads
@@ -105,15 +104,18 @@ pub fn smoke_image() -> String {
 /// in-container entry point left, `holosmith container snapshot`, has no caller in the product path.
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
-/// The labels an image carries: the four every image has, plus the toolchain list on the agent image alone, all
-/// under this build's own namespace.
+/// The labels an image carries: the four facts this binary knows about itself, all under this build's own namespace.
 ///
 /// Read back by step 3's skip rule and by `doctor`, so the spelling is a contract: an image built by another
 /// tool and labelled differently is "not built from this binary's Dockerfile" rather than "close enough".
+///
+/// There is no label for the recipe's package set. The set is fixed — python3, ripgrep and the Rust toolchain are
+/// part of the recipe — so there is no list a machine could change and nothing for a label to carry, and an image
+/// built by a release that still wrote `org.holosmith.toolchains` is not current because the recipe it was built
+/// from is not this one.
 pub const LABEL_VERSION: &str = "org.holosmith.version";
 pub const LABEL_GIT_TAG: &str = "org.holosmith.git-tag";
 pub const LABEL_PI: &str = "org.holosmith.pi-version";
-pub const LABEL_TOOLCHAINS: &str = "org.holosmith.toolchains";
 /// The SHA-256 of the binary bytes the image was built from — the label that makes the skip rule see a
 /// **rebuilt** artifact.
 ///
@@ -151,7 +153,9 @@ pub fn base_image() -> String {
     Kind::Base.image_of(crate::VERSION)
 }
 
-/// `agent-image:<version>`: the image a session's container runs, the same name `agent_image` defaults to.
+/// `agent-image:<version>`: this repository's own image, with the Rust toolchain, the crate set and the npm cache
+/// in it. It is a product image and not a config key: a session runs the image `base_image` names, which defaults to
+/// [`base_image`].
 pub fn agent_image() -> String {
     Kind::Agent.image_of(crate::VERSION)
 }
@@ -204,43 +208,32 @@ impl Kind {
         }
     }
 
-    /// The label keys this image carries: the four every image has, and the agent's plus its toolchain list.
+    /// The label keys this image carries: the four facts every image has.
     ///
-    /// A list rather than five constants compared by hand, so that "which labels does this image have" is one
-    /// answer that [`Expectation::mismatches`] and the tests both read. The base image is in the first arm with the
-    /// proxy: it carries the digest of the binary a build would have copied, and installs no toolchain list.
+    /// A list rather than four constants compared by hand, so that "which labels does this image have" is one
+    /// answer that [`Expectation::mismatches`] and the tests both read.
     pub fn tags(self) -> &'static [&'static str] {
-        match self {
-            Self::Proxy | Self::Base => &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_BINARY],
-            Self::Agent => &[
-                LABEL_VERSION,
-                LABEL_GIT_TAG,
-                LABEL_PI,
-                LABEL_BINARY,
-                LABEL_TOOLCHAINS,
-            ],
-        }
+        &[LABEL_VERSION, LABEL_GIT_TAG, LABEL_PI, LABEL_BINARY]
     }
 }
 
 /// What one image's labels must say, from a release's own values.
 ///
 /// Built from a [`VersionInfo`] — which is *this* process's values for the two callers that build images for the
-/// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion
-/// — from the config's `agent_toolchains`, and from a **digest of the binary the build is made from**: an image
-/// is current when its labels are exactly this, which is why nothing here reads a build timestamp or an image id —
-/// a rebuild of identical inputs would change both and still be current. The binary is in the list because it is
-/// the one input a tag cannot describe: two builds of the same commit (or of the same dirty tree) carry the same
-/// `git describe`, and an image built from the older one would otherwise read as current.
+/// binary they are running (`server deploy`'s step 3 and `doctor`), and the **candidate's** for a promotion — and
+/// from a **digest of the binary the build is made from**: an image is current when its labels are exactly this,
+/// which is why nothing here reads a build timestamp or an image id — a rebuild of identical inputs would change
+/// both and still be current. The binary is in the list because it is the one input a tag cannot describe: two
+/// builds of the same commit (or of the same dirty tree) carry the same `git describe`, and an image built from the
+/// older one would otherwise read as current.
 ///
 /// Every image carries the digest, including the base image, whose recipe copies no binary at all: the label is the
 /// **build's** fact — these bytes went into this recipe — and a rule that skipped it there would answer `satisfied`
 /// for an image built from the previous artifact as readily as the agent image would.
 ///
-/// The `kind` is a field rather than something the toolchain list implies, because the **tag** the image is read and
-/// built under is `kind`'s and now depends on the release's version: a promotion to 0.2.0 asks the daemon for
-/// `holosmith-proxy:0.2.0`, which is what the *new* boot will run, not `holosmith-proxy:0.1.0` — the tag of the
-/// binary doing the promoting.
+/// The `kind` is a field because the **tag** the image is read and built under is `kind`'s, and that depends on the
+/// release's version: a promotion to 0.2.0 asks the daemon for `holosmith-proxy:0.2.0`, which is what the *new*
+/// boot will run, not `holosmith-proxy:0.1.0` — the tag of the binary doing the promoting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expectation {
     pub kind: Kind,
@@ -249,18 +242,16 @@ pub struct Expectation {
     pub pi_version: String,
     /// Lowercase hex SHA-256 of the program the build's archive hands the daemon.
     pub binary: String,
-    pub toolchains: Option<Vec<String>>,
 }
 
 impl Expectation {
-    /// This **running binary's** values for `kind`, with the toolchains only where the Dockerfile has them — the
-    /// agent image, and no other.
+    /// This **running binary's** values for `kind`.
     ///
     /// It reads `binary`, because the digest is a property of those bytes and nothing else: a `Expectation`
     /// without one would be a skip rule blind to the very thing the acceptance names, so the constructor cannot
     /// produce it.
-    pub fn of(kind: Kind, config: &Config, binary: &Path) -> Result<Self, String> {
-        Ok(Self::of_digest(kind, config, &digest(binary)?))
+    pub fn of(kind: Kind, binary: &Path) -> Result<Self, String> {
+        Ok(Self::of_digest(kind, &digest(binary)?))
     }
 
     /// The same expectation from a digest the caller already computed.
@@ -270,8 +261,8 @@ impl Expectation {
     /// nobody asked for. Nothing can invent a digest this way that is not a file's: the only producer of the
     /// argument in the product is [`own_digest`], and the tests take theirs from the same function or from
     /// [`digest`] over the artifact they build.
-    pub fn of_digest(kind: Kind, config: &Config, binary: &str) -> Self {
-        Self::of_release(kind, config, &VersionInfo::current(), binary)
+    pub fn of_digest(kind: Kind, binary: &str) -> Self {
+        Self::of_release(kind, &VersionInfo::current(), binary)
     }
 
     /// The expectation for **another release**: the candidate a promotion is about to make live.
@@ -280,14 +271,13 @@ impl Expectation {
     /// builds images the *candidate* will run — its version in the tag, its git tag, its pinned pi, and its digest,
     /// which is the bytes the archive hands the daemon. Reading the running binary's values there would label a
     /// 0.2.0 image as 0.1.0's, and the next boot would find no image at the tag it asks for.
-    pub fn of_release(kind: Kind, config: &Config, release: &VersionInfo, binary: &str) -> Self {
+    pub fn of_release(kind: Kind, release: &VersionInfo, binary: &str) -> Self {
         Self {
             kind,
             version: release.version.clone(),
             git_tag: release.git_tag.clone(),
             pi_version: release.pi_version.clone(),
             binary: binary.to_string(),
-            toolchains: (kind == Kind::Agent).then(|| config.agent_toolchains.clone()),
         }
     }
 
@@ -296,7 +286,7 @@ impl Expectation {
         self.kind.image_of(&self.version)
     }
 
-    /// The label keys this image is expected to carry: the proxy's four, and the agent's plus its toolchain list.
+    /// The label keys this image is expected to carry.
     fn keys(&self) -> &'static [&'static str] {
         self.kind.tags()
     }
@@ -308,10 +298,6 @@ impl Expectation {
             LABEL_GIT_TAG => Some(self.git_tag.clone()),
             LABEL_PI => Some(self.pi_version.clone()),
             LABEL_BINARY => Some(self.binary.clone()),
-            LABEL_TOOLCHAINS => self
-                .toolchains
-                .as_ref()
-                .map(|toolchains| toolchains.join(" ")),
             _ => None,
         }
     }
@@ -320,11 +306,6 @@ impl Expectation {
     ///
     /// The sentence names the label by its last word (`pi-version`, not `org.holosmith.pi-version`) and carries
     /// both values, because the operator's question is "what did I build against" and the fix is a rebuild.
-    ///
-    /// An **empty toolchain list** is the one expectation a missing label satisfies: `--build-arg
-    /// HOLOSMITH_TOOLCHAINS=` gives the Dockerfile an empty value, and whether a `LABEL key=""` survives in
-    /// `Config.Labels` is the daemon's business, not the machine's. A machine whose image installs no extra
-    /// package must not rebuild on every deploy (nor fail `doctor`) because of an empty string.
     pub fn mismatches(&self, labels: &BTreeMap<String, String>) -> Vec<String> {
         let mut sentences = Vec::new();
         for key in self.keys() {
@@ -333,7 +314,6 @@ impl Expectation {
             };
             match labels.get(*key) {
                 Some(found) if *found == wanted => {}
-                None if wanted.is_empty() => {}
                 Some(found) => sentences.push(format!(
                     "its {} label says {found}, and this binary's is {wanted}",
                     label_word(key)
@@ -362,21 +342,15 @@ impl Expectation {
 
     /// `(key, value)` pairs as the Dockerfile receives them: `--build-arg KEY=value`, once per pair.
     ///
-    /// The toolchain list is one space-separated value, because that is what `${HOLOSMITH_TOOLCHAINS}` has to be
-    /// for the `apt-get install` line to read it as several packages — and the image's label carries the same
-    /// string, because a `LABEL` line has no way to rewrite what it was given. One spelling on both sides is what
-    /// makes the read and the build agree.
+    /// The four are the labels' and nothing else: every value here is written by a `LABEL` line and read back by
+    /// the skip rule, and one spelling on both sides is what makes the read and the build agree.
     pub fn build_args(&self) -> Vec<(String, String)> {
-        let mut pairs = vec![
+        vec![
             ("HOLOSMITH_VERSION".to_string(), self.version.clone()),
             ("HOLOSMITH_GIT_TAG".to_string(), self.git_tag.clone()),
             ("HOLOSMITH_PI_VERSION".to_string(), self.pi_version.clone()),
             ("HOLOSMITH_BINARY_SHA256".to_string(), self.binary.clone()),
-        ];
-        if let Some(toolchains) = &self.toolchains {
-            pairs.push(("HOLOSMITH_TOOLCHAINS".to_string(), toolchains.join(" ")));
-        }
-        pairs
+        ]
     }
 }
 
@@ -387,7 +361,6 @@ fn label_word(key: &str) -> &'static str {
         LABEL_GIT_TAG => "git-tag",
         LABEL_PI => "pi-version",
         LABEL_BINARY => "binary-sha256",
-        LABEL_TOOLCHAINS => "toolchains",
         _ => "label",
     }
 }
@@ -1004,13 +977,12 @@ pub fn read(images: &dyn Images, expectation: &Expectation) -> Status {
 /// `.sha256`), and `release` is the version whose tag the images are read under.
 pub fn outstanding(
     images: &dyn Images,
-    config: &Config,
     release: &VersionInfo,
     digest: &str,
 ) -> Vec<(Kind, String)> {
     let mut pending: Vec<(Kind, String)> = Vec::new();
     for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
-        let expectation = Expectation::of_release(kind, config, release, digest);
+        let expectation = Expectation::of_release(kind, release, digest);
         // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
         // one is.
         match read(images, &expectation) {
@@ -1094,7 +1066,6 @@ pub fn ensure(
     binary: &Path,
     digest: &str,
     release: &VersionInfo,
-    config: &Config,
     pending: &[(Kind, String)],
     label: &str,
     progress: &mut dyn Progress,
@@ -1110,7 +1081,7 @@ pub fn ensure(
     // clause is the sentence's, and one step is one sentence. The sink still hears every line.
     let mut warned = false;
     for (kind, _) in pending {
-        let expectation = Expectation::of_release(*kind, config, release, digest);
+        let expectation = Expectation::of_release(*kind, release, digest);
         let tag = expectation.tag();
         let archive = archive(kind.dockerfile(), kind.context(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
@@ -1369,7 +1340,6 @@ mod tests {
             &binary,
             &digest,
             &release,
-            &Config::default(),
             &pending,
             "images",
             &mut sink,
@@ -1405,7 +1375,6 @@ mod tests {
                 &binary,
                 &digest,
                 &release,
-                &Config::default(),
                 &pending,
                 "images",
                 &mut sink,

@@ -434,7 +434,6 @@ fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
             "HOLOSMITH_GIT_TAG" => images::LABEL_GIT_TAG,
             "HOLOSMITH_PI_VERSION" => images::LABEL_PI,
             "HOLOSMITH_BINARY_SHA256" => images::LABEL_BINARY,
-            "HOLOSMITH_TOOLCHAINS" => images::LABEL_TOOLCHAINS,
             _ => continue,
         };
         // The label carries what the argument carried: the Dockerfile's `LABEL` line has no way to rewrite it.
@@ -444,11 +443,11 @@ fn labels_from_args(args: &[String]) -> BTreeMap<String, String> {
 }
 
 /// The labels an image built by this binary carries, as `docker image inspect` would answer them.
-fn expected_labels(kind: ImageKind, config: &Config) -> BTreeMap<String, String> {
+fn expected_labels(kind: ImageKind) -> BTreeMap<String, String> {
     // The digest this process would build from, memoised by the product itself: the test binary is tens of
     // megabytes and an unoptimised SHA-256 is slow, and the production path asks the same question.
     let digest = images::own_digest().expect("the test binary is readable");
-    let expectation = Expectation::of_digest(kind, config, &digest);
+    let expectation = Expectation::of_digest(kind, &digest);
     labels_from_args(&images::build_arguments(&kind.image(), &expectation))
 }
 
@@ -1693,18 +1692,9 @@ fn step_three_is_satisfied_when_every_image_carries_this_binarys_labels() {
     let root = rooted(&dir, "root");
     let deployed = root.config(&config);
     let machine = Fake::new()
-        .with_labels(
-            &images::proxy_image(),
-            expected_labels(ImageKind::Proxy, &deployed),
-        )
-        .with_labels(
-            &images::base_image(),
-            expected_labels(ImageKind::Base, &deployed),
-        )
-        .with_labels(
-            &images::agent_image(),
-            expected_labels(ImageKind::Agent, &deployed),
-        );
+        .with_labels(&images::proxy_image(), expected_labels(ImageKind::Proxy))
+        .with_labels(&images::base_image(), expected_labels(ImageKind::Base))
+        .with_labels(&images::agent_image(), expected_labels(ImageKind::Agent));
 
     let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
 
@@ -1716,7 +1706,6 @@ fn step_three_is_satisfied_when_every_image_carries_this_binarys_labels() {
         images::agent_image(),
         holosmith::VERSION.to_string(),
         holosmith::pins::pi_version().to_string(),
-        "python3 ripgrep".to_string(),
     ] {
         assert!(
             step.sentence.contains(&fact),
@@ -1732,6 +1721,61 @@ fn step_three_is_satisfied_when_every_image_carries_this_binarys_labels() {
 }
 
 #[test]
+fn step_three_says_when_the_configs_image_is_not_the_one_it_builds() {
+    // `base_image` is the escape hatch — a machine may run its sessions in an image built by hand
+    // (`pi-agent:local`), which is how a development machine and the gate do it. So the mismatch is never a
+    // failure, and it is never silent either: a deploy that has just built `holosmith-base:<version>` while the
+    // config names something else has installed an image no session will use, and the step's own line is where
+    // that is said.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-remark");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.base_image = "pi-agent:local".to_string();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let machine = Fake::new()
+        .with_labels(&images::proxy_image(), expected_labels(ImageKind::Proxy))
+        .with_labels(&images::base_image(), expected_labels(ImageKind::Base))
+        .with_labels(&images::agent_image(), expected_labels(ImageKind::Agent));
+
+    let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
+    let step = line(&planned, DeployStep::Images);
+    assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
+    for fact in [
+        "`base_image` names pi-agent:local".to_string(),
+        "this step does not build".to_string(),
+    ] {
+        assert!(
+            step.sentence.contains(&fact),
+            "the line does not say the config names another image: {}",
+            step.sentence
+        );
+    }
+    assert!(
+        !step.sentence.contains("session"),
+        "the remark still talks about what a session runs, and the key is the image this deploy owns: {}",
+        step.sentence
+    );
+
+    // The other arm: a name step 3 *does* build is a name the config may carry, so the remark must not fire.
+    // `agent-image:<version>` is what a machine whose projects are this tree names, and a line saying of it "which
+    // this step does not build" would be false about a tag the same step had just built.
+    config.base_image = images::agent_image();
+    let root = rooted(&dir, "root-agent-images");
+    let deployed = root.config(&config);
+    let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
+    let step = line(&planned, DeployStep::Images);
+    assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
+    assert!(
+        !step.sentence.contains("base_image"),
+        "the line remarks on the config's image, and the config names one this step builds: {}",
+        step.sentence
+    );
+}
+
+#[test]
 fn step_three_names_the_label_that_differs() {
     // The read is the labels and not the tag: the agent image is there under its right name and says another pi
     // version, which is exactly the image an upgrade has to rebuild.
@@ -1742,20 +1786,14 @@ fn step_three_names_the_label_that_differs() {
     let config = config(Some(format!("unix://{}", socket.display())));
     let root = rooted(&dir, "root");
     let deployed = root.config(&config);
-    let mut agent = expected_labels(ImageKind::Agent, &deployed);
+    let mut agent = expected_labels(ImageKind::Agent);
     agent.insert(
         images::LABEL_PI.to_string(),
         "0.0.0-not-the-pinned-one".to_string(),
     );
     let machine = Fake::new()
-        .with_labels(
-            &images::proxy_image(),
-            expected_labels(ImageKind::Proxy, &deployed),
-        )
-        .with_labels(
-            &images::base_image(),
-            expected_labels(ImageKind::Base, &deployed),
-        )
+        .with_labels(&images::proxy_image(), expected_labels(ImageKind::Proxy))
+        .with_labels(&images::base_image(), expected_labels(ImageKind::Base))
         .with_labels(&images::agent_image(), agent);
 
     let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
@@ -1802,17 +1840,11 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
     let config = config(Some(format!("unix://{}", socket.display())));
     let root = rooted(&dir, "root");
     let deployed = root.config(&config);
-    let mut agent = expected_labels(ImageKind::Agent, &deployed);
+    let mut agent = expected_labels(ImageKind::Agent);
     agent.insert(images::LABEL_BINARY.to_string(), "0".repeat(64));
     let machine = Fake::new()
-        .with_labels(
-            &images::proxy_image(),
-            expected_labels(ImageKind::Proxy, &deployed),
-        )
-        .with_labels(
-            &images::base_image(),
-            expected_labels(ImageKind::Base, &deployed),
-        )
+        .with_labels(&images::proxy_image(), expected_labels(ImageKind::Proxy))
+        .with_labels(&images::base_image(), expected_labels(ImageKind::Base))
         .with_labels(&images::agent_image(), agent);
 
     let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
