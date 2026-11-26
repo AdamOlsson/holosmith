@@ -43,15 +43,17 @@
 # that reason, and it is the only writable place this recipe names.
 FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
-# The facts this binary knows about itself, passed in as build arguments and written as labels. `server deploy`'s
-# step 3 compares them with its own values to decide whether an image is current, and `doctor` prints the agent
-# image's as the one a session runs. There is no `HOLOSMITH_TOOLCHAINS`: this recipe installs no toolchain, so there
-# is no list to carry and no `org.holosmith.toolchains` label — a key for an empty value would be a label that says
-# nothing while costing a rebuild rule.
-ARG HOLOSMITH_VERSION
-ARG HOLOSMITH_GIT_TAG
+# The one fact a step below spends, declared above it because an `ARG` is in scope of every instruction after it:
+# `HOLOSMITH_PI_VERSION` is the pi version the install step pins, and it is the only argument here whose value changes
+# what this image holds.
+#
+# **A build argument's scope is a cache boundary.** A `RUN` is in scope of every argument declared above it, and
+# BuildKit puts that scope in the instruction's cache key whether or not the instruction names the value. So an
+# argument that only the `LABEL` block at the bottom reads is declared there, below every `RUN`; a spent argument is
+# declared above the step that spends it, and the layers between the two pay for a change to it as well — a pi bump
+# rebuilds the apt line between here and the install. A new git tag and a rebuilt binary are what every release hands
+# this recipe, and neither may cost those two layers (ADR-0115).
 ARG HOLOSMITH_PI_VERSION
-ARG HOLOSMITH_BINARY_SHA256
 
 # The five programs the header names and the trust store they need. `--no-install-recommends` because a
 # recommendation is a package the contract did not ask for, and the point of this recipe is that its contents are
@@ -66,6 +68,18 @@ RUN apt-get update \
 # `agent::version_of` runs.
 RUN npm install -g --omit=dev "@earendil-works/pi-coding-agent@${HOLOSMITH_PI_VERSION}" \
  && npm cache clean --force
+
+# The facts this binary knows about itself, passed in as build arguments and written as labels. `server deploy`'s
+# step 3 compares them with its own values to decide whether an image is current, and `doctor` prints the agent
+# image's as the one a session runs. There is no `HOLOSMITH_TOOLCHAINS`: this recipe installs no toolchain, so there
+# is no list to carry and no `org.holosmith.toolchains` label — a key for an empty value would be a label that says
+# nothing while costing a rebuild rule.
+#
+# Declared **here**, after the last `RUN`, for the reason stated with the argument above: a value nothing above this
+# line reads may not be in the cache key of a step that does not read it (ADR-0115).
+ARG HOLOSMITH_VERSION
+ARG HOLOSMITH_GIT_TAG
+ARG HOLOSMITH_BINARY_SHA256
 
 LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.git-tag="${HOLOSMITH_GIT_TAG}" \

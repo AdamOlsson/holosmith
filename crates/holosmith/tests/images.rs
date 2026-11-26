@@ -320,14 +320,18 @@ fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_abse
 /// The Dockerfile's instructions, each as one line with its continuation and argument lines joined by single spaces.
 ///
 /// Just enough of the syntax for the assertions below: a line that begins at column zero with an uppercase
-/// instruction word starts one, and the lines continued with `\` and the indented ones belong to it. A whole-line
-/// comment or a blank line belongs to none of them, which is the parser's own rule — and this is what lets a test ask
-/// *which* instruction writes a path, and whether it does so before another.
+/// instruction word starts one, and the lines continued with `\` and the indented ones belong to it. A comment line
+/// belongs to none of them, however it is indented — Dockerfile comments are not part of the instruction they sit in,
+/// and a comment folded into a `RUN` would make its prose read as something that step spends — as does a blank line.
+/// This is what lets a test ask *which* instruction writes a path, and whether it does so before another.
 fn instructions(recipe: &str) -> Vec<String> {
     let mut blocks: Vec<String> = Vec::new();
     for line in recipe.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
         let word = line.split_once(' ').map_or("", |(word, _)| word);
-        if !line.starts_with([' ', '\t', '#'])
+        if !line.starts_with([' ', '\t'])
             && !word.is_empty()
             && word.chars().all(|letter| letter.is_ascii_uppercase())
         {
@@ -378,6 +382,23 @@ fn quoted<'a>(text: &'a str, key: &str) -> &'a str {
     &rest[..rest
         .find('"')
         .unwrap_or_else(|| panic!("the value after `{opener}` is never closed in {text}"))]
+}
+
+/// The `HOLOSMITH_…` names an instruction mentions, per name and with the prefix put back: how a recipe's own text
+/// says which build arguments an instruction reads.
+fn argument_names(text: &str) -> Vec<String> {
+    text.split("HOLOSMITH_")
+        .skip(1)
+        .map(|rest| {
+            let name = rest
+                .split(|letter: char| {
+                    !(letter.is_ascii_uppercase() || letter.is_ascii_digit() || letter == '_')
+                })
+                .next()
+                .unwrap_or_default();
+            format!("HOLOSMITH_{name}")
+        })
+        .collect()
 }
 
 #[test]
@@ -558,6 +579,79 @@ fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
                     "{name}'s download does not carry `{word}`: {download}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_label_only_build_argument_is_declared_below_every_run() {
+    // A `RUN` is in scope of every `ARG` declared above it, and BuildKit puts that scope in the instruction's cache
+    // key whether or not the instruction names the value — so an argument no `RUN` reads is a cache boundary every
+    // layer above it pays for. A worker's tree always changes the git tag and the artifact's digest, and the three
+    // label-only arguments sat at the top of all three recipes once: every gate run then rebuilt the toolchain, both
+    // pinned musl.cc fetches, the pi install, `cargo vendor` and `npm ci` for values nothing above `LABEL` reads
+    // (ADR-0115). The base image is in the loop with the other two: `server deploy`'s step 3 builds it on every
+    // machine, and its three label-only arguments are the agent image's three.
+    //
+    // The label-only set is *derived* from the recipe rather than listed here, so an argument a later edit adds to a
+    // `LABEL` is checked without this test being edited. `HOLOSMITH_PI_VERSION` and `HOLOSMITH_TOOLCHAINS` are not in
+    // it: the pi install and the apt line spend them, so their values do change what the image holds.
+    for (name, kind, recipe) in [
+        ("agent.Dockerfile", Kind::Agent, images::AGENT_DOCKERFILE),
+        ("proxy.Dockerfile", Kind::Proxy, images::PROXY_DOCKERFILE),
+        ("base.Dockerfile", Kind::Base, images::BASE_DOCKERFILE),
+    ] {
+        let blocks = instructions(recipe);
+        let last_run = blocks
+            .iter()
+            .rposition(|block| block.starts_with("RUN "))
+            .unwrap_or_else(|| panic!("{name} runs nothing, so nothing can be cached"));
+        let labels = blocks
+            .iter()
+            .find(|block| block.starts_with("LABEL "))
+            .unwrap_or_else(|| {
+                panic!("{name} writes no label, so a deploy has nothing to compare")
+            });
+
+        // The labels a deploy's skip rule and `doctor` read are still all written — five for the agent image, four
+        // for the proxy and the base — which is the half of the recipe a moved `ARG` could silently drop.
+        for tag in kind.tags() {
+            assert!(
+                labels.contains(&format!("{tag}=")),
+                "{name}'s `LABEL` block writes no {tag}, so a deploy reads an image whose facts it cannot judge: \
+                 {labels}"
+            );
+        }
+
+        let spent_by_a_run: Vec<String> = blocks
+            .iter()
+            .filter(|block| block.starts_with("RUN "))
+            .flat_map(|block| argument_names(block))
+            .collect();
+        let label_only: Vec<String> = argument_names(labels)
+            .into_iter()
+            .filter(|argument| !spent_by_a_run.contains(argument))
+            .collect();
+        assert!(
+            !label_only.is_empty(),
+            "{name} has no argument only its `LABEL` block reads, so this test measured nothing: {labels}"
+        );
+        for argument in label_only {
+            let declared_at = blocks.iter().position(|block| {
+                block
+                    .strip_prefix("ARG ")
+                    .is_some_and(|declared| declared == argument.as_str())
+            });
+            let declared_at = declared_at.unwrap_or_else(|| {
+                panic!("{name} writes {argument} into a label and declares no such argument")
+            });
+            assert!(
+                declared_at > last_run,
+                "{argument} is declared above a `RUN` in {name}, and a `RUN` is in scope of every argument declared \
+                 above it: a tree whose only change is that value rebuilds every layer below it — in `agent.Dockerfile` \
+                 measured as 42–64 s of apt, both pinned musl.cc fetches, the pi install and the vendored crate set — for \
+                 a value only a `LABEL` reads"
+            );
         }
     }
 }
