@@ -11853,7 +11853,8 @@ case_server_images() {
   # This case owns the absent state: the deploy's own proxy containers go first (a running container pins the image
   # it was started from, so an untag with them up fails and the build that follows would be a no-op), then all three
   # tags are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
-  # case exists to rule out.
+  # case exists to rule out. The removal is nearly free and that is why it stays: it leaves the layer cache alone, so
+  # the build after it answers every `RUN` `CACHED` (ADR-0115).
   timeout 120 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
   timeout 120 docker image rm -f "$proxy" "$base" "$agent" >/dev/null 2>&1 || true
   for image in "$proxy" "$base" "$agent"; do

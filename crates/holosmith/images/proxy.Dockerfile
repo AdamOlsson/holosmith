@@ -14,18 +14,23 @@
 # image is missing would be the client and the store the key proxy needs.
 FROM alpine:3@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 
+RUN apk add --no-cache openssl ca-certificates
+
+COPY holosmith /usr/local/bin/holosmith
+
 # The facts this binary knows about itself, passed in as build arguments and written as labels: the image holds
 # no build-time copy of them, so the labels are what a later deploy and `doctor` read back. The binary's own
 # digest is one of them because a git tag cannot tell two builds of the same commit (or of the same dirty tree)
 # apart, and the deploy's skip rule is about the *binary*.
+#
+# They are declared **here**, below the one `RUN`, because a build argument is in scope of every instruction after it
+# and BuildKit puts that scope in the instruction's cache key: none of these four is spent by a step above `LABEL`,
+# so declared at the top they would put a new git tag or a rebuilt binary into the `apk` layer's key and rebuild it
+# for values nothing but a label reads (ADR-0115).
 ARG HOLOSMITH_VERSION
 ARG HOLOSMITH_GIT_TAG
 ARG HOLOSMITH_PI_VERSION
 ARG HOLOSMITH_BINARY_SHA256
-
-RUN apk add --no-cache openssl ca-certificates
-
-COPY holosmith /usr/local/bin/holosmith
 
 LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.git-tag="${HOLOSMITH_GIT_TAG}" \

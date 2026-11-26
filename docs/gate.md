@@ -45,7 +45,7 @@ Both run ahead of the phases, and neither is counted as one.
 
 A full green run on this host is therefore about **44 minutes**: 476 s of source-level phases, 240 s of artifact
 phases, and 1952 s of `serve` — **about three quarters of the gate is the serve phase**, and the serve phase is mostly
-two container image builds.
+container work: the three product images' build, and a full compile of this tree inside them (ADR-0115).
 
 The build phase ends with a check that the artifact's `git_tag` is *this tree's*; on a tree with an uncommitted change
 it refuses (`git_tag e440b28 is not this tree (e440b28-dirty): re-run scripts/build.sh`). The gate is a fact about a
@@ -79,7 +79,7 @@ names the check behind every verdict.
 | Case | Cost | Why |
 | --- | --- | --- |
 | `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, then `cargo build --locked`, `clippy`, `test --no-run` and `npm ci`/`npm test` inside it under `--network none` |
-| `case_server_images` | 474 s | removes both product tags and rebuilds `holosmith-proxy` and `agent-image` from scratch |
+| `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` and `agent-image`; the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
 | `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on both musl artifacts inside the container |
 | `case_build` | 178 s | `holosmith build` through a `docker` stand-in, plus the real container build when the builder image is present |
 | `case_idle_stop` | 66 s | `idle_stop_min` is whole minutes, so the sweeper is measured at its one-minute floor rather than behind a knob |

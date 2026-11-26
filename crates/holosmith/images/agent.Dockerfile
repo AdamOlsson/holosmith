@@ -85,17 +85,19 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/tmp/cargo \
     PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:/opt/aarch64-linux-musl-cross/bin:${PATH}
 
-# The facts this binary knows about itself plus the toolchain list, passed in as build arguments and written as
-# labels: `server deploy` compares them with its own values to decide whether an image is current, and `doctor`
-# prints them. The binary's digest is among them because a git tag cannot tell two builds of the same commit (or
-# of the same dirty tree) apart, and the deploy's skip rule is about the *binary*.
+# The two facts a `RUN` below spends, declared above it because an `ARG` is in scope of every instruction after it:
+# `HOLOSMITH_PI_VERSION` is the pi version the install step pins, and `HOLOSMITH_TOOLCHAINS` is the *configurable*
+# package list, which never names the Rust toolchain — rust is part of this recipe, so a machine cannot remove it and
+# its version is the `FROM` line's rather than a config value's.
 #
-# `HOLOSMITH_TOOLCHAINS` is the *configurable* list and never names the Rust toolchain: rust is part of this recipe,
-# so a machine cannot remove it and its version is the `FROM` line's rather than a config value's.
-ARG HOLOSMITH_VERSION
-ARG HOLOSMITH_GIT_TAG
+# **A build argument's scope is a cache boundary.** A `RUN` is in scope of every argument declared above it, and
+# BuildKit puts that scope in the instruction's cache key whether or not the instruction names the value. So an
+# argument that only the `LABEL` block at the bottom reads is declared there, below every `RUN`; a spent argument is
+# declared above the step that spends it, and the layers between the two pay for a change to it as well — a pi bump
+# rebuilds the apt line and every toolchain layer on the way to the install. A new git tag and a rebuilt binary are
+# what every release hands this recipe, and neither may cost a rebuild of the toolchain or the pinned downloads
+# (ADR-0115).
 ARG HOLOSMITH_PI_VERSION
-ARG HOLOSMITH_BINARY_SHA256
 ARG HOLOSMITH_TOOLCHAINS
 
 # `build-essential` is the `cc` the `cc` crate needs for bundled SQLite — a session that runs `cargo test` compiles
@@ -231,6 +233,17 @@ ENV npm_config_cache=/opt/npm-cache \
     npm_config_logs_dir=/tmp/npm-logs
 
 COPY holosmith /usr/local/bin/holosmith
+
+# The facts this binary knows about itself plus the toolchain list, passed in as build arguments and written as
+# labels: `server deploy` compares them with its own values to decide whether an image is current, and `doctor`
+# prints them. The binary's digest is among them because a git tag cannot tell two builds of the same commit (or
+# of the same dirty tree) apart, and the deploy's skip rule is about the *binary*.
+#
+# Declared **here**, after the last `RUN`, for the reason stated with the two arguments above: a value nothing above
+# this line reads may not be in the cache key of a step that does not read it (ADR-0115).
+ARG HOLOSMITH_VERSION
+ARG HOLOSMITH_GIT_TAG
+ARG HOLOSMITH_BINARY_SHA256
 
 LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.git-tag="${HOLOSMITH_GIT_TAG}" \

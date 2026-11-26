@@ -60,8 +60,11 @@ One command proves the tree:
 
 It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
 (~5 min 20 s of it the session offline build case). It is 34 to 43 minutes when the image cases rebuild
-`agent-image` (two such runs measured here: 34 and 43 minutes), because `case_server_images` removes both
-product tags at its start and the rebuild is what follows. Green is its last line: `verify: <n> assertions, ok`.
+every layer of `agent-image` (two such runs measured here: 34 and 43 minutes). The tags `case_server_images`
+removes are not what costs that: a removal leaves the layer cache intact, so the build after it is **0.73 s with
+all 16 layers `CACHED`**, and a new commit's rebuild is nearly as cheap now that the three label-only build
+arguments sit below every `RUN` — a changed git tag used to bust every one of them, for values nothing above
+`LABEL` reads (ADR-0115). Green is its last line: `verify: <n> assertions, ok`.
 A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure its
 fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added, so read
 the shape of that line, not its number. It wants a working Docker daemon for the container cases.
