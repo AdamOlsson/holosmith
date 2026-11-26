@@ -82,13 +82,12 @@ COPY --from=rust /usr/local/cargo /usr/local/cargo
 # **`RUSTUP_HOME` stays `/usr/local/rustup`.** Read-only is enough for `cargo` and `rustc`; only an install writes
 # there, and every install in this file is a `RUN` that happens as root before `USER node`.
 #
-# **`CARGO_HOME` is `/tmp/cargo`, and that is the one difference from `builder.Dockerfile`, which deliberately sets
-# nothing.** The builder runs as the operator's uid with a `$HOME` its entry script creates, so cargo's own default
-# is writable. A session's container runs as the **data root's owner** — `--user <uid>`, not necessarily the image's
-# `node`, and with no passwd entry at all, so `$HOME` is not a place anything can be put. `/tmp` is writable by any
-# uid, so whatever cargo writes there is per-container and thrown away with it. It starts **empty**: the crates a
-# build needs are vendored into `/opt/cargo-vendor` below, and `/.cargo/config.toml` is what points cargo at them,
-# so nothing has to be fetched and no mount has to be made.
+# **`CARGO_HOME` is `/tmp/cargo`.** A session's container runs as the **data root's owner** — `--user <uid>`, not
+# necessarily the image's `node`, and with no passwd entry at all, so `$HOME` is not a place anything can be put and
+# cargo's own `$HOME/.cargo` default is unwritable. `/tmp` is writable by any uid, so whatever cargo writes there is
+# per-container and thrown away with it. It starts **empty**: the crates a build needs are vendored into
+# `/opt/cargo-vendor` below, and `/.cargo/config.toml` is what points cargo at them, so nothing has to be fetched and
+# no mount has to be made.
 #
 # Never `RUSTFLAGS` (ADR-0005): it would disable `.cargo/config.toml`'s per-target `relocation-model=static` and
 # silently ship a static-PIE binary — one container out, the same trap.
@@ -139,8 +138,9 @@ RUN rustup target add x86_64-unknown-linux-musl
 
 # The cross toolchain, pinned by the digest of the tarball: musl.cc's downloads are not content-addressed, so the
 # checksum is the pin. `x86_64-linux-musl-gcc` is the linker `.cargo/config.toml` names and the `cc` crate finds for
-# the bundled SQLite — the same URL and the same digest as `builder.Dockerfile`'s x86_64 tarball, because a session and
-# a release build compile the same tree.
+# the bundled SQLite — the same URL and the same digest `scripts/build.sh` reads out of this recipe to fetch the same
+# tarball on a host whose `toolchains/` is empty (ADR-0120), because a session and a release build compile the same
+# tree.
 #
 # **The tarball is fetched here, at build time, and the artifact cannot carry it.** This recipe is
 # `include_str!`ed into the binary and a deploy runs on a machine that has the artifact and nothing else, so the

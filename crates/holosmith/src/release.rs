@@ -5,8 +5,8 @@
 //!
 //! * **Where.** The release tree is `<root>/releases`, inside the one directory a machine has (ADR-0086): the
 //!   service user owns it, so `upgrade` and `rollback` write plain files and need no privilege for the tree.
-//! * **What a release is.** Two files, `holosmith` and `holosmith.sha256`, which are exactly the two
-//!   `holosmith build --out` writes ([`crate::builder::BINARY`] and [`crate::builder::DIGEST`]). The directory's
+//! * **What a release is.** Two files, `holosmith` and `holosmith.sha256`, which are exactly the two files a
+//!   build leaves side by side ([`crate::builder::BINARY`] and [`crate::builder::DIGEST`]). The directory's
 //!   name is the tag the binary itself reports (`version`'s `git_tag`), so a release directory cannot be named
 //!   after a different build than the one inside it — and one tag holding two binaries is refused rather than
 //!   overwritten ([`crate::builder::Placement`]'s rule, one level out).
@@ -45,8 +45,8 @@ pub const RELEASES: &str = "releases";
 /// The symlink systemd executes through.
 pub const CURRENT: &str = "current";
 
-/// A release's binary, and its digest: [`crate::builder`]'s two names, because a release directory is what
-/// `holosmith build --out releases/<tag>` produces.
+/// A release's binary, and its digest: [`crate::builder`]'s two names, because a release directory holds the two
+/// files a build produces side by side.
 pub const BINARY: &str = crate::builder::BINARY;
 pub const DIGEST: &str = crate::builder::DIGEST;
 
@@ -300,8 +300,8 @@ impl Release {
 
     /// Write one release's two files, or refuse a directory that already holds a different binary for this tag.
     ///
-    /// The bytes are written aside (`builder::PENDING`, the name `holosmith build` also uses) and renamed into
-    /// place, so the file that exists under `holosmith` is always a whole binary. A directory holding the *same*
+    /// The bytes are written aside (`builder::PENDING`, the name a candidate's own directory uses too) and renamed
+    /// into place, so the file that exists under `holosmith` is always a whole binary. A directory holding the *same*
     /// bytes is [`Written::Current`] and writes only the digest when that is missing — the idempotent re-run
     /// [`builder::place`] is.
     pub fn write(&self, tag: &str, bytes: &[u8], digest: &str) -> Result<Written, String> {
@@ -702,7 +702,7 @@ mod tests {
             "the rule is about the path's shape, so an install tree's release is a release"
         );
         for other in [
-            // The development build, and the artifact `build --out` writes: not in a release directory.
+            // The development build, and a build script's artifact: not in a release directory.
             Path::new("target/x86_64-unknown-linux-musl/debug/holosmith"),
             Path::new("dist/x86_64-unknown-linux-musl/holosmith"),
             // A release directory's digest file, a file in the wrong tree, and a tag no directory may be named.

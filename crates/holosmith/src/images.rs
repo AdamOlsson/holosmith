@@ -622,9 +622,9 @@ pub fn archive_bytes(dockerfile: &str, context: &Context, program: &[u8]) -> Vec
 
 /// One ustar entry: a 512-byte header, the data, and the zero padding that rounds it to a block.
 ///
-/// `pub(crate)`, whose builder archive is a second caller: the daemon reads a context it is handed, and
-/// one ustar writer for the three images is one place the header can be wrong.
-pub(crate) fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
+/// One writer for every image built from a context, which is one place the header can be wrong: the daemon reads a
+/// context it is handed, and a header written wrong here is written wrong in all of them.
+fn push_entry(out: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
     // The name is 100 bytes with a NUL, and every name here is far shorter — the context's
     // `crates/holosmith/src/lib.rs` and `crates/holosmith/Cargo.toml` are both 27 — so a longer one is a mistake
     // rather than an archive the daemon misreads.
@@ -820,9 +820,7 @@ pub const CERTIFICATE_WARNING: &str = "warning: musl.cc's certificate did not ve
 /// tarball without a count because one fetch falling back or both is the build's own business, and the clause is one
 /// clause either way.
 ///
-/// Two sentences carry it, one per recipe: [`ensure`]'s, for the three product images, and `builder::built_sentence`'s,
-/// for `holosmith build`'s builder image — which has no sink at all, so its sentence is the only thing an operator
-/// running that command sees. One constant, because one fact spelled twice drifts.
+/// One sentence carries it, [`ensure`]'s, over the three product images: a recipe is built here or not at all.
 pub(crate) const CERTIFICATE_CLAUSE: &str = "; musl.cc's certificate did not verify, so the pinned tarball was fetched \
                                               without verification and its digest matched";
 
@@ -833,8 +831,7 @@ pub(crate) const CERTIFICATE_CLAUSE: &str = "; musl.cc's certificate did not ver
 /// certificate is what failed (ADR-0116). That is safe because the tarball is pinned by SHA-256 in the same
 /// instruction: the pin, not the certificate, decides what lands in `/opt`. It is still a fact an operator has to be
 /// told — a fallback nobody hears about is the silent kind this repository does not do — so [`ensure`] replays these
-/// lines through the sink a step already has, and both build sentences (that one and `builder::built_sentence`) carry
-/// [`CERTIFICATE_CLAUSE`].
+/// lines through the sink a step already has, and carries [`CERTIFICATE_CLAUSE`] in its sentence.
 ///
 /// **The marker has to begin the line, not merely appear in it.** BuildKit prefixes a child's every output line with
 /// `#8 0.512 `, and it also echoes the instruction that failed (`#8 [4/9] RUN …`, ` > [4/9] RUN …`, `  76 | >>> RUN …`)

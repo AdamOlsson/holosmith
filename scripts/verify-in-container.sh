@@ -34,7 +34,7 @@
 #   full run as `FAIL case_server_deploy/partial/step2`. Mounted, the same call answers `adamolsson docker` and exits
 #   0. `/etc/passwd` stays the image's, and the paragraph at the mount says what mounting it was measured to cost.
 # * the `docker` CLI and its CLI-plugin directory, each at its own path. No image ships either, and `docker build` —
-#   which `holosmith build`, `case_smoke` and `case_server_images` all run — needs the buildx plugin.
+#   which `case_smoke` and `case_server_images` both run — needs the buildx plugin.
 # * the tree at **its own absolute path**, the git dirs and the common dir at theirs, and **every root the gate's cleanup
 #   reads** at its own. A container that had the tree at `/repo` asked the daemon to mount `/repo/pins/pi.txt` and got an
 #   empty root-owned directory with no error anywhere, because a bind source is resolved in the *host's* namespace

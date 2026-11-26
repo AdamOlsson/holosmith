@@ -5,9 +5,9 @@ What `scripts/verify.sh` measures, in the order it measures it, and what each pi
 what it runs.
 
 The numbers below are wall-clock from one run on the development host (8 cores, warm `target/`, both product images
-and `holosmith-builder` already built) at commit `7d7bf08`, 2026-11-25. They are one machine's, so read the shape: which
-item is expensive, and why. A cold worktree with an empty `target/` adds the compile; a machine rebuilding
-`agent-image` adds the image build.
+already built) at commit `7d7bf08`, 2026-11-25, less the cost of a case the tree no longer runs. They are one machine's,
+so read the shape: which item is expensive, and why. A cold worktree with an empty `target/` adds the compile; a machine
+rebuilding `agent-image` adds the image build.
 
 ## Three tiers, one set of facts
 
@@ -41,17 +41,17 @@ Both run ahead of the phases, and neither is counted as one.
 | `cleanup` | `case_gate_cleanup` | 7 s | the cleanup script's contract: the marker it kills by, the prefix it does not, the lock, and a registered checkout this host cannot see skipped rather than refused |
 | `build` | `scripts/build.sh` | 188 s warm, 317 s after a change | `npm test`, the web build, the musl artifact, and `check-static.sh` (statically linked, empty `readelf -d`, plus the empty-root container run) |
 | `embed` | `scripts/check-embed.sh` | 52 s | app present, app absent (placeholder), app required and absent (red) |
-| `serve` | every case in `serve_cases` (112) against `dist/<host-triple>/holosmith` | 1952 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
+| `serve` | every case in `serve_cases` (111) against `dist/<host-triple>/holosmith` | 1774 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
 
-A full green run on this host is therefore about **44 minutes**: 476 s of source-level phases, 240 s of artifact
-phases, and 1952 s of `serve` — **about three quarters of the gate is the serve phase**, and the serve phase is mostly
+A full green run on this host is therefore about **42 minutes**: 476 s of source-level phases, 240 s of artifact
+phases, and 1774 s of `serve` — **about three quarters of the gate is the serve phase**, and the serve phase is mostly
 container work: the three product images' build, and a full compile of this tree inside them (ADR-0115).
 
 The build phase ends with a check that the artifact's `git_tag` is *this tree's*; on a tree with an uncommitted change
 it refuses (`git_tag e440b28 is not this tree (e440b28-dirty): re-run scripts/build.sh`). The gate is a fact about a
 commit, and that is where it says so.
 
-## The serve phase: one booted artifact, 112 cases
+## The serve phase: one booted artifact, 111 cases
 
 The phase boots the shipped musl artifact on a random port with a temp config (`owner`, `max_live_sessions = 1`,
 `backend = "stub"`, `idle_stop_min = 1`, `turn_timeout_min = 1`) and a temp data root, runs `serve_cases` in order, and
@@ -70,7 +70,7 @@ names the check behind every verdict.
 | docker backend | 8 | 37 s | the preflight, the hardened `.git` mounts on a real daemon, an agent launch, a resume, a turn, reconcile and its orphan sweep, the isolation selftest |
 | proxies | 7 | 14 s | key, MCP and egress proxies by their bytes (with a stand-in `openssl`), the Internet-access toggle on two real networks, the preview listener |
 | doctor and disk | 5 | 21 s | `--quick`, the tool-key finding, `--full`, the disk floor and the disk quota |
-| images and builds | 6 | 1584 s | the three product images, the session's toolchain in a container, the containerised release build, an offline build, the smoke run |
+| images and builds | 5 | 1406 s | the three product images, the session's toolchain in a container, an offline build, the smoke run |
 | promotion and release | 3 of 4 (`upgrade` skipped here) | 53 s | `upgrade`'s arms, `rollback`'s four arms, a promotion from the app and the update it performs |
 | deploy, install, service | 9 of 10 (`server_service` failed here) | 38 s | `server deploy`, the three install renderings, the root refusal, the unit and the keys, `deploy --ssh`, `status`, `logs`, `uninstall` |
 
@@ -81,7 +81,6 @@ names the check behind every verdict.
 | `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, then `cargo build --locked`, `clippy`, `test --no-run` and `npm ci`/`npm test` inside it under `--network none` |
 | `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` and `agent-image`; the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
 | `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on the musl artifact inside the container |
-| `case_build` | 178 s | `holosmith build` through a `docker` stand-in, plus the real container build when the builder image is present |
 | `case_idle_stop` | 66 s | `idle_stop_min` is whole minutes, so the sweeper is measured at its one-minute floor rather than behind a knob |
 | `case_web_update` | 30 s | a promotion started from the app, polled over its socket |
 | `case_server_deploy` | 25 s | the six steps over a `--root` tree, with real `install`, `chmod` and `openssl` children |
@@ -91,13 +90,13 @@ names the check behind every verdict.
 | `case_stopped_expiry`, `case_internet_toggle` | 11 s each | a real session network compared by endpoint count; an aged row swept |
 | `case_smoke`, `case_reconcile_orphans`, `case_history` | 10 s each | a real smoke run; containers and networks swept; a page of a long transcript |
 
-Everything else is at or under 7 s, and **68 of the 110 cases measured here are at or under 1 s** — they are HTTP and
+Everything else is at or under 7 s, and **68 of the 109 cases measured here are at or under 1 s** — they are HTTP and
 file facts about an artifact that is already running.
 
 ## What a case needs, and what a SKIP means
 
 A `SKIP` with its reason is a fact about *this machine*, never a defect in the tree: the case measured nothing, and its
-`ok` line is withheld, so the run's last line counts them (`SKIP 1 of 112 cases measured nothing`).
+`ok` line is withheld, so the run's last line counts them (`SKIP 1 of 111 cases measured nothing`).
 
 | Needs | Which cases |
 | --- | --- |

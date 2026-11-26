@@ -555,9 +555,8 @@ fn no_tracked_file_outside_the_decisions_names_the_emulator() {
 #[test]
 fn nothing_that_builds_the_artifact_names_the_second_triple() {
     // `scripts/build.sh`, `scripts/check-static.sh`, the cargo config, the agent recipe and the prose a reader starts
-    // from all speak of one release target now. `scripts/verify.sh` is not in the set: its `case_build` case drives
-    // `holosmith build`, whose own target list still names both until that verb goes, and a hand-built aarch64
-    // artifact is still something a deploy can be handed.
+    // from all speak of one release target now. `scripts/verify.sh` is not in the set because it drives the artifact
+    // in shapes this rule is not about, and a hand-built aarch64 artifact is still something a deploy can be handed.
     let root = repo_root();
     let files = tracked_or_walked(&root);
     assert!(!files.is_empty(), "no files to search under {root:?}");
@@ -617,7 +616,7 @@ fn tracked_or_walked(root: &Path) -> Vec<String> {
 }
 
 /// Every file in the worktree except build output and git history, for trees with no `.git` to list tracked files
-/// from — the shape `tests/pin_single_source.rs` uses, so a builder container measures the same rules.
+/// from — the shape `tests/pin_single_source.rs` uses, so a container running the gate measures the same rules.
 fn walk_files(root: &Path) -> Vec<String> {
     const SKIPPED: [&str; 5] = [".git", "target", "dist", "node_modules", "toolchains"];
     let mut files = Vec::new();

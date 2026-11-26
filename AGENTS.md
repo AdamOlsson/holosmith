@@ -33,7 +33,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `crates/holosmith/src/` | The binary: CLI, HTTP, sessions, events, Docker backend, proxies, deploy/release |
 | `crates/holosmith/tests/` | Integration tests; `tests/support/` and `tests/fixtures/` hold shared helpers and real pi recordings |
 | `crates/holosmith/migrations/` | Embedded, forward-only SQL migrations |
-| `crates/holosmith/images/` | Embedded Dockerfiles for the agent, proxy, builder and smoke images |
+| `crates/holosmith/images/` | Embedded Dockerfiles for the agent, proxy, base and smoke images |
 | `crates/holosmith/fixtures/` | The recorded turn the smoke image replays |
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
@@ -434,12 +434,15 @@ so a seq is **strictly increasing with gaps** and the next one is `last_seq + 1`
 
 ## The release path: build, smoke, upgrade, rollback
 
-A release artifact is built **in a container**, so that agent-authored build code cannot run on the host:
-`holosmith build [--target <triple>] [--out <dir>]` needs Docker and nothing else. The first run builds
-`holosmith-builder:<version>` (~6 minutes: two pinned bases, the musl.cc toolchains, the rust targets); the
-container gets the source read-only at `/src`, runs the same `scripts/build.sh`, and the artifact comes back with
-`holosmith.sha256` beside it. A directory already holding a *different* binary for the same tag is refused. **The
-container bounds what build code can reach; it does not judge what it does** — the diff review is the gate.
+A release artifact is built by **the tree's own** `scripts/build.sh`, and where that runs is the caller's business: a
+worker builds with the toolchain its turn has (the agent image's, or this host's `~/.pi/toolchains/env.sh`),
+`scripts/verify-in-container.sh` runs the whole gate in that image on this machine's daemon (ADR-0109), and
+`holosmith update` verifies the candidate tree by running that gate in the image the running release deployed
+(ADR-0109) and promotes the artifact the gate left. The artifact is `dist/<triple>/holosmith` with
+`holosmith.sha256` beside it, and a directory already holding a *different* binary for the same tag is refused.
+**The container bounds what build code can reach; it does not judge what it does** — the diff review is the gate.
+There is no verb that starts a builder container: a recipe compiled into binary N−1 building release N meant a recipe
+fix landed one release late, with nothing in the output saying so (ADR-0121).
 
 `holosmith smoke --binary <artifact> --root <dir>` is the only automated evidence that a candidate can serve a
 session at all (ADR-0081). Its `pi` is `holosmith container fake-pi` replaying `crates/holosmith/fixtures/

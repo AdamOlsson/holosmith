@@ -7,7 +7,8 @@
 # Artifacts: scripts/build.sh writes dist/<target-triple>/holosmith
 /dist/
 
-# `holosmith build`'s default --out writes `releases/<tag>/` into the directory it runs from
+# A release tree left at the checkout's root by a build this tree no longer has; nothing writes one now, so this
+# hides a stray directory in an older checkout rather than an artifact of today's build
 /releases/
 
 # Frontend build output; the app is embedded in the binary (ADR-0004)

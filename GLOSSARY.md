@@ -1054,15 +1054,6 @@ and networks the rows named), and refuses while a session is live unless `--forc
 own — `removed`, `kept`, `nothing`, `failed` — not the deploy's five. Its machine name is `uninstall::Report`.
 _Avoid_: Teardown, remove, destroy, deploy --reverse
 
-**Builder image**:
-The pinned container a release artifact is compiled in: `holosmith-builder:<version>`, built locally from
-`crates/holosmith/images/builder.Dockerfile` — two bases pinned by manifest-list digest, the two musl.cc cross
-toolchains pinned by their tarballs' SHA-256, and node for the web app — and labelled with the recipe's own digest, so
-an edited recipe rebuilds instead of reusing a stale image. It is the only place a `build.rs`, a proc macro or the web
-app's Vite config ever executes. It carries no `holosmith` of its own: the two product images are built *from* the
-binary, and this one builds it.
-_Avoid_: Build container, build image, toolchain image, CI image
-
 **Session toolchain**:
 What a session's container carries of the compiler its tree is written in, as part of the **fixed** set: rustc, cargo,
 rustfmt and clippy at the version `pins/rust.txt` holds, the musl target, and its musl.cc cross linker. There is no
@@ -1100,12 +1091,11 @@ other half (ADR-0106).
 _Avoid_: npm store, package cache
 
 **Release build**:
-`holosmith build [--target <triple>] [--out DIR]`: compiles one static musl artifact **inside the builder image** and
-places `<out>/holosmith` with `<out>/holosmith.sha256` beside it, `--out` defaulting to `releases/<tag>/`. The host
-orchestrates Docker and reads the ELF header of the bytes that landed (`e_machine` for the requested triple, `ET_EXEC`,
-no `PT_INTERP`); it compiles nothing. A directory holding the same bytes again is left alone, and one holding a
-different binary for the same tag is refused with both digests named. Safe, not trusted: the diff review is the gate.
-_Avoid_: Build script, host build (that is `scripts/build.sh`, the build on this machine), compile step
+The pair `scripts/build.sh` leaves in `dist/<triple>/`: `holosmith` and `holosmith.sha256`, the digest file holding
+`<digest>  holosmith`, the shape `sha256sum -c` reads. That pair is what a promotion reads, and `releases/<tag>/` holds
+it once the candidate is live. A directory holding the same bytes again is left alone, and one holding a different
+binary for the same tag is refused with both digests named. Safe, not trusted: the diff review is the gate.
+_Avoid_: Build script (that is the command, not its output), compile step
 
 **Version**:
 The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one. Kept in `VERSION` at the repository root and nowhere else: `build.rs` reads it into the binary, and both manifests hold `0.0.0` so that a bump never moves `Cargo.lock`, whose digest a promotion's crate-set check compares against the agent image's.

@@ -124,9 +124,9 @@ artifact could not be run here until the supported set carries $machine's target
     ;;
 esac
 
-# A release artifact must report the tag it was built from, never a stale one. Builder
-# containers have no .git, so there the tag arrives in this variable instead — and a caller
-# that set it wins, because a copy of the source without history cannot describe itself
+# A release artifact must report the tag it was built from, never a stale one. A tree copied
+# without .git has no history to describe itself from, so there the tag arrives in this variable
+# instead — and a caller that set it wins.
 #
 # Never export RUSTFLAGS here (ADR-0005): it would disable the per-target rustflags in
 # .cargo/config.toml and silently ship a static-PIE binary.
@@ -177,8 +177,6 @@ for program in cargo rustc; do
   printf 'points rustup at a toolchains directory whose default is `stable`, so the compiler moves under\n' >&2
   printf '`rustup update` there — or pin the host to it: rustup toolchain install %s && rustup default %s\n' \
     "$pinned_rust" "$pinned_rust" >&2
-  printf 'Inside the builder image (`holosmith build`) the pinned toolchain is the image itself, so a mismatch\n' >&2
-  printf 'there is an image fault rather than a setup step.\n' >&2
   exit 1
 done
 
@@ -288,7 +286,7 @@ for target in "${targets[@]}"; do
     cp "target/$target/release/holosmith" "dist/$target/holosmith.tmp"
     mv -f "dist/$target/holosmith.tmp" "dist/$target/holosmith"
     digest="$(sha256sum "dist/$target/holosmith" | cut -d' ' -f1)"
-    # The digest file beside the artifact, in the shape `holosmith build` writes it (`builder::DIGEST`,
+    # The digest file beside the artifact, in the shape a promotion reads it (`builder::DIGEST`,
     # "<digest>  holosmith", what `sha256sum -c` reads): `promote::read_candidate` refuses a candidate
     # with no sha256sum line beside it, and one artifact layout with two writers is the rule. Written
     # through a temporary and renamed for the same reason the binary is: a truncated digest file is a

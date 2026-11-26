@@ -552,33 +552,26 @@ fn toolchain_fetches(name: &str, recipe: &str, count: usize) -> Vec<String> {
 }
 
 #[test]
-fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
-    // The musl cross toolchains are fetched from musl.cc while each image builds, so an image build is only as
+fn the_agent_recipe_retries_a_toolchain_host_that_does_not_answer() {
+    // The musl cross toolchain is fetched from musl.cc while the image builds, so an image build is only as
     // available as that host (ADR-0111). A bounded retry is the whole of the recipe's half, and `--retry` alone is not
     // it: `--retry` retries a timeout and an HTTP 5xx and not the refused connection or the name that did not resolve,
     // which is what an outage looks like from inside a build. An edit that dropped one of the four words would put the
-    // gate back to recording a network blip as a tree nobody passed, so both files are read and every download is
-    // asserted — with the digest check that stays the pin beside them.
-    //
-    // The count is a column and not a constant: the agent image carries one cross toolchain and the builder image
-    // still carries both, until `holosmith build` and its builder go (ADR-0119).
-    for (name, recipe, count) in [
-        ("agent.Dockerfile", images::AGENT_DOCKERFILE, 1),
-        ("builder.Dockerfile", holosmith::builder::DOCKERFILE, 2),
-    ] {
-        for download in toolchain_fetches(name, recipe, count) {
-            for word in [
-                "--retry 4",
-                "--retry-delay 2",
-                "--retry-all-errors",
-                "https://musl.cc/",
-                "| sha256sum -c -",
-            ] {
-                assert!(
-                    download.contains(word),
-                    "{name}'s download does not carry `{word}`: {download}"
-                );
-            }
+    // gate back to recording a network blip as a tree nobody passed, so every download is asserted — with the digest
+    // check that stays the pin beside them. The count is a constant and not a column now that one recipe carries a
+    // cross toolchain: a second one would be a second caller of this test with its own count.
+    for download in toolchain_fetches("agent.Dockerfile", images::AGENT_DOCKERFILE, 1) {
+        for word in [
+            "--retry 4",
+            "--retry-delay 2",
+            "--retry-all-errors",
+            "https://musl.cc/",
+            "| sha256sum -c -",
+        ] {
+            assert!(
+                download.contains(word),
+                "agent.Dockerfile's download does not carry `{word}`: {download}"
+            );
         }
     }
 }
@@ -657,64 +650,59 @@ fn a_label_only_build_argument_is_declared_below_every_run() {
 }
 
 #[test]
-fn both_recipes_read_an_unverifiable_certificate_as_a_warning_over_the_pin() {
-    // musl.cc's certificate expired and stayed unrenewed, which failed every from-scratch build of both images with
-    // curl's 60 — over tarballs the same `RUN` pins by SHA-256 (ADR-0116). The fallback is only ever reached when the
+fn the_agent_recipe_reads_an_unverifiable_certificate_as_a_warning_over_the_pin() {
+    // musl.cc's certificate expired and stayed unrenewed, which failed every from-scratch build of the image with
+    // curl's 60 — over a tarball the same `RUN` pins by SHA-256 (ADR-0116). The fallback is only ever reached when the
     // certificate is what failed, it only ever adds `--insecure` to the same URL, and the digest check still follows it:
     // the pin is what says the bytes are the vetted ones. Each of those three is a fact this asserts, and a comment
     // beside a recipe is not.
-    for (name, recipe, count) in [
-        ("agent.Dockerfile", images::AGENT_DOCKERFILE, 1),
-        ("builder.Dockerfile", holosmith::builder::DOCKERFILE, 2),
-    ] {
-        for fetch in toolchain_fetches(name, recipe, count) {
-            // One fallback and not a fetch made without verification: the first attempt is curl's own flags, and
-            // `--insecure` is the retry's.
-            assert_eq!(
-                fetch.matches("--insecure").count(),
-                1,
-                "{name}'s fetch is not exactly one verified attempt and one fallback: {fetch}"
-            );
-            let urls: Vec<usize> = fetch
-                .match_indices("https://musl.cc/")
-                .map(|(at, _)| at)
-                .collect();
-            assert_eq!(
-                urls.len(),
-                2,
-                "{name}'s fallback does not retry the same one tarball: {fetch}"
-            );
-            let insecure = fetch
-                .find("--insecure")
-                .unwrap_or_else(|| panic!("{name}'s fetch has no fallback: {fetch}"));
-            assert!(
-                urls[0] < insecure && insecure < urls[1],
-                "{name}'s `--insecure` is not the second attempt at the same URL: {fetch}"
-            );
-            // The fallback is guarded by curl's certificate statuses and by nothing else: every other status is exited
-            // with the child's own code, which is what keeps a host that did not answer a failed build (ADR-0111).
-            assert!(
-                fetch.contains("case $status in 51|60|77|83)"),
-                "{name}'s fallback is not guarded by curl's four certificate statuses alone: {fetch}"
-            );
-            assert!(
-                fetch.contains("*) exit $status"),
-                "{name}'s fallback does not leave every other curl status fatal: {fetch}"
-            );
-            // The pin still decides what lands in `/opt`, and it follows the fallback rather than replacing it.
-            let digest = fetch
-                .find("| sha256sum -c -")
-                .unwrap_or_else(|| panic!("{name}'s fetch checks no digest: {fetch}"));
-            assert!(
-                insecure < digest,
-                "{name}'s digest check does not follow the fallback it has to vouch for: {fetch}"
-            );
-            // And the fallback says so, on stderr, in the words each build's reader carries to an operator.
-            assert!(
-                fetch.contains(images::CERTIFICATE_WARNING) && fetch.contains(">&2"),
-                "{name}'s fallback prints no warning an operator would hear: {fetch}"
-            );
-        }
+    for fetch in toolchain_fetches("agent.Dockerfile", images::AGENT_DOCKERFILE, 1) {
+        // One fallback and not a fetch made without verification: the first attempt is curl's own flags, and
+        // `--insecure` is the retry's.
+        assert_eq!(
+            fetch.matches("--insecure").count(),
+            1,
+            "the fetch is not exactly one verified attempt and one fallback: {fetch}"
+        );
+        let urls: Vec<usize> = fetch
+            .match_indices("https://musl.cc/")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            urls.len(),
+            2,
+            "the fallback does not retry the same one tarball: {fetch}"
+        );
+        let insecure = fetch
+            .find("--insecure")
+            .unwrap_or_else(|| panic!("the fetch has no fallback: {fetch}"));
+        assert!(
+            urls[0] < insecure && insecure < urls[1],
+            "`--insecure` is not the second attempt at the same URL: {fetch}"
+        );
+        // The fallback is guarded by curl's certificate statuses and by nothing else: every other status is exited
+        // with the child's own code, which is what keeps a host that did not answer a failed build (ADR-0111).
+        assert!(
+            fetch.contains("case $status in 51|60|77|83)"),
+            "the fallback is not guarded by curl's four certificate statuses alone: {fetch}"
+        );
+        assert!(
+            fetch.contains("*) exit $status"),
+            "the fallback does not leave every other curl status fatal: {fetch}"
+        );
+        // The pin still decides what lands in `/opt`, and it follows the fallback rather than replacing it.
+        let digest = fetch
+            .find("| sha256sum -c -")
+            .unwrap_or_else(|| panic!("the fetch checks no digest: {fetch}"));
+        assert!(
+            insecure < digest,
+            "the digest check does not follow the fallback it has to vouch for: {fetch}"
+        );
+        // And the fallback says so, on stderr, in the words the build's reader carries to an operator.
+        assert!(
+            fetch.contains(images::CERTIFICATE_WARNING) && fetch.contains(">&2"),
+            "the fallback prints no warning an operator would hear: {fetch}"
+        );
     }
 }
 

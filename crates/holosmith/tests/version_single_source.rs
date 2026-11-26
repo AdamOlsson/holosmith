@@ -103,8 +103,8 @@ fn no_tracked_source_reads_the_cargo_package_version() {
     let root = repo_root();
     let files = match tracked_files(&root) {
         Some(files) => files,
-        // Builder and gate containers copy the source without history. Walking the worktree there keeps the guard
-        // live instead of silently skipping it.
+        // A container that runs this guard can hold the source without its history, where `git ls-files` answers
+        // nothing. Walking the worktree there keeps the guard live instead of silently skipping it.
         None => walk_files(&root),
     };
     assert!(!files.is_empty(), "no files to search under {root:?}");

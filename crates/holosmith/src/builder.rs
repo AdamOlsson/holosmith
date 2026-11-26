@@ -1,183 +1,57 @@
-//! The pinned builder container: the one place a release artifact is compiled.
+//! Where a release artifact lands, and what a candidate for one must be.
 //!
-//! Spec item 10's first step is that the build never runs on the host, so that a `build.rs`, a proc macro — or the
-//! web app's own Vite config, which is JavaScript the build executes — cannot run outside a container. This module
-//! is the container half of that sentence and nothing else: the recipe (`images/builder.Dockerfile` and its entry
-//! script, both `include_str!`ed like the two product recipes), the two `docker` calls that run it, and the rules
-//! that decide what the output directory may hold. The command that prints is [`crate::commands::build`].
+//! There is no recipe in here and no image: a release artifact is the tree's own `scripts/build.sh`'s output, built
+//! where that script runs, and this module only judges the bytes it is handed (ADR-0121). Two questions, both about
+//! a *file*:
 //!
-//! Four things are load-bearing and each has its own doc comment below:
+//! - **Where it lands.** [`place`] states the rule a release directory obeys: a build's bytes move in under
+//!   [`BINARY`], a *different* binary under that name is refused rather than replaced, and [`DIGEST`] is written beside
+//!   it. The one **writer** of a release directory is [`crate::release::Release::write`], which implements the same
+//!   three outcomes — [`Placement`] names them — so [`place`] is that rule stated and not a step anything calls: its
+//!   only callers are `tests/build.rs`. [`BINARY`], [`DIGEST`] and [`PENDING`] are the names `crate::pass`,
+//!   [`crate::promote`] and `crate::release` read.
+//! - **What it must be.** [`artifact_problem`] reads an ELF header for the machine it is for and the interpreter it
+//!   must not name — `e_machine` for the triple that was asked for, `ET_EXEC`, and no `PT_INTERP`, the three
+//!   properties `scripts/check-static.sh` asserts with `file` and `readelf` — and [`default_target`] names the triple
+//!   this binary was built for. `holosmith smoke` asks both of the `--binary` a promotion is about to make live, and
+//!   `promote` asks [`artifact_problem`] of the candidate it is handing the daemon.
 //!
-//! - **The image is ours and it is pinned twice.** Both bases are pinned by manifest-list digest — the rust one
-//!   through `pins/rust.txt`'s value, handed over as `HOLOSMITH_RUST_IMAGE` (ADR-0118) — and the two musl.cc
-//!   toolchain tarballs are pinned by their SHA-256: a download is a pin only when its bytes are checked.
-//!   The recipe is labelled with its own digest, so editing it without bumping the version rebuilds instead of
-//!   reusing a stale image (the same argument as `org.holosmith.binary-sha256`, ADR-0057).
-//! - **The source is mounted read-only and the build happens in a copy.** A build cannot reach the operator's tree:
-//!   not `target/`, not `node_modules/`, not the repository itself. The only host path it writes is the output
-//!   directory, which is a bind mount of its own.
-//! - **The container's output goes to a file, never a pipe.** A build prints thousands of lines; a pipe nobody
-//!   drains fills at 64 KiB and deadlocks. [`crate::docker::Docker::run_captured`] is the
-//!   primitive, and the failure path prints the tail of that file.
-//! - **The artifact is checked by this side.** `holosmith build` reads the ELF header of the bytes that landed:
-//!   `e_machine` for the triple that was asked for, `ET_EXEC`, and no `PT_INTERP` — the three properties
-//!   `scripts/check-static.sh` asserts with `file` and `readelf`, read here without either program.
+//! Two container helpers sit here because `holosmith smoke` needs them: [`daemon_problem`], the one sentence for a
+//! machine whose daemon did not answer, and [`tail`], the end of a child's output rather than its head.
 //!
-//! The build is *safe*, never *trusted*: item 12's diff review is the real gate, and it happens before any of this
+//! The bytes are *checked*, never *trusted*: item 12's diff review is the real gate, and it happens before any of this
 //! runs (ADR-0080).
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
 use crate::docker::Docker;
 use crate::images;
 use crate::remote::Machine;
-
-/// The builder recipe, as the file in `crates/holosmith/images/`. Embedded for `images/`'s reason: a build runs on
-/// a machine that has the artifact and nothing else, so the recipe has to be inside it.
-pub const DOCKERFILE: &str = include_str!("../images/builder.Dockerfile");
-
-/// What the container runs, embedded for the same reason.
-pub const ENTRY: &str = include_str!("../images/builder-entry.sh");
-
-/// The names the two files take **inside the build context**, which is the one place their names are not the
-/// repository's: the daemon reads a context's `Dockerfile` and nothing else, and `COPY` resolves against the
-/// context, not against `images/`.
-const DOCKERFILE_IN_CONTEXT: &str = "Dockerfile";
-const ENTRY_IN_CONTEXT: &str = "build-entry.sh";
-
-/// The label that says which recipe an image was built from.
-///
-/// A version tag cannot answer that question: editing the Dockerfile or the entry script without bumping
-/// `Cargo.toml` would leave the same tag over a different image, and every later build would silently use the old
-/// toolchains. The value is the SHA-256 of both files, so any edit to either one is a rebuild.
-pub const LABEL_RECIPE: &str = "org.holosmith.builder-recipe-sha256";
-
-/// The image's name, tagged with this binary's version like the product images.
-pub const IMAGE_NAME: &str = "holosmith-builder";
-
-/// One image build's bound. Six minutes of downloads on a cold machine here, so half an hour is generous and still
-/// a bound: `Ok(None)` is "it did not finish", which is a sentence rather than a hang.
-pub const IMAGE_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// One artifact build's bound: the web app, then a release compile of this crate and its dependencies for one
-/// target. Ten minutes here on a cold container, so an hour is a bound and not a timeout to fail by.
-pub const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
-
-/// How much of a failed build's output is printed: enough to hold cargo's error and the layer it came from, and
-/// short enough to read on a phone. `exit.rs`'s five is a container's dying words; this is a compiler's.
-pub const TAIL_LINES: usize = 40;
 
 /// The artifact's name inside the output directory, and its digest's — item 10's `releases/<tag>/` holds these two
 /// and `holosmith upgrade` reads them. The directory *layout* and the `current` symlink are that story's.
 pub const BINARY: &str = "holosmith";
 pub const DIGEST: &str = "holosmith.sha256";
 
-/// Where the container writes the artifact before this side has looked at it: beside the final name, so a build
-/// that fails between the two leaves nothing that reads as a release.
+/// Where a build writes the artifact before this side has looked at it: beside the final name, so a build that fails
+/// between the two leaves nothing that reads as a release.
 pub const PENDING: &str = ".holosmith.new";
 
-/// The directory a build lands in when `--out` says nothing: item 10's `releases/<tag>/`.
-pub const RELEASES: &str = "releases";
-
-/// The two targets `scripts/build.sh` builds and the spec names ("Targets: x86_64 and aarch64 Linux, static musl").
+/// The two release triples the artifact checks can describe, though `scripts/build.sh` builds only this machine's
+/// (ADR-0119): a hand-built aarch64 artifact is still something `--binary` may be given.
 pub const X86_64: &str = "x86_64-unknown-linux-musl";
 pub const AARCH64: &str = "aarch64-unknown-linux-musl";
 
-/// `holosmith-builder:<version>`: the image a release build runs in.
-pub fn image() -> String {
-    format!("{IMAGE_NAME}:{}", crate::VERSION)
-}
+/// How much of a child's output is printed when a caller has no count of its own: enough to hold a compiler's error
+/// and the layer it came from, and short enough to read on a phone. `holosmith smoke` passes [`tail`] its own, smaller
+/// count, because a candidate's log is not a build's.
+pub const TAIL_LINES: usize = 40;
 
-/// The recipe's digest: the SHA-256 of the Dockerfile and the entry script, which is what the image's label carries.
+/// The last `lines` lines of a child's output, without the trailing blank ones.
 ///
-/// Both files, in this order, with a separator that cannot be forged by moving bytes from one to the other: a
-/// recipe is a pair, and half of one is not a recipe.
-pub fn recipe() -> String {
-    images::hex(&images::sha256(
-        format!("{DOCKERFILE}\n---\n{ENTRY}").as_bytes(),
-    ))
-}
-
-/// The ustar context the daemon reads: the recipe under the two names the context has.
-///
-/// `images::archive`'s shape and its reason — the daemon may not share this process's filesystem, so a *path* is
-/// not a context. It carries no binary, which is one of the ways this archive differs from the product images':
-/// those are built *from* this program, and this one builds it.
-pub fn archive() -> Vec<u8> {
-    let mut out = Vec::new();
-    images::push_entry(
-        &mut out,
-        DOCKERFILE_IN_CONTEXT,
-        0o644,
-        DOCKERFILE.as_bytes(),
-    );
-    images::push_entry(&mut out, ENTRY_IN_CONTEXT, 0o644, ENTRY.as_bytes());
-    out.resize(out.len() + 1024, 0);
-    out
-}
-
-/// `docker build -t <image> --build-arg HOLOSMITH_RUST_IMAGE=<pin> --build-arg HOLOSMITH_BUILDER_RECIPE=<recipe> -`:
-/// the context is the archive on stdin.
-///
-/// Two arguments and no labels, and the first of them is the rust base's: the recipe's first stage is
-/// `FROM rust:${HOLOSMITH_RUST_IMAGE}`, whose value is [`crate::pins::rust_image`]'s — the pin file read, not a
-/// version spelled here (ADR-0118).
-pub fn build_arguments(image: &str) -> Vec<String> {
-    vec![
-        "build".to_string(),
-        "-t".to_string(),
-        image.to_string(),
-        "--build-arg".to_string(),
-        format!("{}={}", images::RUST_IMAGE_ARG, crate::pins::rust_image()),
-        "--build-arg".to_string(),
-        format!("HOLOSMITH_BUILDER_RECIPE={}", recipe()),
-        "-".to_string(),
-    ]
-}
-
-/// The one `docker run` vector a build is.
-///
-/// Five decisions are in here:
-///
-/// - `--rm`: the container is one build and leaves nothing behind, so a failed run cannot leave a name that blocks
-///   the next one.
-/// - `--user <uid>:<gid>` is the **output directory's owner**, taken from the filesystem rather than from a
-///   `getuid` this build does not have. Everything the build writes into `/out` then belongs to the operator, and
-///   the container's own root is not the user the build runs as.
-/// - `-v <source>:/src:ro` is read-only, so an agent-authored `build.rs` cannot write to the tree it is built from.
-/// - `-v <out>:/out` is the only host path the build may write, and it is where the artifact is asked for.
-/// - `-e HOLOSMITH_GIT_TAG=<tag>` is `scripts/build.sh`'s hatch: the container has no `.git` (the copy leaves it
-///   behind), so the tag the source tree has arrives as a variable, and the artifact reports the tree it came from
-///   rather than `unknown`.
-pub fn run_arguments(
-    image: &str,
-    source: &Path,
-    out: &Path,
-    tag: &str,
-    target: &str,
-    owner: (u32, u32),
-) -> Vec<String> {
-    vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--user".to_string(),
-        format!("{}:{}", owner.0, owner.1),
-        "-v".to_string(),
-        format!("{}:/src:ro", source.display()),
-        "-v".to_string(),
-        format!("{}:/out", out.display()),
-        "-e".to_string(),
-        format!("HOLOSMITH_GIT_TAG={tag}"),
-        image.to_string(),
-        target.to_string(),
-    ]
-}
-
-/// The last `lines` lines of a build's output, without the trailing blank ones.
-///
-/// The tail and not the head: a build's first lines are the daemon's progress, and its last lines are the compiler
-/// saying what is wrong — which is the only part an operator acts on.
+/// The tail and not the head: a container's first lines are the daemon's progress, and its last lines say what went
+/// wrong — which is the only part an operator acts on. `holosmith smoke` prints one above a failed measurement's
+/// sentence.
 pub fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
@@ -202,9 +76,13 @@ pub enum Placement {
 
 /// Put the built artifact where `holosmith upgrade` will look for it, or say why not.
 ///
-/// `out` holds [`PENDING`] (what the container wrote) and may hold [`BINARY`] (what a previous run placed). The
+/// `out` holds [`PENDING`] (what the build wrote) and may hold [`BINARY`] (what a previous run placed). The
 /// three outcomes are [`Placement`]'s, and the pending file never survives: a refusal that left it behind would
 /// make the next run's question "is this the build I just made" unanswerable.
+///
+/// The rule rather than the producer: [`crate::release::Release::write`] is what writes a release directory in this
+/// tree, and it implements these three outcomes. This function is the statement of them, and `tests/build.rs` is what
+/// runs it.
 pub fn place(out: &Path, built: &str) -> Result<Placement, String> {
     let pending = out.join(PENDING);
     let artifact = out.join(BINARY);
@@ -257,9 +135,9 @@ fn write_digest(out: &Path, built: &str) -> Result<(), String> {
 /// interpreter segment is what a glibc or static-PIE build has: `scripts/check-static.sh` asserts both with
 /// `readelf`, and this reads them from the bytes so the command can refuse its own output before placing it.
 ///
-/// Each sentence names the **file**, not a build: two callers ask this question — `holosmith build` about the bytes
-/// its container wrote, and `holosmith smoke` about the `--binary` a promotion is about to make live — and
-/// only one of them ran a build.
+/// Each sentence names the **file**, not a build: two callers ask this question — `holosmith smoke` about the
+/// `--binary` a promotion is about to make live, and the promotion itself about the candidate it is handing the
+/// daemon — and only one of them talked to a container.
 pub fn artifact_problem(path: &Path, bytes: &[u8], target: &str) -> Option<String> {
     let wanted = Machine::parse(target.split('-').next().unwrap_or(target));
     let machine = match Machine::of_elf(elf_field(bytes, 18).unwrap_or_default()) {
@@ -338,47 +216,7 @@ fn interpreter_segment(bytes: &[u8]) -> Option<u32> {
     None
 }
 
-/// The tag the mounted tree has, as `scripts/build.sh` computes it: `git describe --tags --always --dirty`, and
-/// `unknown` for a tree with no history.
-///
-/// The host runs this and the container does not: it is metadata about the source, not a build step, and a copy of
-/// the tree without `.git` cannot describe itself. `scripts/build.sh` honours the value as `HOLOSMITH_GIT_TAG`.
-pub fn tag(source: &Path) -> String {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(source)
-        .args(["describe", "--tags", "--always", "--dirty"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Whether `source` is a Holosmith tree at all: the two files the container's entry script needs.
-///
-/// Before anything is mounted or built, because "the wrong directory was mounted" is a mistake with a cheap
-/// sentence and an expensive symptom — a container that fails a minute later inside `tar`.
-pub fn source_problem(source: &Path) -> Option<String> {
-    let recipe = source.join("scripts").join("build.sh");
-    let workspace = source.join("Cargo.toml");
-    if workspace.is_file() && recipe.is_file() {
-        return None;
-    }
-    Some(format!(
-        "{} is not a Holosmith source tree: a build mounts the current directory at /src and runs its \
-         scripts/build.sh, and {} is missing",
-        source.display(),
-        if workspace.is_file() {
-            "scripts/build.sh"
-        } else {
-            "Cargo.toml"
-        }
-    ))
-}
-
-/// The target triple a machine word names, for `--target`'s default.
+/// The target triple a machine word names — the mapping [`default_target`] answers with.
 pub fn target_of(word: &str) -> Option<&'static str> {
     match Machine::parse(word)? {
         Machine::X86_64 => Some(X86_64),
@@ -386,368 +224,47 @@ pub fn target_of(word: &str) -> Option<&'static str> {
     }
 }
 
-/// `--target`'s default: the triple this binary was built for, which is the machine it runs on.
+/// The triple this binary was built for, which is the machine it runs on — the one a candidate has to be.
 ///
-/// `HOLOSMITH_TARGET`'s first field is `build.rs`'s `TARGET`, so a debug build (`…-unknown-linux-gnu`) answers the
-/// same word a release build does — the architecture, not the libc, which is what the target triple's first field
-/// is. A binary built for something else entirely is refused rather than guessed at.
+/// `crate::pass`'s candidate read and `crate::promote`'s artifact check are the callers. `HOLOSMITH_TARGET`'s first
+/// field is `build.rs`'s `TARGET`, so a debug build (`…-unknown-linux-gnu`) answers the same word a release build
+/// does — the architecture, not the libc, which is what the target triple's first field is. A binary built for
+/// something else entirely is refused rather than guessed at.
 pub fn default_target() -> Result<&'static str, String> {
     let word = env!("HOLOSMITH_TARGET");
     let prefix = word.split('-').next().unwrap_or(word);
     target_of(prefix).ok_or_else(|| {
         format!(
-            "this binary is built for {word}, which is not one of the two release targets ({X86_64}, {AARCH64}): \
-             `--target` names the artifact to build"
+            "this binary is built for {word}, which is not one of the two release targets ({X86_64}, {AARCH64}): a \
+             candidate for `smoke --binary` or for a promotion has to be one of them"
         )
     })
 }
 
-/// The output directory, made absolute: `docker -v` resolves a relative host path against the daemon's own working
-/// directory, which is not this process's.
-pub fn absolute(path: &Path) -> Result<PathBuf, String> {
-    std::path::absolute(path).map_err(|error| {
-        format!(
-            "the output directory {} could not be resolved to an absolute path ({error}): a build mounts it into \
-             the container, and a relative path would be the daemon's",
-            path.display()
-        )
-    })
-}
-
-/// The owner of a directory, as `--user` takes it: the operator's own uid and gid, read from the filesystem because
-/// this build has no `getuid`.
-pub fn owner(path: &Path) -> Result<(u32, u32), String> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::metadata(path).map_err(|error| {
-        format!(
-            "the output directory {} could not be read ({error}): the container runs as its owner, so that the \
-             artifact belongs to you",
-            path.display()
-        )
-    })?;
-    Ok((metadata.uid(), metadata.gid()))
-}
-
-/// Ask the daemon who it is, before anything is built: no daemon is a sentence, not a half-run build.
+/// Ask the daemon who it is, before anything is started: no daemon is a sentence, not a half-run smoke test.
+///
+/// `holosmith smoke` is the caller, and its shape explains the words: a smoke run builds its own image and starts a
+/// session's container, so a machine with no daemon has a measurement it could not make rather than a candidate that
+/// failed it. `Ok(_)` with an empty answer is a daemon that answered nothing about itself, which is the same ending.
 pub fn daemon_problem(docker: &Docker) -> Option<String> {
     match docker.run(&["version", "--format", "{{.Server.Arch}}"]) {
         Ok(arch) if !arch.trim().is_empty() => None,
         Ok(_) => Some(
-            "this machine's Docker daemon answered nothing about itself, so no build ran: a build runs in a \
-             container, and `holosmith doctor --quick` says which check fails"
+            "this machine's Docker daemon answered nothing about itself, so nothing was started: a smoke run \
+             builds its own image and runs a session's container, and `holosmith doctor --quick` says which check \
+             fails"
                 .to_string(),
         ),
         Err(said) => Some(format!(
-            "this machine's Docker daemon did not answer ({said}), so no build ran: a release build runs in a \
-             container and the host only orchestrates it — start the daemon, or point `docker_host` at one"
+            "this machine's Docker daemon did not answer ({said}), so nothing was started: a smoke run builds its \
+             own image and runs a session's container — start the daemon, or point `docker_host` at one"
         )),
-    }
-}
-
-/// Ensure the builder image is there and built from this recipe, answering the line to print.
-///
-/// The image is **built locally, never pulled**: it is this program's own recipe, and a registry would be a second
-/// supply chain for the one step that must not run foreign code. A cold machine needs the network for the two bases,
-/// the musl.cc tarballs, cargo's registry and npm's — which is why a failure here is a sentence about the network
-/// rather than a wrong Dockerfile. The sentence itself is [`images::failure`]'s, so a pinned fetch that did not answer
-/// is named as one instead of as a broken recipe (ADR-0111); `holosmith build` still answers exit 1 for it, because
-/// the gate reads `server deploy`'s code and not this command's.
-///
-/// A build that **succeeded** over a certificate it could not verify is the one thing this recipe prints that would
-/// otherwise be swallowed: nothing builds this image but this function, and it has no sink, so
-/// `images::CERTIFICATE_CLAUSE` goes into the sentence `built_sentence` composes (ADR-0116 D3).
-pub fn ensure_image(docker: &Docker) -> Result<String, String> {
-    let image = image();
-    let wanted = recipe();
-    let label = format!("{{{{index .Config.Labels \"{LABEL_RECIPE}\"}}}}");
-    if let Ok(found) = docker.image_inspect(&image, &label)
-        && found.trim() == wanted
-    {
-        return Ok(format!("{image} is here, built from this recipe"));
-    }
-    let context = archive();
-    let arguments = build_arguments(&image);
-    let log = docker
-        .run_captured(&arguments, Some(&context), IMAGE_TIMEOUT)
-        .map_err(|error| error.to_string())?;
-    match log {
-        None => Err(format!(
-            "the builder image {image} did not finish building within {}s and was killed: a cold image fetches \
-             both bases, the two musl toolchains and the rust targets over the network, so this is a machine that \
-             could not reach it rather than a recipe that is wrong",
-            IMAGE_TIMEOUT.as_secs()
-        )),
-        Some(log) if !log.success => Err(images::failure(&image, &log.text)),
-        Some(log) => Ok(built_sentence(&image, &log.text)),
-    }
-}
-
-/// The sentence [`ensure_image`] answers for a build that succeeded, with the certificate's clause when the log carried
-/// a warning.
-///
-/// This recipe fetches both musl.cc toolchains, and a host whose certificate does not verify is a fetch it retries
-/// with `--insecure` — safe, because the pin decides what lands in `/opt`, and still a fact an operator has to hear
-/// (ADR-0116). `holosmith build` passes no sink, so this sentence is the whole of what it says about it, and it says
-/// it **once** however many of the recipe's two fetches fell back: one build is one fact. A log that warned nothing
-/// answers the sentence unchanged, byte for byte, which is what every assertion about this line is about.
-fn built_sentence(image: &str, log: &str) -> String {
-    let sentence = format!("{image} was built from this recipe");
-    if images::certificate_warnings(log).is_empty() {
-        return sentence;
-    }
-    format!("{sentence}{}", images::CERTIFICATE_CLAUSE)
-}
-
-/// Run the container for one target, answering the artifact's bytes' tail of output — or the reason there is none.
-pub fn run(
-    docker: &Docker,
-    image: &str,
-    source: &Path,
-    out: &Path,
-    tag: &str,
-    target: &str,
-    owner: (u32, u32),
-) -> Result<(), String> {
-    let arguments = run_arguments(image, source, out, tag, target, owner);
-    let log = docker
-        .run_captured(&arguments, None, BUILD_TIMEOUT)
-        .map_err(|error| error.to_string())?;
-    match log {
-        None => Err(format!(
-            "the build of {target} did not finish within {}s and was killed: the container was still running, so \
-             nothing was placed",
-            BUILD_TIMEOUT.as_secs()
-        )),
-        Some(log) if !log.success => Err(format!(
-            "the build of {target} failed in {image}, and its last {TAIL_LINES} lines are:\n{}",
-            tail(&log.text, TAIL_LINES)
-        )),
-        Some(_) => Ok(()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_recipe_takes_its_rust_base_from_the_pin_and_pins_node_by_digest() {
-        // Two bases, two ways of naming them, and one of them is now the pin's: a `FROM` line cannot include a file,
-        // so the rust stage reads `HOLOSMITH_RUST_IMAGE` — declared before the first `FROM`, which is the only scope
-        // a `FROM` can read an argument from — and the binary hands it the value of `pins/rust.txt` verbatim
-        // (ADR-0118). Node, whose reference nothing else needs, stays a literal pinned by digest.
-        let froms: Vec<&str> = DOCKERFILE
-            .lines()
-            .filter(|line| line.trim_start().starts_with("FROM "))
-            .collect();
-        assert_eq!(froms.len(), 2, "the recipe has two bases: {froms:?}");
-        assert_eq!(
-            froms[0].trim(),
-            format!("FROM rust:${{{}}} AS rust", images::RUST_IMAGE_ARG),
-            "the rust stage is not the pin's reference"
-        );
-        let declared = DOCKERFILE
-            .lines()
-            .position(|line| line.trim() == format!("ARG {}", images::RUST_IMAGE_ARG));
-        let declared = declared.unwrap_or_else(|| {
-            panic!(
-                "the recipe reads {} and declares no such argument",
-                images::RUST_IMAGE_ARG
-            )
-        });
-        let first_from = DOCKERFILE
-            .lines()
-            .position(|line| line.trim_start().starts_with("FROM "))
-            .unwrap_or_default();
-        assert!(
-            declared < first_from,
-            "{} is declared below the first `FROM`, where no `FROM` can read it",
-            images::RUST_IMAGE_ARG
-        );
-
-        let node = froms[1].split_whitespace().nth(1).unwrap_or_default();
-        assert!(
-            node.contains("@sha256:"),
-            "a base is pinned by its digest, not its tag: {}",
-            froms[1]
-        );
-        let digest = node.rsplit("@sha256:").next().unwrap_or_default();
-        assert_eq!(
-            digest.len(),
-            64,
-            "a digest is 64 hex characters: {}",
-            froms[1]
-        );
-    }
-
-    #[test]
-    fn every_copy_from_names_a_stage_this_recipe_declares() {
-        // `COPY --from=rust` resolves against stage names first and an image reference second, so an unnamed `FROM`
-        // stage silently becomes `rust:latest` — an extra unpinned pull, and a toolchain nobody pinned. Measured in
-        // this story's review: the build loaded `docker.io/library/rust:latest` beside the pinned base.
-        let stages: Vec<&str> = DOCKERFILE
-            .lines()
-            .filter_map(|line| line.trim().split_once(" AS "))
-            .map(|(_, name)| name.trim())
-            .collect();
-        assert!(!stages.is_empty(), "the recipe declares its stages");
-        let copies: Vec<&str> = DOCKERFILE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("COPY --from="))
-            .collect();
-        assert!(!copies.is_empty(), "the recipe copies from its stages");
-        for line in copies {
-            let name = line
-                .trim_start_matches("COPY --from=")
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            assert!(
-                stages.contains(&name),
-                "COPY --from={name} names no stage of this recipe (stages: {stages:?}): it would be an image \
-                 reference, and an unpinned one"
-            );
-        }
-    }
-
-    #[test]
-    fn the_two_musl_toolchains_are_checked_against_their_digests() {
-        let checks = DOCKERFILE.matches("| sha256sum -c -").count();
-        assert_eq!(
-            checks, 2,
-            "each musl.cc download is checked against its digest"
-        );
-    }
-
-    #[test]
-    fn the_recipe_never_sets_rustflags() {
-        // ADR-0005: an exported RUSTFLAGS disables `.cargo/config.toml`'s per-target rustflags and ships a
-        // static-PIE binary, and a container is one more place that trap can be set. A *comment* naming the trap is
-        // the point — an instruction setting it is the bug, so only non-comment lines are read.
-        let setting: Vec<&str> = DOCKERFILE
-            .lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .filter(|line| line.contains("RUSTFLAGS"))
-            .collect();
-        assert!(
-            setting.is_empty(),
-            "the recipe must not set RUSTFLAGS (ADR-0005): {setting:?}"
-        );
-    }
-
-    #[test]
-    fn the_recipe_digest_covers_both_files() {
-        let recipe = recipe();
-        assert_eq!(recipe.len(), 64);
-        assert_ne!(
-            recipe,
-            images::hex(&images::sha256(DOCKERFILE.as_bytes())),
-            "the entry script is half the recipe: a digest of the Dockerfile alone would not rebuild when it changes"
-        );
-    }
-
-    #[test]
-    fn the_archive_holds_the_two_recipe_files_and_is_reproducible() {
-        let context = archive();
-        assert_eq!(
-            context,
-            archive(),
-            "the same recipe must produce the same context"
-        );
-        let text = String::from_utf8_lossy(&context);
-        assert!(text.contains("Dockerfile"));
-        assert!(text.contains("build-entry.sh"));
-        assert!(
-            context.ends_with(&[0_u8; 1024]),
-            "a tar archive ends with two zero blocks"
-        );
-    }
-
-    #[test]
-    fn the_build_arguments_name_the_pin_the_recipe_and_the_context() {
-        let arguments = build_arguments("holosmith-builder:9.9.9");
-        assert_eq!(
-            arguments,
-            vec![
-                "build".to_string(),
-                "-t".to_string(),
-                "holosmith-builder:9.9.9".to_string(),
-                "--build-arg".to_string(),
-                format!("{}={}", images::RUST_IMAGE_ARG, crate::pins::rust_image()),
-                "--build-arg".to_string(),
-                format!("HOLOSMITH_BUILDER_RECIPE={}", recipe()),
-                "-".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn the_run_arguments_mount_the_source_read_only_and_the_output_writable() {
-        let arguments = run_arguments(
-            "holosmith-builder:9.9.9",
-            Path::new("/src/tree"),
-            Path::new("/out/dir"),
-            "v1-2-gabc",
-            X86_64,
-            (1000, 1001),
-        );
-        assert_eq!(
-            arguments,
-            vec![
-                "run".to_string(),
-                "--rm".to_string(),
-                "--user".to_string(),
-                "1000:1001".to_string(),
-                "-v".to_string(),
-                "/src/tree:/src:ro".to_string(),
-                "-v".to_string(),
-                "/out/dir:/out".to_string(),
-                "-e".to_string(),
-                "HOLOSMITH_GIT_TAG=v1-2-gabc".to_string(),
-                "holosmith-builder:9.9.9".to_string(),
-                X86_64.to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_builder_image_that_fell_back_says_so_once_and_a_silent_one_says_nothing_new() {
-        // The two fetches in one recipe print the same line when the same certificate is what failed, so a log can
-        // carry it twice; the sentence carries the fact once, in the one clause step 3's sentence also uses
-        // (ADR-0116 D3). Nothing builds this recipe's image but `ensure_image`, and it has no sink to print to.
-        let image = "holosmith-builder:0.1.0";
-        let warning = format!(
-            "{} (curl exit 60): retrying that URL without certificate verification, and the pinned digest decides",
-            images::CERTIFICATE_WARNING
-        );
-        let warned = built_sentence(
-            image,
-            &format!("#8 0.512 {warning}\n#9 0.512 {warning}\n#8 DONE 9.1s"),
-        );
-        assert_eq!(
-            warned,
-            format!(
-                "{image} was built from this recipe; {}",
-                images::CERTIFICATE_CLAUSE.trim_start_matches("; ")
-            ),
-            "the sentence does not carry the certificate's clause exactly once: {warned}"
-        );
-        assert_eq!(
-            warned.matches(images::CERTIFICATE_CLAUSE).count(),
-            1,
-            "the clause is not one clause: {warned}"
-        );
-        // And a build that warned nothing answers the sentence it always did, whether its log is a quiet build's or
-        // empty: every assertion about this line is about that shape.
-        for log in ["#8 DONE 9.1s", ""] {
-            assert_eq!(
-                built_sentence(image, log),
-                format!("{image} was built from this recipe"),
-                "the clause appears over a build that warned nothing: {log:?}"
-            );
-        }
-    }
 
     #[test]
     fn the_tail_is_the_end_of_the_output() {
