@@ -171,12 +171,11 @@ for program in cargo rustc; do
     printf 'build.sh: %s is not on PATH, so there is no toolchain to compile an artifact with.\n' "$program" >&2
     printf 'pins/rust.txt holds the rustc %s the artifact has to be built by.\n' "${pinned_rust:-unknown}" >&2
   fi
-  printf 'An artifact compiled by another rustc is not the one the agent image runs, so it is not built here:\n' >&2
-  printf '  . ~/.pi/toolchains/env.sh && scripts/build.sh\n' >&2
-  printf 'That puts a toolchain first on PATH, which fixes a shadowed program and cannot move a version: the file\n' >&2
-  printf 'points rustup at a toolchains directory whose default is `stable`, so the compiler moves under\n' >&2
-  printf '`rustup update` there — or pin the host to it: rustup toolchain install %s && rustup default %s\n' \
-    "$pinned_rust" "$pinned_rust" >&2
+  printf 'An artifact compiled by another rustc is not the one the agent image runs, so it is not built here.\n' >&2
+  printf 'Put the rustc pins/rust.txt holds first on PATH, then run this again:\n' >&2
+  printf '  rustup toolchain install %s && rustup default %s\n' "$pinned_rust" "$pinned_rust" >&2
+  printf 'That fixes a shadowed program and makes the version of the pin the version of the host, which is the only\n' >&2
+  printf 'compiler this artifact is built by.\n' >&2
   exit 1
 done
 

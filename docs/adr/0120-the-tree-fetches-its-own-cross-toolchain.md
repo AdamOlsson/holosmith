@@ -75,7 +75,9 @@ answers, and an artifact is the pin's only when both are.
 
 - A clone with no toolchain directory and no network can build once it is given `toolchains/`; a clone with neither
   fetches the pinned tarball and checks it.
-- Nothing this repository's scripts do depends on `~/.pi/toolchains/env.sh` any more. The `. ` line in `AGENTS.md` is
-  still how this host gets the pinned `rustc` on `PATH` — and the compiler check is what refuses without it.
-- `holosmith-builder`'s entry script still calls `scripts/build.sh --target "$target" --no-check`, so the builder gets
-  the new script unchanged; that is what makes its aarch64 arm fail on ADR-0119's sentence inside the container.
+- Nothing this repository's scripts do depends on `~/.pi/toolchains/env.sh` any more, and nothing sources it: `AGENTS.md`
+  names rustc 1.99.1 on `PATH` as the host's own prerequisite, and the compiler check is what refuses without it.
+- `--target` and `--no-check` are still `scripts/build.sh`'s flags, and the tree's own callers pass neither: the gate
+  runs the script bare in both its arms (`scripts/verify.sh`'s `build` phase, and `case_agent_offline_build`'s
+  container), and only `crates/holosmith/tests/build_script.rs` passes either. The `holosmith-builder` entry script that
+  passed both went with the verb (ADR-0121).

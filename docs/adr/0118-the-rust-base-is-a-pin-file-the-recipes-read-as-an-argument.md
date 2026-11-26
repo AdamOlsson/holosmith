@@ -51,6 +51,12 @@ ADR-0105's D2 refused exactly this shape on two grounds, and both are answered r
   reaches it: the argument's value is `pins::rust_image()`'s and a test asserts the vector carries that and nothing a
   machine could set. What D1 refused — a machine moving the toolchain — is still refused.
 
+**Amended by ADR-0121:** there is one reader now, not two. `builder.Dockerfile` went with `holosmith build`, so
+`images::build_arguments` is the only evaluator that passes `HOLOSMITH_RUST_IMAGE` — there is no
+`builder::build_arguments` and no second recipe declaring a rust stage — and `tests/pin_single_source.rs` reads a
+one-recipe list. The argument, its scope above the first `FROM` and its single source are otherwise exactly what D1–D3
+decided.
+
 ## D3 — the argument above the first `FROM` costs no cache boundary
 
 ADR-0115 is about a label-only argument declared **last**, below every `RUN`, because a `RUN` is in scope of every

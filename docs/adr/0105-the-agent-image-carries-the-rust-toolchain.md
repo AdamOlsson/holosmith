@@ -57,6 +57,14 @@ The musl.cc tarballs are pinned the same way `builder.Dockerfile` pins them: by 
 with `sha256sum -c` before the extraction. Same two URLs, same two digests, for the same reason — a session compiles
 the same tree.
 
+**Amended by ADR-0121, with ADR-0118 and ADR-0119:** the rule is **one** recipe now. `builder.Dockerfile` went with
+`holosmith build`, so `agent.Dockerfile` has no sibling to be kept level with and `tests/pin_single_source.rs` walks a
+one-recipe list instead of asserting that two `FROM` lines are the same string. The pin's single source is
+`pins/rust.txt` (ADR-0118) — the recipe takes it as `HOLOSMITH_RUST_IMAGE`, and `scripts/build.sh` refuses a compiler
+that is not its version — and the tarball pins are one URL and one digest rather than two, because ADR-0119 leaves one
+release target. D3's heading and its `rustup target add` line are ADR-0119's too: the tree adds one musl target now, and
+`.cargo/config.toml` names one. What D2 decided then still holds: a session compiles the same tree the artifact does.
+
 ## D3 — `rustup component add` and both musl targets are load-bearing
 
 The pinned rust base ships rustup's **minimal** profile. Without `rustup component add rustfmt clippy`, `cargo fmt`

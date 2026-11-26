@@ -42,9 +42,9 @@ Then, in this order:
 3. **Launch the worker subagent** for the implementation. Give it the ticket's intent and acceptance criteria
    verbatim, the invoker's `${@:2}` instructions verbatim and marked as binding rather than background, the seams
    you found, and these rules:
-   - `. ~/.pi/toolchains/env.sh` first, then **only** `scripts/gate-quick.sh` to verify itself: `--list` for the
-     binaries, name every one whose module it touched, and `--lib-only` (saying so in its report) if the change
-     names none. It must not run `cargo test` or `scripts/verify.sh` — those are the parent's.
+   - **Only** `scripts/gate-quick.sh` verifies it: `--list` for the binaries, name every one whose module it
+     touched, and `--lib-only` (saying so in its report) if the change names none. It must not run `cargo test` or
+     `scripts/verify.sh` — those are the parent's.
    - Commit nothing, merge nothing, touch no Linear issue. Git and Linear belong to the parent.
    - Escalate an unapproved decision instead of deciding it.
    - **`cargo fmt` first, then one `gate-quick`**: a quick gate that stops on formatting is a cycle spent on
