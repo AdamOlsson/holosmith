@@ -10807,6 +10807,24 @@ EOF
   chmod 0644 "$path"
 }
 
+# The two roots together, for the one kind of fixture `deploy_config` cannot write: a case that pins its own data root
+# and whose `doctor` or `server deploy` run reads the file **directly**, so it never passes through `start_serve` and
+# `ensure_projects_root` — which is that same rule for a boot, derived from the data dir the boot was given.
+#
+# One half is not expressible here on purpose. The account's default `projects_root` is
+# `<home>/.local/share/holosmith/projects`, so a `data_root` under this repository's `target/` is *inside* it on the
+# machine this gate is most often run on — one running Holosmith over its own project — and the config's own rule
+# (`deleting data must never touch a repository`, ADR-0006) refuses it before the case measures anything. That refusal
+# is right; what a case must not do is pin one root and leave the other to a default.
+#
+# The projects root sits beside the data dir as `ensure_projects_root` puts it, and is created here, so a case that
+# provisions nothing in it still reads a tree.
+deploy_config_roots() {
+  local path="$1" data="$2" root="$2-projects"
+  mkdir -p "$root" || fail "deploy/config" "could not create the projects root $root"
+  printf 'data_root = "%s"\nprojects_root = "%s"\n' "$data" "$root" >>"$path"
+}
+
 # The search path an image hands its containers, so a case's own shims go ahead of the image's programs rather than
 # ahead of a spelling the case assumed — and a `HOLOSMITH_TEST_IMAGE` naming another image does not silently drop one of
 # them. The fallback is what Docker supplies to a container whose image names no `PATH`.
@@ -15059,7 +15077,7 @@ case_server_service() {
   # (short, whatever the checkout's depth) and the hand-built install tree stays under `target/`.
   local sock="$WORK/docker-service.sock"
   local image="${HOLOSMITH_TEST_IMAGE:-pi-agent:local}"
-  local control preview status line count absent shims log state target vapid unit serve_bg
+  local control preview status line count absent shims log state target vapid unit serve_bg root_key
 
   # ---- the offline half: `perms` on a hand-built tree, and the dry run's plan ----------------------
   if ! command -v python3 >/dev/null 2>&1; then
@@ -15093,17 +15111,18 @@ case_server_service() {
     state="$WORK/$name.tailscale.state"
     deploy_machine_shims "$shims" "$log" "$state"
     # `--root "$root"` is the tree this case made: `doctor`'s install paths are the root's (ADR-0088 D1), so a
-    # run given only the file would answer about this machine's own tree. The config still carries `data_root`,
-    # because `serve` and the dry run below read the file.
+    # run given only the file would answer about this machine's own tree. The config still carries both roots,
+    # because `serve` and the dry run below read the file. `deploy_config_roots` is what pairs them: one half alone is
+    # refused on a checkout that lives under the account's default projects root.
     deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$sock" "$image"
-    # The pair, not one half: `ensure_projects_root`'s reason, for a case whose `doctor` and `server deploy` runs read
-    # this file directly rather than through `start_serve`. The account's default `projects_root` is
-    # `<home>/.local/share/holosmith/projects`, so a checkout that lives under it — a machine running Holosmith over
-    # its own project, which is the machine this gate is most often run on — would have `$root/data` refused as inside
-    # it. The root sits beside the data dir, as there, and is created so a run that provisions nothing still reads one.
-    mkdir -p "$root/data-projects" || fail "$name/projects" "could not create the projects root under $root"
-    printf 'data_root = "%s"\nprojects_root = "%s"\n' "$root/data" "$root/data-projects" \
-      >>"$WORK/config-service-doctor.toml"
+    deploy_config_roots "$WORK/config-service-doctor.toml" "$root/data"
+    # The fixture's precondition, asserted rather than assumed: a file naming one root is refused before this case's
+    # first `perms` line, and the run would report `expected '0', got '1'` about a mode nothing ever read.
+    for root_key in data_root projects_root; do
+      grep -q "^$root_key = " "$WORK/config-service-doctor.toml" ||
+        fail "$name/fixture/$root_key" "the fixture names no $root_key: $(cat "$WORK/config-service-doctor.toml")"
+      assertions=$((assertions + 1))
+    done
 
     # 1. The modes the deploy writes: one `perms` line, and the two files this case made are not among the paths the
     #    pass reports as ones it did not find.
@@ -15994,7 +16013,8 @@ ensure_preview_listen() {
 # was wrong was a case leaving one half of a pair of roots to a default while pinning the other.
 #
 # The root sits beside the data dir (`<data>-projects`) and is created here, so a case that provisions nothing in it
-# still boots; a fixture that names its own `projects_root` — the ones that provision a project — keeps it.
+# still boots; a fixture that names its own `projects_root` — the ones that provision a project — keeps it. A fixture
+# that pins its own data root and never boots takes `deploy_config_roots` instead, which pairs the two by construction.
 ensure_projects_root() {
   local config="$1" data="$2" root="$data-projects"
   if grep -qE '^[[:space:]]*projects_root[[:space:]]*=' "$config"; then
