@@ -60,11 +60,8 @@
 # redirection (`<&fd`, `<<<`, `< <(...)`), never file descriptor 0.
 #
 # The environment is not inherited — `docker run` starts from the image's — so what is forwarded is a short list of
-# machine-local inputs no case can derive. `HOLOSMITH_TEST_IMAGE` says which image the container cases measure. The
-# two emulators are mounted at a fixed path inside and forwarded as **that** path, because it is the file the container
-# can execute: `scripts/check-static.sh` takes `HOLOSMITH_QEMU_AARCH64` as a command and guards on `command -v`, so a
-# host path would resolve to nothing and the run would print `SKIP aarch64-unknown-linux-musl execution`, which the
-# host run does not print. `DOCKER_HOST` is forwarded when it is not a unix socket: a daemon on this machine is reached
+# machine-local inputs no case can derive. `HOLOSMITH_TEST_IMAGE` says which image the container cases measure.
+# `DOCKER_HOST` is forwarded when it is not a unix socket: a daemon on this machine is reached
 # through `--network host` and resolves this tree because the filesystem is the same one, and a remote one ends at the
 # tree refusal below. Everything else is the scripts' own (`HOLOSMITH_GATE_RUN`, `HOLOSMITH_REQUIRE_WEB`,
 # `HOLOSMITH_GIT_TAG`, `HOLOSMITH_CRATE_SET`, `HOLOSMITH_LOG`, …) and is left for the scripts to set, so no marker, tag
@@ -261,25 +258,6 @@ forward=(--env "TMPDIR=$work_mount")
 if [ -n "${HOLOSMITH_TEST_IMAGE:-}" ]; then
   forward+=(--env "HOLOSMITH_TEST_IMAGE=$HOLOSMITH_TEST_IMAGE")
 fi
-
-# The emulators, when this machine has them: no image ships one, and `scripts/check-static.sh` turns a missing one into
-# `SKIP <target> execution` — a SKIP the host run does not print. Each is mounted at a fixed path inside and forwarded
-# as that path, which is what the container can execute; `command -v` accepts an absolute path and the empty-root run
-# copies the runner by path, so a mounted emulator is used exactly as a host one is (measured: `qemu-aarch64 version
-# 7.2.0`, and this tree's aarch64 artifact answering `version` under both the mounted and a copied runner).
-for suffix in AARCH64 X86_64; do
-  case "$suffix" in
-    AARCH64) default_emulator=qemu-aarch64-static ;;
-    X86_64) default_emulator=qemu-x86_64-static ;;
-  esac
-  variable="HOLOSMITH_QEMU_$suffix"
-  emulator="${!variable:-$default_emulator}"
-  emulator_path="$(command -v "$emulator" 2>/dev/null || true)"
-  [ -n "$emulator_path" ] || continue
-  emulator_inner="/run/verify/$(basename -- "$emulator_path")"
-  mounts+=(--volume "$emulator_path:$emulator_inner:ro")
-  forward+=(--env "$variable=$emulator_inner")
-done
 
 exec docker run --rm --init \
   --network host \

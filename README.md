@@ -50,9 +50,10 @@ holosmith uninstall [--purge]        # unit, proxies, networks; --purge takes th
 
 ## Building from source
 
-Rust 1.99+, Node.js and npm for `web/`, and the musl cross toolchains on `PATH`. `scripts/build.sh` writes
-`dist/<triple>/holosmith`, and it sources `~/.pi/toolchains/env.sh` itself when the cross linkers are not already on
-`PATH`, which is where this host keeps them; any other machine puts them on `PATH` first. `holosmith build` writes the
-same artifact from a pinned builder container, needing Docker
+Rust 1.99+, Node.js and npm for `web/`, and the musl cross linker on `PATH` — or none: `scripts/build.sh` takes it
+from `PATH` first, then from this tree's `toolchains/`, and fetches the pinned tarball into `toolchains/` when neither
+has one. It writes `dist/<triple>/holosmith` with the `.sha256` a promotion reads beside it, and
+`scripts/build.sh --profile dev` writes a debug binary to `target/<triple>/dev/holosmith` without touching `dist/`.
+`holosmith build` writes the same artifact from a pinned builder container, needing Docker
 and an existing binary. `scripts/verify.sh` is the gate, and `AGENTS.md` has the repository rules. Put the artifact in
 a directory on your `PATH` — the quick start uses `~/.local/bin`.

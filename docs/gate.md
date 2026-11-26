@@ -35,11 +35,11 @@ Both run ahead of the phases, and neither is counted as one.
 | --- | --- | --- | --- |
 | `fmt` | `cargo fmt --check` | 3 s | the tree is formatted |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` | 18 s | no lint, and warnings are errors |
-| `test` | `cargo test`, with `HOLOSMITH_REQUIRE_WEB=1` when `web/dist` is present | 430 s warm | 740 unit tests and 72 integration binaries, against a real daemon where one is there; 94 s of the 430 is relinking |
+| `test` | `cargo test`, with `HOLOSMITH_REQUIRE_WEB=1` when `web/dist` is present | 430 s warm | 740 unit tests and 73 integration binaries, against a real daemon where one is there; 94 s of the 430 is relinking |
 | `migrations` | `cargo test --test schema_previous` | 2 s | the previous release's schema is still a subset of this build's |
 | `quick` | `case_gate_quick` | 16 s | the worker gate's contract — its names, refusals, footer — and one real run of it |
 | `cleanup` | `case_gate_cleanup` | 7 s | the cleanup script's contract: the marker it kills by, the prefix it does not, the lock, and a registered checkout this host cannot see skipped rather than refused |
-| `build` | `scripts/build.sh` | 188 s warm, 317 s after a change | `npm test`, the web build, both musl artifacts, and `check-static.sh` (statically linked, empty `readelf -d`, plus two empty-root container runs and the aarch64 one under qemu) |
+| `build` | `scripts/build.sh` | 188 s warm, 317 s after a change | `npm test`, the web build, the musl artifact, and `check-static.sh` (statically linked, empty `readelf -d`, plus the empty-root container run) |
 | `embed` | `scripts/check-embed.sh` | 52 s | app present, app absent (placeholder), app required and absent (red) |
 | `serve` | every case in `serve_cases` (112) against `dist/<host-triple>/holosmith` | 1952 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
 
@@ -80,7 +80,7 @@ names the check behind every verdict.
 | --- | --- | --- |
 | `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, then `cargo build --locked`, `clippy`, `test --no-run` and `npm ci`/`npm test` inside it under `--network none` |
 | `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` and `agent-image`; the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
-| `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on both musl artifacts inside the container |
+| `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on the musl artifact inside the container |
 | `case_build` | 178 s | `holosmith build` through a `docker` stand-in, plus the real container build when the builder image is present |
 | `case_idle_stop` | 66 s | `idle_stop_min` is whole minutes, so the sweeper is measured at its one-minute floor rather than behind a knob |
 | `case_web_update` | 30 s | a promotion started from the app, polled over its socket |
@@ -105,7 +105,6 @@ A `SKIP` with its reason is a fact about *this machine*, never a defect in the t
 | a Docker daemon | the container, isolation, image and build cases, the install cases in their container, and `case_docker_preflight` |
 | `$HOLOSMITH_TEST_IMAGE` (default `pi-agent:local`) | the mount and reconcile cases, and the two install cases |
 | python3 | the cases that read a database or speak a socket by hand, and `case_web_update` (it needs `free_port`) |
-| `qemu-aarch64-static` | the aarch64 execution inside `build.sh` |
 | a network for one pinned base | the three product images: a host that cannot fetch is red here, not quiet |
 | a path short enough for `AF_UNIX` | `case_upgrade` and `case_web_update`, which bind a socket under the checkout and print `SKIP … the socket path is <n> bytes and AF_UNIX caps one at 107` instead |
 

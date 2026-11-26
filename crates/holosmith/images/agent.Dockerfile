@@ -9,7 +9,7 @@
 # Everything this recipe installs is **fixed**. There is no package key and no toolchain label: a package a project
 # needs goes in the image it builds for itself from its own `docker/Dockerfile`, which `base_image` then names, and
 # the set here is what this repository's own gate and tree are measured to need. The Rust toolchain — rustc, cargo,
-# rustfmt, clippy, both musl targets and both musl.cc cross linkers — is the largest part of it: the tree a session
+# rustfmt, clippy, the musl target and its musl.cc cross linker — is the largest part of it: the tree a session
 # works on is written in Rust, so `cargo fmt`, `cargo clippy` and `cargo test` are the same three commands in there as
 # on a host.
 #
@@ -39,7 +39,7 @@
 #
 # **`/.cargo/config.toml` sits at the filesystem root, and that is what makes one file enough.** Cargo reads
 # `.cargo/config.toml` from the working directory up through its parents, so a file at `/` is an ancestor of every
-# `/work` a session gets, while the tree's own `.cargo/config.toml` — the two musl linkers and their
+# `/work` a session gets, while the tree's own `.cargo/config.toml` — the musl linker and its
 # `relocation-model=static` — is deeper and still wins on the keys it sets. It is written **after** the vendor step,
 # and that order is load-bearing: a `directory` source pointing at a directory that does not exist yet fails with a
 # message about the configuration rather than about the step that has not run.
@@ -94,7 +94,7 @@ COPY --from=rust /usr/local/cargo /usr/local/cargo
 # silently ship a static-PIE binary — one container out, the same trap.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/tmp/cargo \
-    PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:/opt/aarch64-linux-musl-cross/bin:${PATH}
+    PATH=/usr/local/cargo/bin:/opt/x86_64-linux-musl-cross/bin:${PATH}
 
 # The one fact a `RUN` below spends, declared above it because an `ARG` is in scope of every instruction after it:
 # `HOLOSMITH_PI_VERSION` is the pi version the install step pins. Every package this recipe installs is a literal in
@@ -111,7 +111,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 ARG HOLOSMITH_PI_VERSION
 
 # `build-essential` is the `cc` the `cc` crate needs for bundled SQLite — a session that runs `cargo test` compiles
-# it from source — `curl` is what fetches the two musl.cc tarballs below, at image-build time, and `file` is what
+# it from source — `curl` is what fetches the pinned musl.cc tarball below, at image-build time, and `file` is what
 # `scripts/check-static.sh` reads an artifact's link state with (`file -b`), so `scripts/build.sh` — whose last step
 # that script is — cannot finish in a session without it. The `readelf` it also runs arrives with `build-essential`.
 # `procps` is `/bin/kill`, the child the header says `smoke` needs and cannot get from a shell builtin.
@@ -133,19 +133,17 @@ RUN apt-get update \
 # the toolchain`, which is a session's first command failing on an image that looks complete.
 RUN rustup component add rustfmt clippy
 
-# Both musl targets, so the tree's own `.cargo/config.toml` targets resolve in a session: `rustup target add` fetches
-# the standard library for them here, which is what keeps a later `cargo build --target …` offline apart from its
-# crates.
-RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+# The musl target, so the tree's own `.cargo/config.toml` target resolves in a session: `rustup target add` fetches
+# the standard library for it here, which is what keeps a later `cargo build --target …` offline apart from its crates.
+RUN rustup target add x86_64-unknown-linux-musl
 
-# The two cross toolchains, pinned by the digest of the tarball: musl.cc's downloads are not content-addressed, so the
-# checksum is the pin. `x86_64-linux-musl-gcc` and `aarch64-linux-musl-gcc` are the linkers `.cargo/config.toml`
-# names and the `cc` crate finds for the bundled SQLite, exactly as `~/.pi/toolchains/env.sh` provides them on a
-# development machine — same URLs and same digests as `builder.Dockerfile`, because a session and a release build
-# compile the same tree.
+# The cross toolchain, pinned by the digest of the tarball: musl.cc's downloads are not content-addressed, so the
+# checksum is the pin. `x86_64-linux-musl-gcc` is the linker `.cargo/config.toml` names and the `cc` crate finds for
+# the bundled SQLite — the same URL and the same digest as `builder.Dockerfile`'s x86_64 tarball, because a session and
+# a release build compile the same tree.
 #
-# **The tarballs are fetched here, at build time, and the artifact cannot carry them.** This recipe is
-# `include_str!`ed into the binary and a deploy runs on a machine that has the artifact and nothing else, so a
+# **The tarball is fetched here, at build time, and the artifact cannot carry it.** This recipe is
+# `include_str!`ed into the binary and a deploy runs on a machine that has the artifact and nothing else, so the
 # tarball can only be inside the artifact — 230 MB of someone else's binaries in a static binary — or fetched now
 # (ADR-0111). The pin is what makes the fetch safe; the flags are what make it survive an outage.
 # `--retry-all-errors` is not a second spelling of `--retry`: `--retry` retries a timeout and an HTTP 5xx and not the
@@ -175,19 +173,6 @@ RUN if curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz 
  && echo "c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea  /tmp/musl.tgz" | sha256sum -c - \
  && tar -C /opt -xzf /tmp/musl.tgz \
  && rm /tmp/musl.tgz
-RUN if curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o /tmp/musl.tgz \
-      https://musl.cc/aarch64-linux-musl-cross.tgz; then :; else \
-      status=$?; \
-      case $status in 51|60|77|83) \
-        echo "warning: musl.cc's certificate did not verify (curl exit $status): retrying that URL without certificate verification, and the pinned digest decides" >&2 ;; \
-      *) exit $status ;; esac; \
-      curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --insecure -o /tmp/musl.tgz \
-        https://musl.cc/aarch64-linux-musl-cross.tgz; \
-    fi \
- && echo "c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38  /tmp/musl.tgz" | sha256sum -c - \
- && tar -C /opt -xzf /tmp/musl.tgz \
- && rm /tmp/musl.tgz
-
 RUN npm install -g --omit=dev "@earendil-works/pi-coding-agent@${HOLOSMITH_PI_VERSION}" \
  && npm cache clean --force
 

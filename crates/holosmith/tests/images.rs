@@ -533,36 +533,40 @@ fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
     );
 }
 
-/// The instructions that fetch one of the two musl tarballs, in file order: one per toolchain, in each recipe.
+/// The instructions that fetch one of the pinned musl tarballs, in file order: `count` of them, which is the
+/// recipe's own number.
 ///
 /// The filter is the pinned URL and not `RUN curl `: a fetch begins `RUN if curl …` (the certificate fallback,
 /// ADR-0116), and a filter on the older spelling would measure no downloads at all and pass over an empty list.
-fn toolchain_fetches(name: &str, recipe: &str) -> Vec<String> {
+fn toolchain_fetches(name: &str, recipe: &str, count: usize) -> Vec<String> {
     let fetches: Vec<String> = instructions(recipe)
         .into_iter()
         .filter(|block| block.contains("https://musl.cc/"))
         .collect();
     assert_eq!(
         fetches.len(),
-        2,
-        "{name} does not fetch exactly two tarballs: {fetches:?}"
+        count,
+        "{name} does not fetch exactly {count} tarball(s): {fetches:?}"
     );
     fetches
 }
 
 #[test]
 fn both_recipes_retry_a_toolchain_host_that_does_not_answer() {
-    // The two musl cross toolchains are fetched from musl.cc while each image builds, so an image build is only as
+    // The musl cross toolchains are fetched from musl.cc while each image builds, so an image build is only as
     // available as that host (ADR-0111). A bounded retry is the whole of the recipe's half, and `--retry` alone is not
     // it: `--retry` retries a timeout and an HTTP 5xx and not the refused connection or the name that did not resolve,
     // which is what an outage looks like from inside a build. An edit that dropped one of the four words would put the
-    // gate back to recording a network blip as a tree nobody passed, so both files are read and both downloads are
+    // gate back to recording a network blip as a tree nobody passed, so both files are read and every download is
     // asserted — with the digest check that stays the pin beside them.
-    for (name, recipe) in [
-        ("agent.Dockerfile", images::AGENT_DOCKERFILE),
-        ("builder.Dockerfile", holosmith::builder::DOCKERFILE),
+    //
+    // The count is a column and not a constant: the agent image carries one cross toolchain and the builder image
+    // still carries both, until `holosmith build` and its builder go (ADR-0119).
+    for (name, recipe, count) in [
+        ("agent.Dockerfile", images::AGENT_DOCKERFILE, 1),
+        ("builder.Dockerfile", holosmith::builder::DOCKERFILE, 2),
     ] {
-        for download in toolchain_fetches(name, recipe) {
+        for download in toolchain_fetches(name, recipe, count) {
             for word in [
                 "--retry 4",
                 "--retry-delay 2",
@@ -659,11 +663,11 @@ fn both_recipes_read_an_unverifiable_certificate_as_a_warning_over_the_pin() {
     // certificate is what failed, it only ever adds `--insecure` to the same URL, and the digest check still follows it:
     // the pin is what says the bytes are the vetted ones. Each of those three is a fact this asserts, and a comment
     // beside a recipe is not.
-    for (name, recipe) in [
-        ("agent.Dockerfile", images::AGENT_DOCKERFILE),
-        ("builder.Dockerfile", holosmith::builder::DOCKERFILE),
+    for (name, recipe, count) in [
+        ("agent.Dockerfile", images::AGENT_DOCKERFILE, 1),
+        ("builder.Dockerfile", holosmith::builder::DOCKERFILE, 2),
     ] {
-        for fetch in toolchain_fetches(name, recipe) {
+        for fetch in toolchain_fetches(name, recipe, count) {
             // One fallback and not a fetch made without verification: the first attempt is curl's own flags, and
             // `--insecure` is the retry's.
             assert_eq!(

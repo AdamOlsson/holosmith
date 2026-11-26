@@ -348,7 +348,8 @@ pub enum Machine {
 
 impl Machine {
     /// The word `uname -m` may answer, mapped to the one this build uses. `None` for a machine this build cannot
-    /// name: two architectures are what `scripts/build.sh` makes artifacts for.
+    /// name: x86_64 and aarch64 are the two a deploy can describe, and the second of them arrives by hand until
+    /// `scripts/build.sh` carries a second release target again (ADR-0119).
     pub fn parse(word: &str) -> Option<Self> {
         match word.trim().to_ascii_lowercase().as_str() {
             "x86_64" | "amd64" => Some(Self::X86_64),

@@ -1065,7 +1065,7 @@ _Avoid_: Build container, build image, toolchain image, CI image
 
 **Session toolchain**:
 What a session's container carries of the compiler its tree is written in, as part of the **fixed** set: rustc, cargo,
-rustfmt and clippy at the version `pins/rust.txt` holds, both musl targets, and both musl.cc cross linkers. There is no
+rustfmt and clippy at the version `pins/rust.txt` holds, the musl target, and its musl.cc cross linker. There is no
 package key and no toolchain label: everything a recipe installs is fixed, so no config key removes it and none moves
 its version. The analogue of the **pinned pi version** for rust is that pin file, whose one line is the base's whole
 reference — tag and digest — and which every recipe with a rust stage takes as `ARG HOLOSMITH_RUST_IMAGE`, so no
@@ -1105,7 +1105,7 @@ places `<out>/holosmith` with `<out>/holosmith.sha256` beside it, `--out` defaul
 orchestrates Docker and reads the ELF header of the bytes that landed (`e_machine` for the requested triple, `ET_EXEC`,
 no `PT_INTERP`); it compiles nothing. A directory holding the same bytes again is left alone, and one holding a
 different binary for the same tag is refused with both digests named. Safe, not trusted: the diff review is the gate.
-_Avoid_: Build script, host build (that is `scripts/build.sh`, the development path), compile step
+_Avoid_: Build script, host build (that is `scripts/build.sh`, the build on this machine), compile step
 
 **Version**:
 The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one. Kept in `VERSION` at the repository root and nowhere else: `build.rs` reads it into the binary, and both manifests hold `0.0.0` so that a bump never moves `Cargo.lock`, whose digest a promotion's crate-set check compares against the agent image's.
