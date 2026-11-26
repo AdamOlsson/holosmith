@@ -9,6 +9,10 @@ pinned pi so `doctor` can compare them; and a build failure names the layer and 
 The demo is the same claim from the other side: a fresh host ends with `holosmith-proxy:<version>` and
 `agent-image:<version>`, both pinned.
 
+**Superseded in part by ADR-0114:** the recipes are embedded and the labels are the read, which is what this
+decision is about, but there are **three** recipes now — `holosmith-base:<version>` is a second session image beside
+the agent image — so "the two images" everywhere below is the count this decision was written with.
+
 The reason a decision is needed at all is that a Dockerfile is a file and a deploy runs on a machine that has
 the artifact and nothing else. "So that there is no separate artifact to keep in sync" is a statement about
 *where the recipe lives*, and every decision below follows from putting it in the binary, together with what

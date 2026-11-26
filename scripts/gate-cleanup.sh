@@ -5,6 +5,12 @@
 # trailing pid is gone; never touch a container, a network, a session row, or a process that merely mentions a dead
 # run's path; and a live pid spares both a record and a directory — that last one is deliberate, do not "fix" it.
 #
+# A **registered worktree this host cannot see** is skipped with one line and never a refusal; `--worktree` still
+# refuses a missing path, because that one is a typo. `git worktree list` is the repository's answer and the repository
+# is shared: a session's container path (`/work`, `/home/node/...`) stays registered after the container that made it is
+# gone, and a gate that stopped over one would measure nothing at all on the machine that runs several sessions.
+# Nothing here could clean a tree it cannot reach, so passing over it costs nothing.
+#
 # Usage: scripts/gate-cleanup.sh [--dry-run] [--quiet] [--claim [--owner PID]] [--legacy [--yes]] [--worktree DIR]...
 #
 # Exit 0 nothing left behind, 1 a process we signalled survived or a directory could not be removed, 2 misuse. The two
@@ -90,8 +96,15 @@ else
 fi
 
 resolved=()
+skipped=()
 for root in "${roots[@]}"; do
-  [ -d "$root" ] || misuse "not a directory: $root"
+  # The header's skip: a checkout this host cannot see is passed over, and only a root the caller named is refused.
+  if [ ! -d "$root" ]; then
+    [ "${#explicit_roots[@]}" -eq 0 ] || misuse "not a directory: $root"
+    skipped+=("$root")
+    [ "$quiet" -eq 1 ] || say "skipping a registered worktree this host cannot see: $root"
+    continue
+  fi
   real="$(realpath -e -- "$root" 2>/dev/null)" || misuse "cannot resolve --worktree $root"
   [ "$real" = "/" ] && misuse "refusing to clean /"
   duplicate=0
@@ -618,6 +631,12 @@ fi
 # repeated as "removed 0", which is what a machine with one root-owned directory would print at every boot.
 if [ "${#stale_records[@]}" -gt 0 ] || [ "$removed" -gt 0 ]; then
   say "removed $removed director(ies), cleaned ${#stale_records[@]} dead run(s), ${#live_records[@]} live run(s) spared"
+fi
+
+# The skip is the one thing above that a reader has to be able to count, because it is the reason a root known to the
+# repository never appeared in this pass.
+if [ "${#skipped[@]}" -gt 0 ] && [ "$quiet" -eq 0 ]; then
+  say "${#skipped[@]} registered worktree(s) this host cannot see were skipped"
 fi
 
 if [ "${#survivors[@]}" -gt 0 ] || [ "$failed" -gt 0 ]; then

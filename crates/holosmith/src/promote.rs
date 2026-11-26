@@ -11,7 +11,7 @@
 //!    command refuses, and there is no other path in this command to the drain (ADR-0082 D2).
 //! 2. **the host smoke test** — `smoke::run` in process, before the drain: the candidate is proven while the machine
 //!    still serves the version it is replacing, and a candidate that fails is one nothing was drained for.
-//! 3. **the two images**, read and rebuilt only when the candidate's labels say so. They are not one of the spec's
+//! 3. **the images**, read and rebuilt only when the candidate's labels say so. They are not one of the spec's
 //!    steps, and their place is the one that fails safely: before the drain, so a build the daemon refuses aborts
 //!    with nothing drained, nothing backed up and nothing switched.
 //! 4. **the drain** — `drain --wait`, and its three endings are three different things: `drained` proceeds,
@@ -397,7 +397,7 @@ pub fn execute(
         }
     }
 
-    // 3. The two images, for the candidate's version and from the candidate's bytes.
+    // 3. The images, for the candidate's version and from the candidate's bytes.
     //
     // The sink is the silent one, and the label names this pipeline's step rather than a deploy's: a promotion prints
     // a line per step of its own as it goes (`<verb>: images: …`), so a build's two lines would be a second spelling

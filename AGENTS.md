@@ -167,6 +167,10 @@ notices, so they accumulate across runs.
   `environ`, so `verify-run-12` never matches `verify-run-123`), and removes `target/verify-*-<pid>` whose
   trailing pid is gone. It never touches a container, a network, a session row, or anything outside a
   worktree's `target/`.
+- **A registered worktree this host cannot see is skipped, not refused**, with one line naming it. `git worktree list`
+  is the repository's answer and the repository is shared, so a session's container path (`/work`, `/home/node/…`)
+  stays registered after its container is gone, and a gate that stopped over one would measure nothing on a machine
+  that runs several sessions. A `--worktree` the caller names still refuses a missing path, because that one is a typo.
 - A pid is evidence in one direction only: a live pid spares both a stale record and a stale directory,
   even when that pid belongs to something else. That is deliberate; the header of
   `scripts/gate-cleanup.sh` says why, and says not to "fix" it.
@@ -245,8 +249,8 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
   network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
   and the two mount/reconcile cases. The two install cases run the artifact in it too, as the machine the command hands
   a home of its own (ADR-0108). It is run as the config's `agent_image`, so a development machine may point
-  that key at an image it tagged by hand; the two product images are `holosmith-proxy:<version>` and
-  `agent-image:<version>` (ADR-0057).
+  that key at an image it tagged by hand; the three product images are `holosmith-proxy:<version>`,
+  `holosmith-base:<version>` and `agent-image:<version>` (ADR-0057, ADR-0114).
 - **`qemu-aarch64-static`** (or `HOLOSMITH_QEMU_AARCH64`) to run the aarch64 artifact here. It is machine-local and
   **no script in this repo downloads anything**.
 - **A Docker daemon.** The development sandbox binds its socket because every story is a fact about a real

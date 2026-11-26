@@ -700,7 +700,9 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             Line {
                 step: DeployStep::Images,
                 word: Word::Changed,
-                sentence: "built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0".to_string(),
+                sentence: "built 3 images: holosmith-proxy:0.1.0, holosmith-base:0.1.0, \
+                           agent-image:0.1.0"
+                    .to_string(),
                 fix: None,
             },
             Line {
@@ -739,7 +741,8 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             "",
             "2. files: changed: 2 actions; the account operator is in the docker group",
             "",
-            "3. images: changed: built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0",
+            "3. images: changed: built 3 images: holosmith-proxy:0.1.0, holosmith-base:0.1.0, \
+             agent-image:0.1.0",
             "",
             // The numbers are the spec's, so a report that skipped a step's block still names it by its own number.
             "5. service: changed: 1 action: install -m 0644 <staged> \
@@ -980,8 +983,8 @@ fn a_run_tells_its_sink_one_begin_per_step_and_two_notes_around_each_build() {
         begins[2]
     );
 
-    // The two notes around each build, naming the image: the tag is how a reader knows which of the two is running
-    // when the minutes are the same size.
+    // The two notes around each build, naming the image: the tag is how a reader knows which one is running when
+    // the minutes are the same size — and the order is the order the builds happen in, proxy first.
     let notes: Vec<&str> = sink
         .rendered()
         .into_iter()
@@ -992,6 +995,8 @@ fn a_run_tells_its_sink_one_begin_per_step_and_two_notes_around_each_build() {
         [
             format!("note [3/6 images] building {}", images::proxy_image()),
             format!("note [3/6 images] built {}", images::proxy_image()),
+            format!("note [3/6 images] building {}", images::base_image()),
+            format!("note [3/6 images] built {}", images::base_image()),
             format!("note [3/6 images] building {}", images::agent_image()),
             format!("note [3/6 images] built {}", images::agent_image()),
         ],
@@ -1061,7 +1066,7 @@ fn a_dry_run_lists_the_steps_and_creates_nothing() {
         "a dry run did not name all six steps:\n{}",
         report.render()
     );
-    // Step 1's plan is its read, step 3's is a build of both images, and steps 2, 5 and 6 are plans too: a dry run
+    // Step 1's plan is its read, step 3's is a build of every image, and steps 2, 5 and 6 are plans too: a dry run
     // reads the machine for every step.
     assert_eq!(line(&report, DeployStep::Preflight).word, Word::Satisfied);
     assert_eq!(
@@ -1523,7 +1528,7 @@ fn a_held_port_does_not_stop_the_deploy_but_another_failure_does() {
     assert_eq!(report.lines.len(), 1);
 }
 
-// ---- step 3: the two images --------------------------------------------------------------
+// ---- step 3: the images -------------------------------------------------------------------
 
 /// What a failed `COPY` build printed on this machine, trimmed to the lines the sentence is parsed from: the
 /// instruction inside the Dockerfile, the layer, and the child's own last line.
@@ -1570,10 +1575,10 @@ const RETRIED_FETCH_THEN_COMPILE_FAILURE: &str = "#8 [4/9] RUN curl -fsSL --retr
 ERROR: failed to build: failed to solve: process \"/bin/sh -c cargo build --release --locked\" did not complete successfully: exit code: 1";
 
 #[test]
-fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
-    // The first deploy on a machine that has never built either image: the read is two "not on this machine"
-    // reasons, a dry run prints them and builds nothing, and the run builds both — proxy first, because step 4
-    // needs it.
+fn step_three_plans_a_build_for_every_absent_image_and_then_builds_them() {
+    // The first deploy on a machine that has never built any image: the read is three "not on this machine"
+    // reasons, a dry run prints them and builds nothing, and the run builds all three — proxy first, because step 4
+    // needs it, and the base before the agent, which is the larger one.
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-images-absent");
     let socket = dir.file("docker.sock");
@@ -1588,7 +1593,11 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     let planned = deploy::run(&deployed, &root, &tools, &machine, true);
     let step = line(&planned, DeployStep::Images);
     assert_eq!(step.word, Word::Needs, "{}", step.sentence);
-    for image in [images::proxy_image(), images::agent_image()] {
+    for image in [
+        images::proxy_image(),
+        images::base_image(),
+        images::agent_image(),
+    ] {
         assert!(
             step.sentence
                 .contains(&format!("{image} is not on this machine")),
@@ -1608,20 +1617,26 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     assert_eq!(step.word, Word::Changed, "{}", step.sentence);
     assert!(
         step.sentence.contains(&images::proxy_image())
+            && step.sentence.contains(&images::base_image())
             && step.sentence.contains(&images::agent_image()),
-        "the change does not name both tags: {}",
+        "the change does not name all three tags: {}",
         step.sentence
     );
     let builds = machine.builds();
     assert_eq!(
         builds.len(),
-        2,
-        "step 3 did not build both images: {builds:?}"
+        3,
+        "step 3 did not build all three images: {builds:?}"
     );
     assert_eq!(
         builds[0].0,
         images::proxy_image(),
-        "the agent image was built before the proxy image, whose container step 4 starts"
+        "the base image was built before the proxy image, whose container step 4 starts"
+    );
+    assert_eq!(
+        builds[1].0,
+        images::base_image(),
+        "the agent image was built before the base image, which is the cheap half of the same session"
     );
     // The argument vector is `build_arguments`' own: the flags, then `-` last, because the context is the archive
     // on stdin.
@@ -1644,11 +1659,11 @@ fn step_three_plans_a_build_for_both_absent_images_and_then_builds_them() {
     let second = deploy::run(&deployed, &root, &tools, &machine, false);
     let step = line(&second, DeployStep::Images);
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
-    assert_eq!(machine.builds().len(), 2, "the second run built again");
+    assert_eq!(machine.builds().len(), 3, "the second run built again");
 }
 
 #[test]
-fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
+fn step_three_is_satisfied_when_every_image_carries_this_binarys_labels() {
     let _serial = one_at_a_time();
     let dir = TempDir::new("deploy-images-current");
     let socket = dir.file("docker.sock");
@@ -1663,6 +1678,10 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
             expected_labels(ImageKind::Proxy, &deployed),
         )
         .with_labels(
+            &images::base_image(),
+            expected_labels(ImageKind::Base, &deployed),
+        )
+        .with_labels(
             &images::agent_image(),
             expected_labels(ImageKind::Agent, &deployed),
         );
@@ -1673,6 +1692,7 @@ fn step_three_is_satisfied_when_both_images_carry_this_binarys_labels() {
     assert_eq!(step.word, Word::Satisfied, "{}", step.sentence);
     for fact in [
         images::proxy_image(),
+        images::base_image(),
         images::agent_image(),
         holosmith::VERSION.to_string(),
         holosmith::pins::pi_version().to_string(),
@@ -1712,6 +1732,10 @@ fn step_three_names_the_label_that_differs() {
             &images::proxy_image(),
             expected_labels(ImageKind::Proxy, &deployed),
         )
+        .with_labels(
+            &images::base_image(),
+            expected_labels(ImageKind::Base, &deployed),
+        )
         .with_labels(&images::agent_image(), agent);
 
     let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
@@ -1729,12 +1753,14 @@ fn step_three_names_the_label_that_differs() {
             step.sentence
         );
     }
-    // The proxy image is current, so it is not in the plan: one action, not two.
-    assert!(
-        !step.sentence.contains(&images::proxy_image()),
-        "a current image is in the plan for a build: {}",
-        step.sentence
-    );
+    // The proxy and base images are current, so neither is in the plan: one action, not three.
+    for current in [images::proxy_image(), images::base_image()] {
+        assert!(
+            !step.sentence.contains(&current),
+            "a current image is in the plan for a build: {}",
+            step.sentence
+        );
+    }
     assert!(
         step.sentence.starts_with("1 action:"),
         "the plan does not count one build: {}",
@@ -1763,6 +1789,10 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
             &images::proxy_image(),
             expected_labels(ImageKind::Proxy, &deployed),
         )
+        .with_labels(
+            &images::base_image(),
+            expected_labels(ImageKind::Base, &deployed),
+        )
         .with_labels(&images::agent_image(), agent);
 
     let planned = deploy::run(&deployed, &root, &real_tools(&dir), &machine, true);
@@ -1780,11 +1810,13 @@ fn step_three_sees_a_rebuilt_artifact_through_the_digest_label() {
             step.sentence
         );
     }
-    assert!(
-        !step.sentence.contains(&images::proxy_image()),
-        "a current image is in the plan for a build: {}",
-        step.sentence
-    );
+    for current in [images::proxy_image(), images::base_image()] {
+        assert!(
+            !step.sentence.contains(&current),
+            "a current image is in the plan for a build: {}",
+            step.sentence
+        );
+    }
 }
 
 #[test]

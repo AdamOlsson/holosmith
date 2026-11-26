@@ -111,7 +111,7 @@ pub enum Cmd {
     },
     /// Promote a new version: the whole pipeline, one printed line per step.
     ///
-    /// The review gate acknowledged, the host smoke test, the two images when they changed, the drain, a database
+    /// The review gate acknowledged, the host smoke test, the images when they changed, the drain, a database
     /// backup, the release directory, the `current` symlink, `systemctl --user restart` and a 20-second health poll
     /// that puts the previous release back when the candidate does not answer. Every refusal leaves the machine as it
     /// found it, and says so — except that a failure after the drain leaves it draining, which the sentence names.

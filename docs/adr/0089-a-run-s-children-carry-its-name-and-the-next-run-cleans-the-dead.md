@@ -24,6 +24,11 @@ Ownership is inherited, not registered.
 - **The cleanup.** `scripts/gate-cleanup.sh` kills only what carries a **dead** run's marker, and removes
   `target/verify-<name>-<pid>` whose trailing pid is gone. It runs at the start of `verify.sh`, under one
   repository-wide `flock`, and it warns rather than failing the gate.
+- **A checkout this host cannot see is skipped.** The repository is shared with container sessions, whose paths
+  (`/work`, `/home/node/...`) stay registered after their containers are gone; a root that is not a directory here is
+  passed over with one line rather than refused, because nothing could clean it and a gate that stopped over one would
+  measure nothing at all. A `--worktree` the caller names is still refused — that one is a typo, not a fact about the
+  machine.
 - **Match exactly.** `environ` is NUL-separated and read as NUL-separated records, so the marker test is whole-element
   equality: `verify-run-12` cannot match `verify-run-123`. An argv *mention* of a dead run's path is reported, never
   signalled.

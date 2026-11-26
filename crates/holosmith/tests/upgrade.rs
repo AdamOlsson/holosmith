@@ -261,19 +261,22 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
     let steps = Recorder::new(&world.info.version);
     execute(&world, &options(&world, true), &steps).expect("the promotion should succeed");
 
-    // The order, as the machine saw it: the smoke test, then the two images (read, then built), then the drain, then
+    // The order, as the machine saw it: the smoke test, then the images (read, then built), then the drain, then
     // the restart and the health poll. The backup, the release write and the switch are this process's own writes and
     // are asserted by their effects below.
     let trace = steps.trace();
     let proxy = format!("holosmith-proxy:{}", world.info.version);
+    let base = format!("holosmith-base:{}", world.info.version);
     let agent = format!("agent-image:{}", world.info.version);
     assert_eq!(
         trace,
         [
             "smoke".to_string(),
             format!("labels:{proxy}"),
+            format!("labels:{base}"),
             format!("labels:{agent}"),
             format!("build:{proxy}"),
+            format!("build:{base}"),
             format!("build:{agent}"),
             "drain".to_string(),
             "restart".to_string(),
