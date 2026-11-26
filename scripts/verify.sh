@@ -16152,6 +16152,7 @@ stop_peer() {
 case_gate_quick() {
   local name=case_gate_quick root="$repo_root/target/verify-gate-quick-$$"
   local bin="$root/bin" out="$root/out" err="$root/err" rc expected total footer label file
+  local pinned_rust pinned_line off_version
   rm -rf "$root"
   mkdir -p "$bin"
 
@@ -16190,11 +16191,21 @@ case_gate_quick() {
   "$repo_root/scripts/gate-quick.sh" --list config_cli >"$out" 2>"$err" || rc=$?
   check "$name/list/named/exit" 2 "$rc"
 
-  # The stand-in: a cargo that answers the version question with the wrong line and agrees with everything else.
-  cat >"$bin/cargo" <<'SHIM'
+  # The stand-in: a cargo that answers the version question with the wrong line and agrees with everything else. Its
+  # version is the pin's minor with one added, read from `pins/rust.txt` exactly as `gate-quick.sh` reads it, so the
+  # next rust bump moves the stand-in and the footer expectation below with it — a literal here would be a compiler
+  # the gate had started accepting, and arm 5 would then measure a run that should have passed.
+  pinned_rust="$(tr -d '[:space:]' <"$repo_root/pins/rust.txt")"
+  pinned_rust="${pinned_rust%%-*}"
+  pinned_line="${pinned_rust%.*}"
+  case "$pinned_line" in
+    '' | *[!0-9.]*) fail "$name/standin" "pins/rust.txt names no version to take the off-pin one from: $pinned_rust" ;;
+  esac
+  off_version="$(awk -F. '{ printf "%s.%d.0", $1, $2 + 1 }' <<<"$pinned_rust")"
+  cat >"$bin/cargo" <<SHIM
 #!/bin/sh
-case "$1" in
-  --version) printf 'cargo 1.100.0 (stand-in)\n' ;;
+case "\$1" in
+  --version) printf 'cargo $off_version (stand-in)\n' ;;
 esac
 exit 0
 SHIM
@@ -16213,7 +16224,7 @@ SHIM
   check "$name/libonly/exit" 0 "$rc"
   footer="$(tail -n 1 "$out")"
   case "$footer" in
-    *"cargo 1.100.0 is not 1.99 (GATE_QUICK_ALLOW_TOOLCHAIN=1), lib (0 of $total test binaries run) - the tree is not proven; the parent runs scripts/verify.sh.") ;;
+    *"cargo $off_version is not $pinned_line (GATE_QUICK_ALLOW_TOOLCHAIN=1), lib (0 of $total test binaries run) - the tree is not proven; the parent runs scripts/verify.sh.") ;;
     *) fail "$name/libonly/footer" "the last line was: $footer" ;;
   esac
   assertions=$((assertions + 1))

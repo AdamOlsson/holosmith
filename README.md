@@ -50,7 +50,7 @@ holosmith uninstall [--purge]        # unit, proxies, networks; --purge takes th
 
 ## Building from source
 
-Rust 1.99+, Node.js and npm for `web/`, and the musl cross linker on `PATH` — or none: `scripts/build.sh` takes it
+Rust 1.100+, Node.js and npm for `web/`, and the musl cross linker on `PATH` — or none: `scripts/build.sh` takes it
 from `PATH` first, then from this tree's `toolchains/`, and fetches the pinned tarball into `toolchains/` when neither
 has one. It writes `dist/<triple>/holosmith` with the `.sha256` a promotion reads beside it, and
 `scripts/build.sh --profile dev` writes a debug binary to `target/<triple>/dev/holosmith` without touching `dist/`.

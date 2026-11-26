@@ -9,7 +9,7 @@ resolver = "3"
 # every bump — which is what `scripts/check-crate-set.sh` compares against the crate set the agent image vendors.
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }

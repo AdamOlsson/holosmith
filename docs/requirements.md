@@ -77,7 +77,7 @@ network only when that session allows Internet access, so a tool's host is never
 
 ## Building from source
 
-Rust 1.99+ (edition 2024) on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
+Rust 1.100+ (edition 2024) on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
 is not it — and Node.js and npm for `web/`. The one musl cross compiler the shipped target needs,
 `x86_64-linux-musl-gcc`, is the tree's rather than the machine's: the script takes it from `PATH` when it is there,
 then from this tree's `toolchains/`, and fetches the tarball `agent.Dockerfile` pins — checked against the recipe's

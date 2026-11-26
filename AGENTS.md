@@ -50,7 +50,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 
 ## Build and gates
 
-The workspace is Rust 2024, `rust-version = "1.99"`, one binary crate. `unsafe_code` is denied and
+The workspace is Rust 2024, `rust-version = "1.100"`, one binary crate. `unsafe_code` is denied and
 `unwrap_used` is warned; CI treats warnings as errors.
 
 One command proves the tree:
@@ -209,12 +209,16 @@ The web app has its own gate:
 cd web && npm ci && npm test && npm run build
 ```
 
+`scripts/build-web.sh` runs `npm ci` unless `web/node_modules/.holosmith-install` is there and no older than
+`web/package-lock.json`, so a half-finished install is a reinstall rather than a `tsc: Permission denied` two steps
+later (ADR-0122). A `node_modules` that only exists is not an install: delete it, or let the guard do it.
+
 ## Prerequisites, and what a `SKIP` means
 
 `cargo build` needs rustc only. Everything past a debug run wants these on `PATH`, and a step that failed for
 no visible reason is usually one of them missing:
 
-- **rustc 1.99.1** on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
+- **rustc 1.100.0** on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
   is not it. There is no `rust-toolchain.toml`: a `cargo build` fetches nothing beyond its declared dependencies, and the
   one fetch a script of this tree may make is `scripts/build.sh`'s cross toolchain into `toolchains/` (ADR-0120). The
   same toolchain in the same version is also inside the **agent image**, with this tree's crate set vendored beside it
@@ -270,7 +274,7 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
 ## The offline workflow: what a session can run
 
 The image carries the crate set and the npm cache (ADR-0106), so a session's container — no network, nothing mounted,
-`CARGO_HOME` empty — runs the commands the `rustc 1.99.1` bullet above lists, with no flag. `scripts/build.sh` too,
+`CARGO_HOME` empty — runs the commands the `rustc 1.100.0` bullet above lists, with no flag. `scripts/build.sh` too,
 and the gate is what proves it — `case_agent_offline_build` runs it under `--network none` and reads `file -b` on the
 musl artifact inside the container. `--locked` is the flag to keep; anything that would move the lock is a host's work.
 
