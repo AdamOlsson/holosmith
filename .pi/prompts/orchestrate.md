@@ -3,10 +3,16 @@ description: Orchestrate one Linear ticket end to end — worker implements in a
 argument-hint: "<TICKET> [notes]"
 ---
 Start the `$1` implementation. `$1` is the Linear ticket id the invoker names (an `HOL-` identifier, or a
-`PER-` one from before the move); `${@:2}` is anything extra the invoker wants honoured on top of this script.
+`PER-` one from before the move); `${@:2}` is the further instructions the invoker types after that id, and they
+are binding: they refine the ticket — a narrower scope, a seam to prefer, an approach to avoid, an extra check —
+and they travel verbatim into the worker's task and the reviewer's criteria. Where they contradict the ticket's
+acceptance criteria, the invoker's instruction wins; where they contradict `AGENTS.md`, the gate, or the
+Holosmith scope below, stop and report instead of choosing. An instruction that cannot be applied to this ticket
+(names another subsystem, another project) is a report, not a detour.
 
 **`$1` is supplied by the invoker. If it is empty, stop and ask for one.** Never pick a ticket yourself, never
-invent an id, and never start from an issue you happened to read.
+invent an id, and never start from an issue you happened to read. The instructions after the id are optional too:
+never invent those either.
 
 Linear work here is scoped to the project **Holosmith** (`P-HOL-2`, team `HOL`). Every `list_issues` and
 `save_issue` call carries `project: "Holosmith"`; an issue outside that project is a blocker to report to the
@@ -16,8 +22,9 @@ one writer per worktree at a time.
 Then, in this order:
 
 1. **Read the ticket.** `mcp__linear__get_issue` on `$1`. State its title and what "done" means in one line
-   before touching the tree. Move it to **In Progress** and comment the branch and worktree you are about to
-   create.
+   before touching the tree, and restate `${@:2}` verbatim beside it when the invoker supplied any — those lines
+   together are the specification this run is held to. Move it to **In Progress** and comment the branch, the
+   worktree you are about to create, and the invoker's extra instructions when there are any.
 
 2. **Create the worktree**, from a current `master`, never inside the repository tree: put it where this
    repository's other worktrees live (`git worktree list` shows them; today that is
@@ -33,7 +40,8 @@ Then, in this order:
    depth, and `AGENTS.md` records the number once.
 
 3. **Launch the worker subagent** for the implementation. Give it the ticket's intent and acceptance criteria
-   verbatim, the seams you found, and these rules:
+   verbatim, the invoker's `${@:2}` instructions verbatim and marked as binding rather than background, the seams
+   you found, and these rules:
    - `. ~/.pi/toolchains/env.sh` first, then **only** `scripts/gate-quick.sh` to verify itself: `--list` for the
      binaries, name every one whose module it touched, and `--lib-only` (saying so in its report) if the change
      names none. It must not run `cargo test` or `scripts/verify.sh` — those are the parent's.
@@ -64,7 +72,8 @@ Then, in this order:
    be a large share of the change), write `git diff --cached` and `git diff --cached --stat` to
    `<main repo>/target/<TICKET>-diff.txt`, paste the stat and `git status --short` into the task, and point the
    task at that file and at the worktree path — so the diff's claims can be checked against the tree, not only
-   read. Add the ticket's acceptance criteria. Tell it to **write its findings to a file**:
+   read. Add the ticket's acceptance criteria and the invoker's `${@:2}` instructions verbatim: a finding against
+   either is a finding. Tell it to **write its findings to a file**:
    `<main repo>/target/review-<TICKET>.md` (gitignored, outside `docs/`, so it survives the worktree's removal and
    is never committed). Use the `code-reviewer` agent — read-only except for that one file; the builtin `reviewer`
    cannot write.
@@ -86,7 +95,8 @@ Then, in this order:
 8. **Clean up**: `git worktree remove <worktree>`, `git branch -d <branch>`, `git worktree prune`, and keep
    `target/review-<TICKET>.md` as the record. Then move the ticket to **Done** with a comment: what changed, the
    commit subject and its merge, the gate result (`verify: <n> assertions, ok`, plus the web gate when it ran),
-   and the review verdict.
+   the review verdict, and — when `${@:2}` supplied any — how each extra instruction was met or why it could not
+   be.
 
 Throughout:
 
