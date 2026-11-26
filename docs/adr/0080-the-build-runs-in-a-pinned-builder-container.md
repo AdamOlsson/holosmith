@@ -10,6 +10,12 @@ The sentence this ADR keeps saying, because it is the story's own limit: **this 
 trusted.** A container bounds what an agent-authored `build.rs`, proc macro or Vite config can reach; it does not
 judge what they do. Item 12's diff review is the gate, and it happens before any of this runs.
 
+**Superseded in part by ADR-0121:** there is no `holosmith build` and no `builder.Dockerfile`, so D1's verb and D2's
+image are gone — release N was compiled by binary N−1's embedded recipe, which is the defect that retired them. A
+release artifact is the candidate tree's own `scripts/build.sh`, and `dist/<triple>/holosmith` with its digest is what a
+promotion reads. What stands is the paragraph above: the build is safe, never trusted, and the diff review is the gate.
+D6 still holds: the gate's `build` phase is `scripts/build.sh`.
+
 ## D1 — the verb is `holosmith build`, a host command that orchestrates Docker
 
 `holosmith build [--target <triple>] [--out DIR]`. It is the third arm of the story's own question ("what invokes the

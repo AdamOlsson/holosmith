@@ -77,8 +77,11 @@ network only when that session allows Internet access, so a tool's host is never
 
 ## Building from source
 
-Rust 1.99+ (edition 2024), Node.js and npm for `web/`, and the musl cross toolchain on `PATH` —
-`x86_64-linux-musl-gcc`, because SQLite is compiled from source. `scripts/build.sh` builds
-the web app first and then the static artifact, which lands in `dist/<triple>/holosmith` with its digest beside it;
-`scripts/verify.sh` is the gate. Put the artifact in a directory on your `PATH`; the README's quick start uses
-`~/.local/bin`. `AGENTS.md` has the repository rules.
+Rust 1.99+ (edition 2024) on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
+is not it — and Node.js and npm for `web/`. The one musl cross compiler the shipped target needs,
+`x86_64-linux-musl-gcc`, is the tree's rather than the machine's: the script takes it from `PATH` when it is there,
+then from this tree's `toolchains/`, and fetches the tarball `agent.Dockerfile` pins — checked against the recipe's
+SHA-256 before anything is extracted — into `toolchains/` when neither has one (ADR-0120). SQLite is compiled from
+source, so the C toolchain crosses too. `scripts/build.sh` builds the web app first and then the static artifact, which
+lands in `dist/<triple>/holosmith` with its digest beside it; `scripts/verify.sh` is the gate. Put the artifact in a
+directory on your `PATH`; the README's quick start uses `~/.local/bin`. `AGENTS.md` has the repository rules.

@@ -45,7 +45,7 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `docs/adr/` | Architecture decisions, one decision per file |
 | `docs/schema/previous.sql` | The previous release's schema; `tests/schema_previous.rs` compares it |
 | `pins/pi.txt` | The single pinned pi version |
-| `pins/rust.txt` | The rust base's whole reference — tag and digest — the recipes take as `HOLOSMITH_RUST_IMAGE` |
+| `pins/rust.txt` | The rust base's whole reference — tag and digest — the recipe takes as `HOLOSMITH_RUST_IMAGE` |
 | `GLOSSARY.md` | The project vocabulary — read it before naming anything |
 
 ## Build and gates
@@ -56,7 +56,7 @@ The workspace is Rust 2024, `rust-version = "1.99"`, one binary crate. `unsafe_c
 One command proves the tree:
 
 ```bash
-. ~/.pi/toolchains/env.sh && scripts/verify.sh
+scripts/verify.sh
 ```
 
 It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
@@ -110,12 +110,13 @@ daemon cannot see) are exit 2 with one sentence naming the fix. A failed run's w
 `target/tmp-verify-in-container`, and the gate's own `kept work dir:` line prints the container path
 `/verify-work/tmp.XXXX`, which is that directory's `tmp.XXXX`.
 
-The `.` line is part of the command, not a convenience: `~/.pi/toolchains/env.sh` puts rustc 1.99 and the
-musl cross gcc on `PATH`. The default `~/.cargo`/`~/.rustup` toolchain is another version entirely, and
-`scripts/build.sh` refuses a compiler that is not `pins/rust.txt`'s — so without the line the `build` phase fails
-on the compiler rather than on the linker. The linker itself the build can now fetch into `toolchains/`
-(ADR-0120), which is the escape for a machine with no toolchains directory; a host that has one still takes it
-from there, because a fetch is a network and a digest where a `PATH` entry is neither.
+**Nothing here sources a file outside the tree.** The one prerequisite the gate cannot supply itself is the compiler:
+`scripts/build.sh` refuses a rustc that is not `pins/rust.txt`'s, so a host whose `cargo` is another version fails the
+`build` phase on the compiler rather than on the linker — putting the pinned rustc on `PATH` is that host's own act, and
+this tree reads no toolchain file to do it. The linker is the script's problem, resolved in three places in order: `PATH`,
+then this tree's `toolchains/`, then the pinned tarball fetched into `toolchains/` with its SHA-256 checked before
+anything is extracted (ADR-0120). Nothing else is searched — no `~/.pi`, no `env.sh`, no `rustup` — and a session's
+container already carries both.
 
 Run it detached with the output going to `target/verify.log`, and poll that file for the sentinel; do
 not block on the command's own stdout. That one fixed name is deliberate — the poller has to find the
@@ -213,15 +214,15 @@ cd web && npm ci && npm test && npm run build
 `cargo build` needs rustc only. Everything past a debug run wants these on `PATH`, and a step that failed for
 no visible reason is usually one of them missing:
 
-- **rustc 1.99.1** from `~/.pi/toolchains/env.sh`. There is no `rust-toolchain.toml`: a `cargo build` fetches nothing
-  beyond its declared dependencies, and the one fetch a script of this tree may make is `scripts/build.sh`'s cross
-  toolchain into `toolchains/` (ADR-0120). The same toolchain in the same version is also inside the **agent image**, with
-  this tree's crate set vendored beside it and the web app's packages in its npm cache, so a session can run
-  `cargo build --locked`, `cargo fmt`, `cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag and no
-  network. Full verification has two shapes: on the machine (`scripts/verify.sh`) or in the agent image on that
-  machine's daemon (`scripts/verify-in-container.sh`, ADR-0109). A *session's* container still carries no Docker
-  daemon (ADR-0105, ADR-0106) — the daemon stays outside, and the wrapper is what hands one to a gate for the
-  length of a run.
+- **rustc 1.99.1** on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
+  is not it. There is no `rust-toolchain.toml`: a `cargo build` fetches nothing beyond its declared dependencies, and the
+  one fetch a script of this tree may make is `scripts/build.sh`'s cross toolchain into `toolchains/` (ADR-0120). The
+  same toolchain in the same version is also inside the **agent image**, with this tree's crate set vendored beside it
+  and the web app's packages in its npm cache, so a session can run `cargo build --locked`, `cargo fmt`, `cargo clippy`,
+  `cargo test` and `npm ci`/`npm test` with no flag and no network. Full verification has two shapes: on the machine
+  (`scripts/verify.sh`) or in the agent image on that machine's daemon (`scripts/verify-in-container.sh`, ADR-0109). A
+  *session's* container still carries no Docker daemon (ADR-0105, ADR-0106) — the daemon stays outside, and the wrapper
+  is what hands one to a gate for the length of a run.
 - **`x86_64-linux-musl-gcc`** for the shipped target. SQLite is compiled from
   source (`rusqlite`'s `bundled`), so the C toolchain crosses too; the image fetches the same one from musl.cc at build
   time, where the tarball's SHA-256 is the pin and a certificate that cannot be verified is a warning over it rather
@@ -435,7 +436,7 @@ so a seq is **strictly increasing with gaps** and the next one is `last_seq + 1`
 ## The release path: build, smoke, upgrade, rollback
 
 A release artifact is built by **the tree's own** `scripts/build.sh`, and where that runs is the caller's business: a
-worker builds with the toolchain its turn has (the agent image's, or this host's `~/.pi/toolchains/env.sh`),
+worker builds with the toolchain its turn has (the agent image's, or a host's own on `PATH`),
 `scripts/verify-in-container.sh` runs the whole gate in that image on this machine's daemon (ADR-0109), and
 `holosmith update` verifies the candidate tree by running that gate in the image the running release deployed
 (ADR-0109) and promotes the artifact the gate left. The artifact is `dist/<triple>/holosmith` with

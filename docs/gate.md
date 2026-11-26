@@ -132,10 +132,13 @@ between `ok case_<name>` and the phase marks. Do not hold the call open for the 
 `target/verify-timed.log`, and poll the file.
 
 ```bash
-. ~/.pi/toolchains/env.sh
 scripts/verify.sh 2>&1 | while IFS= read -r line; do printf '%s %s\n' "$(date +%s)" "$line"; done \
   > target/verify-timed.log
 ```
+
+Nothing in that block puts a toolchain on `PATH`: a host needs rustc 1.99.1 there before the `build` phase
+(`AGENTS.md`'s prerequisites), and the musl cross linker resolves itself — `PATH`, then the tree's `toolchains/`, then
+the pinned fetch (ADR-0120).
 
 A run stopped by a red case measures only the phases and cases before it; `case_server_service` above is why this
 table's tail was measured separately, and why its tail numbers (76 s for 23 cases) are not a substitute for one whole
