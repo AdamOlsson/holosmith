@@ -51,8 +51,9 @@ calls, with a per-session dummy key — always joined, because a model call work
 is enabled, the egress proxy (CONNECT/443, allow-list) and the MCP proxy (a tool's stored key, for the hosts
 `key::TOOLS` names). Previews run on a separate listener and origin.
 
-**Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes.
-`holosmith build` compiles in a pinned builder container; `smoke` proves a candidate against the real daemon with a
+**Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes. A release
+artifact is built by the tree's own `scripts/build.sh`, which leaves `dist/<triple>/holosmith` and its digest beside it;
+`smoke` proves a candidate against the real daemon with a
 recorded turn; `upgrade` runs the review gate, smoke, image builds, drain, backup, release switch and health poll;
 `rollback` walks the release tree one step back. Migrations are expand/contract, so switching back is safe. Nothing
 on the wire promotes a release today, and the decision for when one does — a transient unit running the whole

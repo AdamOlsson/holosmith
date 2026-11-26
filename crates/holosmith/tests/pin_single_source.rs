@@ -37,8 +37,9 @@ fn no_other_tracked_file_contains_the_pin() {
     let root = repo_root();
     let files = match tracked_files(&root) {
         Some(files) => files,
-        // Builder containers copy the source without history. Walking the worktree there
-        // keeps the guard live instead of silently skipping it.
+        // A container that runs this guard can hold the source without its history, where `git
+        // ls-files` answers nothing. Walking the worktree there keeps the guard live instead of
+        // silently skipping it.
         None => walk_files(&root),
     };
     assert!(!files.is_empty(), "no files to search under {root:?}");
@@ -59,14 +60,11 @@ fn no_other_tracked_file_contains_the_pin() {
 }
 
 /// The recipes that declare a rust stage, listed so that the rule below is about *each of them* rather than
-/// about "the two".
+/// about "the one".
 ///
-/// The builder recipe is on its way out, and a recipe leaving this list is that one line: the rules below read the
-/// list, and the test that the list is complete is what stops a forgotten entry from making them measure nothing.
-const RUST_RECIPES: &[&str] = &[
-    "crates/holosmith/images/agent.Dockerfile",
-    "crates/holosmith/images/builder.Dockerfile",
-];
+/// A recipe leaving or joining this list is one line, and the test that the list is complete against the directory is
+/// what stops a forgotten entry from making the rules measure nothing.
+const RUST_RECIPES: &[&str] = &["crates/holosmith/images/agent.Dockerfile"];
 
 /// The rust base's reference, as `pins/rust.txt` holds it: the tag and the digest, one value.
 fn rust_pin() -> &'static str {
@@ -152,8 +150,8 @@ fn no_tracked_file_beside_the_pin_holds_the_rust_base_digest() {
     let root = repo_root();
     let files = match tracked_files(&root) {
         Some(files) => files,
-        // Builder containers copy the source without history. Walking the worktree there keeps the guard live
-        // instead of silently skipping it.
+        // A container that runs this guard can hold the source without its history, where `git ls-files`
+        // answers nothing. Walking the worktree there keeps the guard live instead of silently skipping it.
         None => walk_files(&root),
     };
     assert!(!files.is_empty(), "no files to search under {root:?}");
@@ -193,8 +191,8 @@ fn every_recipe_with_a_rust_stage_takes_the_reference_from_the_pin() {
         let text = std::fs::read_to_string(root.join(recipe))
             .unwrap_or_else(|error| panic!("{recipe} is not readable: {error}"));
         // One spelling for the stage and one for the argument, both `images::RUST_IMAGE_ARG`'s: the argument's name
-        // is what `images::build_arguments` and `builder::build_arguments` pass, and a recipe that spelled it
-        // differently would be handed a value it never reads.
+        // is what `images::build_arguments` passes, and a recipe that spelled it differently would be handed a value
+        // it never reads.
         let stage = format!(
             "FROM rust:${{{}}} AS rust",
             holosmith::images::RUST_IMAGE_ARG

@@ -45,8 +45,8 @@ pub const PREFIX: &str = "smoke_";
 /// The label that says which candidate and which recipe an image was built from.
 ///
 /// One label rather than two, because a promotion asks one question — "is this image the one for *this* binary and
-/// *this* recipe" — and two labels can disagree (`builder`'s `LABEL_RECIPE` and `images`' `LABEL_BINARY` are the
-/// same shape, one image at a time).
+/// *this* recipe" — and two labels can disagree ([`LABEL_RECIPE`] and `images`' `LABEL_BINARY` are the same shape,
+/// one image at a time).
 pub const LABEL_RECIPE: &str = "org.holosmith.smoke-recipe-sha256";
 
 /// How long the candidate may take to print its banner and answer `/api/health`.
@@ -126,8 +126,8 @@ pub fn image() -> String {
 /// The recipe label's value for this Dockerfile and these candidate bytes.
 ///
 /// The Dockerfile **and** the program, because either changing makes a different image: a fixed tag over a changed
-/// recipe is the defect `builder::LABEL_RECIPE` exists to prevent, and one over a *different binary* is the P1
-/// in another container.
+/// recipe is the defect [`LABEL_RECIPE`] exists to prevent, and one over a *different binary* is the P1 in another
+/// container.
 pub fn recipe(dockerfile: &str, binary: &[u8]) -> String {
     let mut both = Vec::with_capacity(dockerfile.len() + binary.len() + 1);
     both.extend_from_slice(dockerfile.as_bytes());

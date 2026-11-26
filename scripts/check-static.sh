@@ -100,8 +100,8 @@ if grep -q 'source = "git+' Cargo.lock; then
 fi
 
 # A stale dist/ from an older commit passes every other assertion, so compare the tag the
-# artifact reports with the tag of this tree. Builder containers copy the source without
-# .git and pass HOLOSMITH_GIT_TAG instead, so there the check degrades to one SKIP line.
+# artifact reports with the tag of this tree. A tree copied without .git is built with
+# HOLOSMITH_GIT_TAG set instead, so there the check degrades to one SKIP line.
 expected_tag=""
 if [ -d .git ] && command -v git >/dev/null 2>&1; then
   expected_tag="$(git describe --tags --always --dirty 2>/dev/null || true)"

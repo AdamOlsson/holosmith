@@ -1,6 +1,6 @@
 // The spec's "build.rs never runs host-side" rule (item 10) governs agent-written
-// repo code during promotion: promotion builds run in the builder container. This
-// trusted workspace script runs in that same builder, never on the host.
+// repo code during promotion: promotion builds run in a container. This trusted
+// workspace script runs in that same container, never on the host.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -141,7 +141,7 @@ fn version() -> String {
     version.to_string()
 }
 
-/// `HOLOSMITH_GIT_TAG` wins (scripts/build.sh sets it, and builder containers have no
+/// `HOLOSMITH_GIT_TAG` wins (scripts/build.sh sets it, and a container build has no
 /// `.git` to ask); otherwise ask git; a tree with no git answers `unknown` and the
 /// build still succeeds.
 fn git_tag() -> String {

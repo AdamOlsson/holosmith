@@ -79,7 +79,6 @@ network only when that session allows Internet access, so a tool's host is never
 
 Rust 1.99+ (edition 2024), Node.js and npm for `web/`, and the musl cross toolchain on `PATH` —
 `x86_64-linux-musl-gcc`, because SQLite is compiled from source. `scripts/build.sh` builds
-the web app first and then the static artifact, which lands in `dist/<triple>/holosmith`; `scripts/verify.sh` is the
-gate. `holosmith build [--target <triple>] [--out <dir>]` builds the same artifact inside a pinned builder container,
-needing Docker and nothing else — but it needs an existing `holosmith` to run. Put the artifact in a directory on your
-`PATH`; the README's quick start uses `~/.local/bin`. `AGENTS.md` has the repository rules.
+the web app first and then the static artifact, which lands in `dist/<triple>/holosmith` with its digest beside it;
+`scripts/verify.sh` is the gate. Put the artifact in a directory on your `PATH`; the README's quick start uses
+`~/.local/bin`. `AGENTS.md` has the repository rules.

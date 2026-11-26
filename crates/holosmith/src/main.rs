@@ -80,11 +80,6 @@ fn main() -> ExitCode {
             },
             root,
         }),
-        Cmd::Build { target, out } => commands::build::run(commands::build::BuildArgs {
-            config: cli.config,
-            target,
-            out,
-        }),
         Cmd::Update { report, wait, root } => commands::update::run(commands::update::UpdateArgs {
             config: cli.config,
             report,

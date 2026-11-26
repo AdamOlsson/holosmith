@@ -162,7 +162,7 @@ struct World {
 fn world(label: &str) -> Option<World> {
     let artifact = artifact()?;
     let dir = TempDir::new(label);
-    // The two files `holosmith build` writes beside each other: the artifact and its digest.
+    // The two files a build leaves beside each other: the artifact and its digest.
     let candidate = dir.file("holosmith");
     std::fs::copy(&artifact, &candidate).expect("the artifact is copyable");
     let digest = images::digest(&candidate).expect("the candidate is readable");

@@ -354,7 +354,8 @@ pub fn execute(
             &candidate.digest[..12]
         ),
         candidate.info.schema_version,
-        "build the release from the current tree (`holosmith build`), or restore a database this candidate understands",
+        "build the release from the current tree (`scripts/build.sh`), or restore a database this candidate \
+         understands",
     )?;
 
     // 1. The review gate. Item 12's review is the human gate, and what records it is the difference between the two
@@ -508,19 +509,19 @@ fn read_candidate(path: &Path) -> Result<Candidate, String> {
         ));
     }
     let digest = images::hex(&images::sha256(&bytes));
-    // The digest file `holosmith build` writes beside the artifact. Checked, not trusted: a promotion's whole point
+    // The digest file a build leaves beside the artifact. Checked, not trusted: a promotion's whole point
     // is the bytes that were reviewed, and the two files are how a build says which bytes those are.
     let digest_file = digest_path(path);
     let written = std::fs::read_to_string(&digest_file).map_err(|error| {
         format!(
-            "{} could not be read ({error}): `holosmith build` writes the artifact and its digest beside each other, \
-             and a promotion reads both — a file with no digest is not a build this machine can promote",
+            "{} could not be read ({error}): `scripts/build.sh` writes the artifact and its digest beside each \
+             other, and a promotion reads both — a file with no digest is not a build this machine can promote",
             digest_file.display()
         )
     })?;
     let recorded = crate::remote::digest_of(&written).ok_or_else(|| {
         format!(
-            "{} holds no sha256sum line, so the candidate's digest cannot be checked: `holosmith build` writes \
+            "{} holds no sha256sum line, so the candidate's digest cannot be checked: `scripts/build.sh` writes \
              `<digest>  {}` there",
             digest_file.display(),
             release::BINARY
@@ -777,7 +778,7 @@ fn previous_release(release: &Release, root: &Root, verb: &str) -> Result<Previo
     })
 }
 
-/// Write the candidate's release directory: its bytes and its digest, the two files `holosmith build` writes.
+/// Write the candidate's release directory: its bytes and its digest, the two files a release directory holds.
 fn write_release(release: &Release, candidate: &Candidate, verb: &str) -> Result<(), String> {
     if release.binary(&candidate.info.git_tag) == candidate.path {
         // The candidate is already the release: a promotion run from `releases/<tag>/holosmith` itself. Nothing to
