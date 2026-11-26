@@ -1,5 +1,7 @@
 //! `scripts/build.sh` as a machine runs it: the four flags, the three checks that come before anything expensive, the
-//! toolchain it finds or fetches, and the tree facts the one release target is spelled by.
+//! toolchain it finds or fetches, and the tree facts the one release target is spelled by. The last three tests drive
+//! `scripts/build-web.sh` alone, because the guard that decides whether the app's packages are installed is that
+//! script's and `build.sh` only calls it.
 //!
 //! Nothing here compiles the tree or reaches the network. Each test copies the script and the files it reads before
 //! it compiles into a temporary tree and runs it with a shim directory first on `PATH`, so every run stops where the
@@ -44,6 +46,20 @@ fn pinned_rust() -> String {
         || pin.trim().to_string(),
         |(version, _)| version.to_string(),
     )
+}
+
+/// A version this tree's pin is **not**: the pinned compiler's minor with one added. Derived for the same reason the
+/// pin is read rather than written here — a literal becomes the pinned version after the next minor bump, and the two
+/// refusals below would then hand the script the compiler it accepts and assert a refusal that never came.
+fn off_pin_rust() -> String {
+    let pinned = pinned_rust();
+    let mut fields = pinned.split('.');
+    let major = fields.next().unwrap_or("1");
+    let minor: u32 = fields
+        .next()
+        .and_then(|field| field.parse().ok())
+        .unwrap_or(0);
+    format!("{major}.{}.0", minor + 1)
 }
 
 /// A directory that removes itself, so a test leaves nothing behind.
@@ -160,6 +176,15 @@ impl Shims {
     fn web(&self) -> &Self {
         self.add("node", "exit 0")
             .add("npm", &format!("printf '%s\\n' '{WEB_MARKER}'; exit 1"))
+    }
+
+    /// The same web build, as a package manager that records its argv and agrees with everything: how "the guard
+    /// installed the app's packages" and "the guard skipped the install" are told apart without npm on this machine.
+    fn logging_npm(&self) -> &Self {
+        self.add("node", "exit 0").add(
+            "npm",
+            "printf '%s\\n' \"$*\" >>\"${NPM_LOG:-/dev/null}\"\nexit 0",
+        )
     }
 
     /// The fetch, as a program that records its argv and writes bytes the pin will refuse. `-o <path>` is where a
@@ -376,12 +401,13 @@ fn a_cargo_of_another_version_is_refused_by_name() {
     let tree = Tree::new("build-script-cargo");
     let shims = Shims::new(&tree);
     let pinned = pinned_rust();
-    shims.compiler("1.100.0", &pinned).web().fetcher();
+    let off_pin = off_pin_rust();
+    shims.compiler(&off_pin, &pinned).web().fetcher();
     let output = run(&tree.script(), &["--no-check"], &shims.path(), &[]);
     assert_eq!(code(&output), 1, "{}", combined(&output));
     let text = combined(&output);
     assert!(
-        text.contains("1.100.0") && text.contains(&pinned),
+        text.contains(&off_pin) && text.contains(&pinned),
         "the refusal names neither the compiler found nor the pinned one: {text}"
     );
     assert!(
@@ -396,12 +422,13 @@ fn a_rustc_of_another_version_is_refused_by_name() {
     let tree = Tree::new("build-script-rustc");
     let shims = Shims::new(&tree);
     let pinned = pinned_rust();
-    shims.compiler(&pinned, "1.100.0").web().fetcher();
+    let off_pin = off_pin_rust();
+    shims.compiler(&pinned, &off_pin).web().fetcher();
     let output = run(&tree.script(), &["--no-check"], &shims.path(), &[]);
     assert_eq!(code(&output), 1, "{}", combined(&output));
     let text = combined(&output);
     assert!(
-        text.contains("rustc --version answers 1.100.0") && text.contains(&pinned),
+        text.contains(&format!("rustc --version answers {off_pin}")) && text.contains(&pinned),
         "the refusal does not name the rustc found and the pinned one: {text}"
     );
 }
@@ -574,6 +601,138 @@ fn nothing_that_builds_the_artifact_names_the_second_triple() {
         offenders.is_empty(),
         "the second release target is still named in {offenders:?}"
     );
+}
+
+#[test]
+fn a_partial_node_modules_is_reinstalled_rather_than_trusted() {
+    // What a killed `npm ci` leaves: `node_modules` exists and holds only `.bin/`, whose `tsc` is a symlink into a
+    // package that never arrived. The build then stops at `tsc: Permission denied`, which names a mode on a tree where
+    // no mode is wrong — so the guard has to witness a completed install rather than a directory that exists.
+    let tree = Tree::new("build-web-partial");
+    write_web_lock(&tree);
+    let bin = tree.dir().join("web/node_modules/.bin");
+    fs::create_dir_all(&bin).expect("node_modules/.bin is creatable");
+    std::os::unix::fs::symlink("../typescript/bin/tsc", bin.join("tsc"))
+        .expect("the dangling symlink a killed install leaves is creatable");
+    let shims = Shims::new(&tree);
+    shims.logging_npm();
+    let log = tree.dir().join("npm.log");
+    let log_env = log.display().to_string();
+    let output = run(
+        &web_script(&tree),
+        &[],
+        &shims.path(),
+        &[("NPM_LOG", log_env.as_str())],
+    );
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.lines().any(|call| call.starts_with("ci ")),
+        "the guard trusted a node_modules that only exists: {calls}"
+    );
+    // The shim's install returns 0 and installs nothing, so the run goes on to the scripts and stops at the artifact
+    // they could not produce. Reaching that check is what says the guard neither refused the tree nor the build.
+    let text = combined(&output);
+    assert_eq!(code(&output), 1, "{text}");
+    assert!(
+        text.contains("the build left no web/dist/index.html"),
+        "the run did not get past the install: {text}"
+    );
+}
+
+#[test]
+fn a_completed_install_is_not_reinstalled() {
+    // The other half, which is what keeps the repair from being a reinstall on every run: the stamp an `npm ci` that
+    // returned 0 leaves makes the next run skip it.
+    let tree = Tree::new("build-web-installed");
+    let lock = write_web_lock(&tree);
+    let modules = tree.dir().join("web/node_modules");
+    fs::create_dir_all(&modules).expect("node_modules is creatable");
+    fs::write(modules.join(".holosmith-install"), "installed\n").expect("the stamp is writable");
+    // The guard compares the two mtimes, and two files written in the same instant are not an ordering any filesystem
+    // promises — so the lock is placed a minute back rather than the test's result left to the clock's resolution.
+    fs::File::options()
+        .write(true)
+        .open(&lock)
+        .expect("the fixture lock is openable")
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .expect("the fixture lock's mtime is settable");
+    let shims = Shims::new(&tree);
+    shims.logging_npm();
+    let log = tree.dir().join("npm.log");
+    let log_env = log.display().to_string();
+    let output = run(
+        &web_script(&tree),
+        &[],
+        &shims.path(),
+        &[("NPM_LOG", log_env.as_str())],
+    );
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.lines().any(|call| call.starts_with("ci ")),
+        "a completed install was reinstalled: {calls}"
+    );
+    assert!(
+        calls.lines().any(|call| call.starts_with("run build")),
+        "the run never reached the build: {calls}"
+    );
+    assert!(
+        combined(&output).contains("the build left no web/dist/index.html"),
+        "the run did not get past the install: {}",
+        combined(&output)
+    );
+}
+
+#[test]
+fn a_lock_newer_than_the_stamp_is_reinstalled() {
+    // The third combination, and the half the guard had right before the stamp: a stamp witnesses an install of
+    // *some* lock, so one a lock has since moved past is an install of the previous one. Delete the `-nt` test and
+    // the two runs above stay green — this is the one that says the comparison is against the stamp.
+    let tree = Tree::new("build-web-stale-stamp");
+    write_web_lock(&tree);
+    let modules = tree.dir().join("web/node_modules");
+    fs::create_dir_all(&modules).expect("node_modules is creatable");
+    let stamp = modules.join(".holosmith-install");
+    fs::write(&stamp, "installed\n").expect("the stamp is writable");
+    // The stamp a minute back for the reason the test above moves the lock: two writes in one instant are not an
+    // ordering any filesystem promises.
+    fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .expect("the fixture stamp is openable")
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .expect("the fixture stamp's mtime is settable");
+    let shims = Shims::new(&tree);
+    shims.logging_npm();
+    let log = tree.dir().join("npm.log");
+    let log_env = log.display().to_string();
+    let output = run(
+        &web_script(&tree),
+        &[],
+        &shims.path(),
+        &[("NPM_LOG", log_env.as_str())],
+    );
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.lines().any(|call| call.starts_with("ci ")),
+        "a stamp from an older lock was trusted: {calls}"
+    );
+    assert!(
+        combined(&output).contains("the build left no web/dist/index.html"),
+        "the run did not get past the install: {}",
+        combined(&output)
+    );
+}
+
+/// The web build's own script, which the run above is a fact about.
+fn web_script(tree: &Tree) -> PathBuf {
+    tree.dir().join("scripts/build-web.sh")
+}
+
+/// The lock file the install guard compares against, at the path the script reads rather than this repository's own.
+fn write_web_lock(tree: &Tree) -> PathBuf {
+    let path = tree.dir().join("web/package-lock.json");
+    fs::write(&path, "{\"lockfileVersion\": 3}\n").expect("the fixture lock is writable");
+    path
 }
 
 /// Whether a file is one of the ones that build the artifact or describe what it is.

@@ -136,7 +136,7 @@ scripts/verify.sh 2>&1 | while IFS= read -r line; do printf '%s %s\n' "$(date +%
   > target/verify-timed.log
 ```
 
-Nothing in that block puts a toolchain on `PATH`: a host needs rustc 1.99.1 there before the `build` phase
+Nothing in that block puts a toolchain on `PATH`: a host needs rustc 1.100.0 there before the `build` phase
 (`AGENTS.md`'s prerequisites), and the musl cross linker resolves itself — `PATH`, then the tree's `toolchains/`, then
 the pinned fetch (ADR-0120).
 

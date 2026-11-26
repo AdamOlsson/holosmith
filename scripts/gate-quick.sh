@@ -14,7 +14,8 @@
 # wrong would be a green that means nothing, and guessing is the worker's job to state, not the script's to hide.
 #
 # The toolchain is the gate's own: fmt and clippy under a different rustfmt answer a different question, so a
-# cargo that is not the pinned 1.99 line is refused with the sentence that fixes it (AGENTS.md).
+# cargo that is not the pinned major.minor line is refused with the sentence that fixes it (AGENTS.md). The line is
+# `pins/rust.txt`'s, derived below, so a rust bump edits the pin and this script not at all.
 # GATE_QUICK_ALLOW_TOOLCHAIN=1 runs anyway, and repeats the mismatch in the footer so it cannot be missed.
 #
 # The crate set is the image's and not this tree's: under the image's source replacement a crate the crate set
@@ -23,9 +24,9 @@
 # its own sentence — the tree is fine and the image is stale.
 #
 # Exit 0 green, 1 a phase failed (its last line names the phase, and the binary when it was one), 2 misuse: no
-# name, an unknown name, cargo absent or the wrong version, `--lib-only` or `--list` combined with names, 3 the
-# image's crate set is a different `Cargo.lock`'s than this tree's: a stale agent image, which an image rebuild
-# fixes and no code change does.
+# name, an unknown name, cargo absent or the wrong version, `pins/rust.txt` unreadable or naming no version to
+# compare against, `--lib-only` or `--list` combined with names, 3 the image's crate set is a different
+# `Cargo.lock`'s than this tree's: a stale agent image, which an image rebuild fixes and no code change does.
 # There is no `--all` and no `--full` on purpose: `cargo test` is that, and a second spelling of the whole suite
 # is the thing this script exists to stop a worker from reaching for.
 
@@ -118,19 +119,41 @@ if ! command -v cargo >/dev/null 2>&1; then
   printf '            rather than a missing setup step: rebuild agent-image and retry.\n' >&2
   exit 2
 fi
+# The pinned major.minor, from `pins/rust.txt` the way `scripts/build.sh` reads it: the file holds the base's whole
+# reference — tag and digest — so the version is the part before the first `-`, and the major.minor line is that
+# version's first two fields. A literal here would be a second copy of the compiler's minor, and a second copy is what
+# a bump leaves behind: the gate would then refuse the toolchain the pin names, or accept one it does not. Two lines
+# rather than a shared reader because `scripts/gates.sh` is the commands and the predicate, so a pin reader there
+# would widen that file's charter; the other copy of the derivation is `scripts/verify.sh`'s `case_gate_quick`, a case
+# that exists to agree with this script rather than a script of its own.
+[ -r "$repo_root/pins/rust.txt" ] || {
+  printf 'gate-quick: pins/rust.txt is unreadable, so there is no pinned toolchain to compare against.\n' >&2
+  exit 2
+}
+rust_reference="$(tr -d '[:space:]' <"$repo_root/pins/rust.txt")"
+pinned_rust="${rust_reference%%-*}"
+pinned_minor="${pinned_rust%.*}"
+case "$pinned_minor" in
+  '' | *[!0-9.]*)
+    printf 'gate-quick: pins/rust.txt names no rust version to compare the toolchain against: %s\n' \
+      "${pinned_minor:-unknown}" >&2
+    exit 2
+    ;;
+esac
+
 cargo_version="$(cargo --version 2>/dev/null | awk '{print $2}')"
 toolchain_note=""
-case "$cargo_version" in
-  1.99.*) ;;
+case "${cargo_version%.*}" in
+  "$pinned_minor") ;;
   *)
     if [ "${GATE_QUICK_ALLOW_TOOLCHAIN:-0}" != "1" ]; then
-      printf 'gate-quick: cargo %s is not the pinned 1.99 toolchain, so fmt and clippy would answer a different\n' \
-        "${cargo_version:-unknown}" >&2
+      printf 'gate-quick: cargo %s is not the pinned %s toolchain, so fmt and clippy would answer a different\n' \
+        "${cargo_version:-unknown}" "$pinned_minor" >&2
       printf '            question than the gate of record: . ~/.pi/toolchains/env.sh first (AGENTS.md)\n' >&2
       printf '            GATE_QUICK_ALLOW_TOOLCHAIN=1 runs anyway and repeats this in the footer.\n' >&2
       exit 2
     fi
-    toolchain_note="cargo ${cargo_version:-unknown} is not 1.99 (GATE_QUICK_ALLOW_TOOLCHAIN=1), "
+    toolchain_note="cargo ${cargo_version:-unknown} is not ${pinned_minor} (GATE_QUICK_ALLOW_TOOLCHAIN=1), "
     ;;
 esac
 

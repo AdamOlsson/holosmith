@@ -38,11 +38,17 @@ for tool in node npm; do
   fi
 done
 
-# Reinstall only when there are no modules or the lock file moved. `npm ci` deletes and
-# reinstalls node_modules from the lock, so it is never the fast path.
-if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+# Reinstall unless a **completed** install of this lock is already here. A directory that exists is not one: an `npm ci`
+# killed partway leaves `node_modules` holding only `.bin/`, whose `tsc` is a symlink into a package that never arrived,
+# and the build then fails as `tsc: Permission denied` — a mode problem on a tree where no mode is wrong, reported two
+# steps after the install that would have fixed it. The stamp is written after `npm ci` returns 0 and lives inside the
+# directory `npm ci` deletes and recreates, so an install that did not finish cannot leave one behind and a lock newer
+# than the stamp is a reinstall too. It errs toward reinstalling, which costs a reinstall and never a mystery.
+install_stamp=node_modules/.holosmith-install
+if [ ! -f "$install_stamp" ] || [ package-lock.json -nt "$install_stamp" ]; then
   echo "installing web dependencies (npm ci)"
   npm ci --no-audit --no-fund
+  printf 'installed from package-lock.json\n' >"$install_stamp"
 fi
 
 # `npm test` runs the transcript's rules before the build: they are folded from synthetic frames,

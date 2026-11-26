@@ -71,9 +71,13 @@ layer — changing it always rebuilt the stage and everything after it, exactly 
   alone: `Cargo.toml`'s `rust-version` moves with it (the floor test forces that), and so do `scripts/gate-quick.sh`'s
   `1.99.*` match and the three sentences around it, and `scripts/verify.sh`'s stub expectation of the footer that
   match produces. Pointing `gate-quick.sh` at `pins/rust.txt` the way `scripts/build.sh` reads it is the follow-up.
-  The `1.99+` floor that `AGENTS.md`, `README.md` and `docs/requirements.md` name stays true through a minor bump —
-  it is a minimum, not the pin. `tests/pin_single_source.rs` reads the recipes from a list, so the builder recipe's
-  deletion is one line dropped from it rather than a rewrite of the rule.
+  **Done:** `scripts/gate-quick.sh` reads the pin the same way and derives the `major.minor` from it, and
+  `scripts/verify.sh`'s `case_gate_quick` builds its stand-in cargo — and the footer it expects — from that
+  derivation, so a minor bump is now the pin file, the manifest floor and the prose that names the compiler, and no
+  gate script.
+  The `1.99+` floor that `AGENTS.md`, `README.md` and `docs/requirements.md` named at the time of this decision
+  stays true through a minor bump — it is a minimum, not the pin. `tests/pin_single_source.rs` reads the recipes from
+  a list, so the builder recipe's deletion is one line dropped from it rather than a rewrite of the rule.
 - **`scripts/build.sh` reads the version with one `tr`** and refuses a cargo that is not it, which makes it stricter
   than `scripts/gate-quick.sh` on purpose: that gate compares the `major.minor` line only, so a patch difference is
   caught by the build and nowhere else. The two-line derivation is the same two lines `case_agent_toolchain` runs,
