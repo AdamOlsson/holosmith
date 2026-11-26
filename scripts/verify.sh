@@ -15096,7 +15096,14 @@ case_server_service() {
     # run given only the file would answer about this machine's own tree. The config still carries `data_root`,
     # because `serve` and the dry run below read the file.
     deploy_config "$WORK/config-service-doctor.toml" "$control" "$preview" "unix://$sock" "$image"
-    printf 'data_root = "%s"\n' "$root/data" >>"$WORK/config-service-doctor.toml"
+    # The pair, not one half: `ensure_projects_root`'s reason, for a case whose `doctor` and `server deploy` runs read
+    # this file directly rather than through `start_serve`. The account's default `projects_root` is
+    # `<home>/.local/share/holosmith/projects`, so a checkout that lives under it — a machine running Holosmith over
+    # its own project, which is the machine this gate is most often run on — would have `$root/data` refused as inside
+    # it. The root sits beside the data dir, as there, and is created so a run that provisions nothing still reads one.
+    mkdir -p "$root/data-projects" || fail "$name/projects" "could not create the projects root under $root"
+    printf 'data_root = "%s"\nprojects_root = "%s"\n' "$root/data" "$root/data-projects" \
+      >>"$WORK/config-service-doctor.toml"
 
     # 1. The modes the deploy writes: one `perms` line, and the two files this case made are not among the paths the
     #    pass reports as ones it did not find.
