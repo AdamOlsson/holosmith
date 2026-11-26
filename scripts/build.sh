@@ -89,6 +89,40 @@ for target in "${targets[@]}"; do
 done
 unset -f linker_missing
 
+# The compiler, before anything is compiled: the image that runs this artifact is built from `pins/rust.txt`, and
+# an artifact compiled by another rustc is not the one that image holds. The pin is one value holding the tag and
+# the digest, so the version is the part before the first `-`; a literal here would be a second copy of it. A patch
+# difference is not cosmetic — two rustcs are two compilers — so the whole version has to match, which is stricter
+# than `scripts/gate-quick.sh` on purpose: that gate compares the `major.minor` line only, so a patch difference is
+# caught here and nowhere else before a release.
+rust_reference="$(tr -d '[:space:]' < "$repo_root/pins/rust.txt")"
+pinned_rust="${rust_reference%%-*}"
+# A `cargo` that is not there answers 127, and `set -e` over the pipeline's `pipefail` ends the script on the
+# assignment before the refusal can speak — so the absence is a fact this reads first, as `gate-quick.sh` does.
+# The sentence a machine with no toolchain needs is "there is no toolchain", not a status with nothing printed.
+cargo_rust=""
+if command -v cargo >/dev/null 2>&1; then
+  cargo_rust="$(cargo --version 2>/dev/null | awk '{print $2}')"
+fi
+if [ "$cargo_rust" != "$pinned_rust" ]; then
+  if [ -n "$cargo_rust" ]; then
+    printf 'build.sh: cargo %s is not the rustc %s that pins/rust.txt holds.\n' \
+      "$cargo_rust" "${pinned_rust:-unknown}" >&2
+  else
+    printf 'build.sh: cargo is not on PATH, so there is no toolchain to compile an artifact with.\n' >&2
+    printf 'pins/rust.txt holds the rustc %s the artifact has to be built by.\n' "${pinned_rust:-unknown}" >&2
+  fi
+  printf 'An artifact compiled by another rustc is not the one the agent image runs, so it is not built here:\n' >&2
+  printf '  . ~/.pi/toolchains/env.sh && scripts/build.sh\n' >&2
+  printf 'That puts a toolchain first on PATH, which fixes a shadowed cargo and cannot move a version: the file\n' >&2
+  printf 'points rustup at a toolchains directory whose default is `stable`, so the compiler moves under\n' >&2
+  printf '`rustup update` there — or pin the host to it: rustup toolchain install %s && rustup default %s\n' \
+    "$pinned_rust" "$pinned_rust" >&2
+  printf 'Inside the builder image (`holosmith build`) the pinned toolchain is the image itself, so a mismatch\n' >&2
+  printf 'there is an image fault rather than a setup step.\n' >&2
+  exit 1
+fi
+
 # A release artifact must report the tag it was built from, never a stale one. Builder
 # containers have no .git, so there the tag arrives in this variable instead — and a caller
 # that set it wins, because a copy of the source without history cannot describe itself

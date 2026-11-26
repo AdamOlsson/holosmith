@@ -69,6 +69,10 @@ The rust base's digest appears in **one** file, and `tests/pin_single_source.rs`
 single — walks every tracked file to prove it. The pin is the `FROM` line, which is where the two recipes that already
 exist keep theirs; what a `pins/builder.txt` would add is a second place to read one value.
 
+**Superseded by ADR-0118.** The rust base's pin is `pins/rust.txt`'s now and each recipe reads it as a build
+argument, so "the pin is the `FROM` line" no longer holds — a third reader (`scripts/build.sh`) is what the literal
+could not answer; the digest still appears in exactly one file.
+
 ## D3 — the source is read-only, and the build happens in a copy
 
 `docker run --rm --user <out's owner> -v <source>:/src:ro -v <out>:/out -e HOLOSMITH_GIT_TAG=<tag> <image> <triple>`.

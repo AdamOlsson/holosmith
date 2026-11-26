@@ -901,6 +901,46 @@ fn a_mismatch_names_the_key_and_both_values() {
     }
 }
 
+// ---- the build arguments the daemon is handed ----------------------------------------------
+
+#[test]
+fn the_agent_build_carries_the_rust_pin_and_the_other_images_carry_no_such_argument() {
+    // The rust base's reference is no longer a literal in a `FROM` line: an `ARG` is the only mechanism a Dockerfile
+    // has for a shared value, so the *binary* is what hands the pin over, and only to the image whose recipe has a
+    // rust stage (ADR-0118). Two facts follow, and each is a mistake a later edit could make: an argument the agent's
+    // vector dropped would fail the build before any layer runs, on the stage's base reference, and one the proxy's
+    // or the base's vector gained would be a `--build-arg` no recipe declares — a BuildKit warning over nothing.
+    let wanted = format!(
+        "{}={}",
+        images::RUST_IMAGE_ARG,
+        holosmith::pins::rust_image()
+    );
+    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+        let expectation = expectation(kind);
+        let arguments = images::build_arguments(&kind.image(), &expectation);
+        let carried = arguments
+            .iter()
+            .filter(|argument| *argument == &wanted)
+            .count();
+        let rust_arguments = arguments
+            .iter()
+            .filter(|argument| argument.starts_with(images::RUST_IMAGE_ARG))
+            .count();
+        if kind == Kind::Agent {
+            assert_eq!(
+                carried, 1,
+                "the agent build does not carry the rust pin once: {arguments:?}"
+            );
+        } else {
+            assert_eq!(
+                rust_arguments, 0,
+                "the {kind:?} recipe has no rust stage, and its build carries an argument nothing reads: \
+                 {arguments:?}"
+            );
+        }
+    }
+}
+
 // ---- the archive the daemon reads ----------------------------------------------------------
 
 /// A tar header's numeric field: octal digits ended by a NUL or a space, and an all-NUL field is zero — which is

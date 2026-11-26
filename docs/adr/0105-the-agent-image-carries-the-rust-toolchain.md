@@ -35,19 +35,23 @@ the label is the skip rule, and a second recipe means a second name for the same
 recipes for one role is the shape that drifts. The egress proxy's allow-list is per-machine config because it is a
 policy; this is a compiler.
 
-## D2 — the pin is two `FROM` lines, held together by a test
+## D2 — the pin was two `FROM` lines, held together by a test
 
-`agent.Dockerfile` copies its toolchain out of the same rust base `builder.Dockerfile` builds in, and both name it
-literally — `rust:1.99.1-bookworm@sha256:…`, the identical reference. It has to be a literal in both files because **a
-Dockerfile cannot `include` anything**: no mechanism lets one recipe name another's stage or share a fragment, so a
-shared file, a `pins/rust.txt` read by `build.rs` and passed as a build argument, or a base image of our own are all
-workarounds for a problem a test solves. A build argument would move the value into the Rust that passes it, which is
-the second copy this rule exists to forbid — and it would be a config key, which D1 refused.
+**Superseded by ADR-0118.** `agent.Dockerfile` copies its toolchain out of the same rust base `builder.Dockerfile`
+builds in, and both named it literally — the identical reference — because **a Dockerfile cannot `include` anything**:
+no mechanism lets one recipe name another's stage or share a fragment, so a shared file, a pin read by `build.rs` and
+passed as a build argument, or a base image of our own all looked like workarounds for a problem a test solved.
 
-What holds the two together is `tests/pin_single_source.rs`: it reads each recipe's `FROM rust:` line, asserts the two
-references are the **same string**, and asserts that string's digest appears in exactly those two files and nowhere
-else (a third copy in a doc or a review is the stale one). A bump is therefore two edits, and a bump of one is a
-failure rather than a session compiled by a different toolchain than a release build.
+What held the two together was `tests/pin_single_source.rs`: it read each recipe's `FROM rust:` line, asserted the two
+references were the **same string**, and asserted that string's digest appeared in exactly those two files and nowhere
+else (a third copy in a doc or a review is the stale one).
+
+A third reader is what broke the argument. `scripts/build.sh` has to compare a host's cargo with the pin, and it
+cannot read a digest out of a Dockerfile in shell; a rule holding two literals together has no answer for a reader
+that is not a Dockerfile. The reference is `pins/rust.txt`'s now and each recipe takes it as `HOLOSMITH_RUST_IMAGE`,
+which is the file's value and not a literal moved into the Rust that passes it, and not a config key. ADR-0118 says
+why the pin is the whole reference rather than the version, and why the argument above the first `FROM` costs no
+cache boundary.
 
 The musl.cc tarballs are pinned the same way `builder.Dockerfile` pins them: by the SHA-256 in the `RUN` line, checked
 with `sha256sum -c` before the extraction. Same two URLs, same two digests, for the same reason — a session compiles
@@ -55,7 +59,7 @@ the same tree.
 
 ## D3 — `rustup component add` and both musl targets are load-bearing
 
-`rust:1.99.1-bookworm` ships rustup's **minimal** profile. Without `rustup component add rustfmt clippy`, `cargo fmt`
+The pinned rust base ships rustup's **minimal** profile. Without `rustup component add rustfmt clippy`, `cargo fmt`
 answers `'cargo-fmt' is not installed for the toolchain`, which is a session's first command failing on an image that
 looks complete. `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl` is what makes
 `.cargo/config.toml`'s two targets resolve, and `build-essential` is the `cc` the `cc` crate needs for bundled
@@ -103,9 +107,9 @@ the subset a session can own, and `scripts/gate-quick.sh`'s `cargo is not on PAT
 two machines reach it: a host needs the line that puts the toolchain on `PATH`, and a session that gets there is
 running a broken image.
 
-The version is the same version, in both places: 1.99 from `~/.pi/toolchains/env.sh` on a development machine and
-1.99 from the recipe's `FROM` line in the image. A `rust-toolchain.toml` would be a third source and is why the tree
-has none.
+The version's **major.minor** is the same in both places: it is what `~/.pi/toolchains/env.sh` puts on a development
+machine's `PATH` and what `pins/rust.txt` pins the image to. A `rust-toolchain.toml` would be a third source and is
+why the tree has none.
 
 ## Consequences
 

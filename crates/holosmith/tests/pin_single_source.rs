@@ -1,4 +1,5 @@
-//! The pinned pi version lives in `pins/pi.txt` and nowhere else, and the two build recipes name one rust base.
+//! The pinned pi version lives in `pins/pi.txt` and nowhere else, and so does the rust base's reference:
+//! `pins/rust.txt` holds it, the recipes take it as `HOLOSMITH_RUST_IMAGE`, and no recipe holds a digest.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,79 +58,200 @@ fn no_other_tracked_file_contains_the_pin() {
     );
 }
 
-/// The rust base a recipe is built from, read out of the recipe itself.
+/// The recipes that declare a rust stage, listed so that the rule below is about *each of them* rather than
+/// about "the two".
 ///
-/// An image's pin is its `FROM` line, the same place the two product recipes keep theirs, and this one is a
-/// **second** such line: `agent.Dockerfile` copies its rust toolchain out of `builder.Dockerfile`'s base, so the two
-/// must name the identical reference or a session compiles with a different compiler than a release build.
-///
-/// The reference is a literal in both files because **a Dockerfile cannot `include` anything**: there is no
-/// mechanism that would let one recipe name another's stage or share a fragment, and a build argument would move
-/// the pin into the Rust that passes it — which is the second copy this one-file rule exists to forbid.
-/// `pins/pi.txt` is what an `include` would look like here, and it is not available to a `FROM` line, so the drift
-/// is caught by this test instead.
-fn rust_base_reference(dockerfile: &str) -> String {
-    let line = dockerfile
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("FROM rust:"))
-        .expect("the recipe names a rust base");
-    // The `FROM <ref> AS <stage>` line's second word is the reference.
-    line.split_whitespace()
-        .nth(1)
-        .map(str::to_string)
-        .expect("the recipe's rust line carries a reference")
+/// The builder recipe is on its way out, and a recipe leaving this list is that one line: the rules below read the
+/// list, and the test that the list is complete is what stops a forgotten entry from making them measure nothing.
+const RUST_RECIPES: &[&str] = &[
+    "crates/holosmith/images/agent.Dockerfile",
+    "crates/holosmith/images/builder.Dockerfile",
+];
+
+/// The rust base's reference, as `pins/rust.txt` holds it: the tag and the digest, one value.
+fn rust_pin() -> &'static str {
+    holosmith::pins::rust_image()
+}
+
+/// The recipes `crates/holosmith/images/` holds that declare a rust stage, by their file name.
+fn recipes_with_a_rust_stage(root: &Path) -> Vec<String> {
+    let directory = root.join("crates/holosmith/images");
+    let mut found: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("{} is not readable: {error}", directory.display()))
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".Dockerfile"))
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .is_ok_and(|text| text.lines().any(|line| line.starts_with("FROM rust:")))
+        })
+        .map(|entry| {
+            format!(
+                "crates/holosmith/images/{}",
+                entry.file_name().to_string_lossy()
+            )
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 #[test]
-fn the_two_recipes_name_one_rust_base_and_no_third_file_does() {
-    // Both halves of one rule: the two references are the same string (so a bump is two edits that cannot drift),
-    // and that string's digest appears in **exactly** those two files — a third copy in a doc or a review is the
-    // stale one nobody edits.
-    let agent = rust_base_reference(holosmith::images::AGENT_DOCKERFILE);
-    let builder = rust_base_reference(holosmith::builder::DOCKERFILE);
+fn the_rust_pin_is_one_line_holding_the_whole_reference() {
+    let contents = std::fs::read_to_string(repo_root().join("pins/rust.txt"))
+        .expect("pins/rust.txt is readable");
+    assert_eq!(rust_pin(), contents.trim());
     assert_eq!(
-        agent, builder,
-        "the agent image and the builder must be built from one rust base: a session would otherwise compile with a \
-         different compiler than a release build"
+        contents.lines().count(),
+        1,
+        "pins/rust.txt must hold one reference on one line, got {contents:?}"
     );
-    let digest = agent
-        .rsplit_once("@sha256:")
-        .map(|(_, digest)| digest)
-        .expect("the rust base is pinned by digest, not by tag");
+    // The whole reference and not the version: Docker resolves `rust:tag@sha256:…` by the **digest** and ignores the
+    // tag, so a pin holding only a version could build from one image while claiming another, and nothing would
+    // notice. One value in one file cannot drift from itself (ADR-0118).
+    let (reference, digest) = rust_pin().rsplit_once("@sha256:").unwrap_or_else(|| {
+        panic!("pins/rust.txt is not a reference pinned by digest: {contents:?}")
+    });
     assert_eq!(digest.len(), 64, "a digest is 64 hex characters: {digest}");
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "a digest is 64 lowercase hex characters: {digest}"
+    );
+    // And the tag half is shaped like a version and a Debian suite. Which suite it is is the base's business rather
+    // than this test's: nothing in this tree depends on it, and the digest is what pins the bytes.
+    let (version, suite) = reference
+        .split_once('-')
+        .unwrap_or_else(|| panic!("the reference has no Debian suite: {reference}"));
+    assert!(
+        !suite.is_empty(),
+        "the reference names no Debian suite: {reference}"
+    );
+    let fields: Vec<&str> = version.split('.').collect();
+    assert_eq!(
+        fields.len(),
+        3,
+        "the pinned version is not major.minor.patch: {version}"
+    );
+    assert!(
+        fields
+            .iter()
+            .all(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit())),
+        "the pinned version is not numeric: {version}"
+    );
+}
 
+#[test]
+fn no_tracked_file_beside_the_pin_holds_the_rust_base_digest() {
+    // The digest appears in **one** file: a second copy in a recipe, a doc or a review is the stale one nobody
+    // edits. Every tracked file is scanned, so a third copy is caught wherever it lands — and the scan does not
+    // name the recipes, which is why deleting one needs no edit here.
+    let (_, digest) = rust_pin()
+        .rsplit_once("@sha256:")
+        .expect("the rust base is pinned by digest, not by tag");
     let root = repo_root();
     let files = match tracked_files(&root) {
         Some(files) => files,
+        // Builder containers copy the source without history. Walking the worktree there keeps the guard live
+        // instead of silently skipping it.
         None => walk_files(&root),
     };
     assert!(!files.is_empty(), "no files to search under {root:?}");
-    let recipes = [
-        "crates/holosmith/images/agent.Dockerfile",
-        "crates/holosmith/images/builder.Dockerfile",
-    ];
     let needle = digest.as_bytes();
     let mut offenders: Vec<&str> = files
         .iter()
-        .filter(|file| !recipes.contains(&file.as_str()))
+        .filter(|file| *file != "pins/rust.txt")
         .filter(|file| std::fs::read(root.join(file)).is_ok_and(|bytes| contains(&bytes, needle)))
         .map(String::as_str)
         .collect();
     offenders.sort_unstable();
     assert!(
         offenders.is_empty(),
-        "the rust base digest {digest} also appears in {offenders:?}; it belongs in {recipes:?} only"
+        "the rust base digest {digest} also appears in {offenders:?}; it belongs in pins/rust.txt only"
     );
-    // And the two files the rule names are the two the test read, so a rename cannot leave it searching for a file
-    // that is not there.
-    for recipe in recipes {
-        assert!(
-            files.iter().any(|file| file == recipe),
-            "{recipe} is not a tracked file, so the search above proved nothing about it"
+}
+
+#[test]
+fn every_recipe_with_a_rust_stage_takes_the_reference_from_the_pin() {
+    // `RUST_RECIPES` is the list the rule reads, and this assertion is what keeps the list complete: a recipe with a
+    // rust stage that is not in it would be pinned by a literal the scan above then has to allow — which is the
+    // drift the digest rule exists to catch. So the list is compared with what the directory holds, in both
+    // directions.
+    let root = repo_root();
+    let mut declared: Vec<String> = RUST_RECIPES
+        .iter()
+        .map(|recipe| recipe.to_string())
+        .collect();
+    declared.sort();
+    assert_eq!(
+        declared,
+        recipes_with_a_rust_stage(&root),
+        "the recipes with a rust stage and the list this rule reads are not the same set"
+    );
+
+    for &recipe in RUST_RECIPES {
+        let text = std::fs::read_to_string(root.join(recipe))
+            .unwrap_or_else(|error| panic!("{recipe} is not readable: {error}"));
+        // One spelling for the stage and one for the argument, both `images::RUST_IMAGE_ARG`'s: the argument's name
+        // is what `images::build_arguments` and `builder::build_arguments` pass, and a recipe that spelled it
+        // differently would be handed a value it never reads.
+        let stage = format!(
+            "FROM rust:${{{}}} AS rust",
+            holosmith::images::RUST_IMAGE_ARG
         );
-        assert!(root.join(recipe).is_file(), "{recipe} does not exist");
+        let declared_at = text
+            .lines()
+            .position(|line| line.trim() == stage)
+            .unwrap_or_else(|| {
+                panic!("{recipe} does not declare its rust stage as `{stage}`: a literal `FROM rust:` line is the second copy of the pin ADR-0118 removed")
+            });
+        let argument = format!("ARG {}", holosmith::images::RUST_IMAGE_ARG);
+        let argument_at = text
+            .lines()
+            .position(|line| line.trim() == argument)
+            .unwrap_or_else(|| panic!("{recipe} writes `{stage}` and declares no `{argument}`"));
+        assert!(
+            argument_at < declared_at,
+            "{argument} is declared below the first `FROM` in {recipe}, where no `FROM` can read it"
+        );
+        // Before the *first* `FROM` and in global scope, which is the only scope a `FROM` reads: a `FROM` after an
+        // earlier stage would need the argument redeclared there, and this is the assertion that says so.
+        let first_from = text
+            .lines()
+            .position(|line| line.trim_start().starts_with("FROM "))
+            .unwrap_or_default();
+        assert_eq!(
+            argument_at + 1,
+            first_from,
+            "the rust base's argument in {recipe} is not the instruction immediately before the first `FROM`"
+        );
     }
+}
+
+#[test]
+fn the_manifests_rust_floor_is_the_pins_major_minor() {
+    // `Cargo.toml`'s `rust-version` and the pin are **different facts**: a floor cargo refuses to build below, which
+    // says nothing about above, and the version an image actually holds. They are tied by major.minor so the floor
+    // cannot drift from the pin — a pin moved to another minor is a manifest edit in the same commit, while a patch
+    // bump in the pin needs none.
+    let manifest =
+        std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml is readable");
+    let floor = manifest
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("rust-version"))
+        .and_then(|rest| rest.split_once('='))
+        .map(|(_, value)| value.trim().trim_matches('"').to_string())
+        .expect("Cargo.toml declares a rust-version floor");
+    let version = rust_pin()
+        .split_once('-')
+        .map_or(rust_pin(), |(version, _)| version);
+    let major_minor: Vec<&str> = version.split('.').take(2).collect();
+    assert_eq!(
+        major_minor.join("."),
+        floor,
+        "Cargo.toml's rust-version floor and the pinned rust base's version have drifted apart"
+    );
 }
 
 /// Every file in the worktree except build output and git history, for trees with no

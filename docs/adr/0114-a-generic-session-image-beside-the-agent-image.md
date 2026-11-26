@@ -76,9 +76,9 @@ image's own uid and picks one that is neither it nor zero, so the measurement ca
 - a session that moves from the base image to the agent image moves within one Debian release, so a program that runs
   in one runs in the other.
 
-`tests/images.rs` compares the two lines and asserts the digest is present, so a bump is two edits that cannot drift —
-the same rule ADR-0105 D2 applies to the rust stage and `builder.Dockerfile`, for the same reason: a Dockerfile cannot
-`include` anything, so the copy is held together by a test rather than by a mechanism.
+`tests/images.rs` compares the two lines and asserts the digest is present, so a bump is two edits that cannot
+drift — a Dockerfile cannot `include` anything, so a copy held together by a test is what there is. The rust stage
+had this same shape until it gained a reader outside the recipes, which ADR-0118 makes a build argument.
 
 ## D4 — four labels, no binary, and the digest that is still spent
 

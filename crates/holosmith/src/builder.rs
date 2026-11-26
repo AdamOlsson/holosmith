@@ -8,8 +8,9 @@
 //!
 //! Four things are load-bearing and each has its own doc comment below:
 //!
-//! - **The image is ours and it is pinned twice.** Both bases are pinned by manifest-list digest, and the two
-//!   musl.cc toolchain tarballs are pinned by their SHA-256 — a download is a pin only when its bytes are checked.
+//! - **The image is ours and it is pinned twice.** Both bases are pinned by manifest-list digest — the rust one
+//!   through `pins/rust.txt`'s value, handed over as `HOLOSMITH_RUST_IMAGE` (ADR-0118) — and the two musl.cc
+//!   toolchain tarballs are pinned by their SHA-256: a download is a pin only when its bytes are checked.
 //!   The recipe is labelled with its own digest, so editing it without bumping the version rebuilds instead of
 //!   reusing a stale image (the same argument as `org.holosmith.binary-sha256`, ADR-0057).
 //! - **The source is mounted read-only and the build happens in a copy.** A build cannot reach the operator's tree:
@@ -116,12 +117,19 @@ pub fn archive() -> Vec<u8> {
     out
 }
 
-/// `docker build -t <image> --build-arg HOLOSMITH_BUILDER_RECIPE=<recipe> -`: the context is the archive on stdin.
+/// `docker build -t <image> --build-arg HOLOSMITH_RUST_IMAGE=<pin> --build-arg HOLOSMITH_BUILDER_RECIPE=<recipe> -`:
+/// the context is the archive on stdin.
+///
+/// Two arguments and no labels, and the first of them is the rust base's: the recipe's first stage is
+/// `FROM rust:${HOLOSMITH_RUST_IMAGE}`, whose value is [`crate::pins::rust_image`]'s — the pin file read, not a
+/// version spelled here (ADR-0118).
 pub fn build_arguments(image: &str) -> Vec<String> {
     vec![
         "build".to_string(),
         "-t".to_string(),
         image.to_string(),
+        "--build-arg".to_string(),
+        format!("{}={}", images::RUST_IMAGE_ARG, crate::pins::rust_image()),
         "--build-arg".to_string(),
         format!("HOLOSMITH_BUILDER_RECIPE={}", recipe()),
         "-".to_string(),
@@ -523,21 +531,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_recipe_pins_both_bases_by_digest() {
+    fn the_recipe_takes_its_rust_base_from_the_pin_and_pins_node_by_digest() {
+        // Two bases, two ways of naming them, and one of them is now the pin's: a `FROM` line cannot include a file,
+        // so the rust stage reads `HOLOSMITH_RUST_IMAGE` — declared before the first `FROM`, which is the only scope
+        // a `FROM` can read an argument from — and the binary hands it the value of `pins/rust.txt` verbatim
+        // (ADR-0118). Node, whose reference nothing else needs, stays a literal pinned by digest.
         let froms: Vec<&str> = DOCKERFILE
             .lines()
             .filter(|line| line.trim_start().starts_with("FROM "))
             .collect();
         assert_eq!(froms.len(), 2, "the recipe has two bases: {froms:?}");
-        for line in &froms {
-            let reference = line.split_whitespace().nth(1).unwrap_or_default();
-            assert!(
-                reference.contains("@sha256:"),
-                "a base is pinned by its digest, not its tag: {line}"
-            );
-            let digest = reference.rsplit("@sha256:").next().unwrap_or_default();
-            assert_eq!(digest.len(), 64, "a digest is 64 hex characters: {line}");
-        }
+        assert_eq!(
+            froms[0].trim(),
+            format!("FROM rust:${{{}}} AS rust", images::RUST_IMAGE_ARG),
+            "the rust stage is not the pin's reference"
+        );
+        let declared = DOCKERFILE
+            .lines()
+            .position(|line| line.trim() == format!("ARG {}", images::RUST_IMAGE_ARG));
+        let declared = declared.unwrap_or_else(|| {
+            panic!(
+                "the recipe reads {} and declares no such argument",
+                images::RUST_IMAGE_ARG
+            )
+        });
+        let first_from = DOCKERFILE
+            .lines()
+            .position(|line| line.trim_start().starts_with("FROM "))
+            .unwrap_or_default();
+        assert!(
+            declared < first_from,
+            "{} is declared below the first `FROM`, where no `FROM` can read it",
+            images::RUST_IMAGE_ARG
+        );
+
+        let node = froms[1].split_whitespace().nth(1).unwrap_or_default();
+        assert!(
+            node.contains("@sha256:"),
+            "a base is pinned by its digest, not its tag: {}",
+            froms[1]
+        );
+        let digest = node.rsplit("@sha256:").next().unwrap_or_default();
+        assert_eq!(
+            digest.len(),
+            64,
+            "a digest is 64 hex characters: {}",
+            froms[1]
+        );
     }
 
     #[test]
@@ -625,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn the_build_arguments_name_the_recipe_and_the_context() {
+    fn the_build_arguments_name_the_pin_the_recipe_and_the_context() {
         let arguments = build_arguments("holosmith-builder:9.9.9");
         assert_eq!(
             arguments,
@@ -633,6 +673,8 @@ mod tests {
                 "build".to_string(),
                 "-t".to_string(),
                 "holosmith-builder:9.9.9".to_string(),
+                "--build-arg".to_string(),
+                format!("{}={}", images::RUST_IMAGE_ARG, crate::pins::rust_image()),
                 "--build-arg".to_string(),
                 format!("HOLOSMITH_BUILDER_RECIPE={}", recipe()),
                 "-".to_string(),
