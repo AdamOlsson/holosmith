@@ -143,7 +143,8 @@ pub fn recipe(dockerfile: &str, binary: &[u8]) -> String {
 /// the rest is what keeps a smoke run out of the machine's way:
 ///
 /// * `role = "server"` — a session needs the server half (`hub` answers `403 sessions_disabled`).
-/// * `agent_image` — the smoke image, whose `pi` is the candidate.
+/// * `base_image` — the smoke image, whose `pi` is the candidate. The key is the machine's one session image name,
+///   and a smoke run names the image it just built.
 /// * `min_free_gb = 0` and `session_disk_soft_gb = 0` — the floor and the per-session cap measure a *machine's*
 ///   limits; the smoke run writes nothing worth capping, and a floor refusing the create would be a red promotion on
 ///   a full disk rather than a statement about the candidate.
@@ -164,7 +165,7 @@ pub fn config_text(image: &str, root: &Path, preview_port: u16) -> String {
          preview_origin = \"http://127.0.0.1:{preview_port}\"\n\
          data_root = \"{}\"\n\
          projects_root = \"{}\"\n\
-         agent_image = \"{image}\"\n\
+         base_image = \"{image}\"\n\
          container_prefix = \"{PREFIX}\"\n\
          network_prefix = \"{PREFIX}\"\n\
          min_free_gb = 0\n\
@@ -1245,7 +1246,7 @@ mod tests {
         assert_eq!(config.projects_root, root.join("projects"));
         assert_eq!(config.control_listen.port(), 0, "the port is the kernel's");
         assert_eq!(config.preview_listen.port(), 18_081);
-        assert_eq!(config.agent_image, image());
+        assert_eq!(config.base_image, image());
         assert_eq!(config.backend, crate::runtime::Backend::Docker);
         assert_eq!(
             config.min_free_gb, 0,

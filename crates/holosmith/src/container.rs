@@ -409,7 +409,7 @@ pub struct ContainerSettings {
     /// container: a data root on a tmpfs the daemon does not share gives the agent an empty directory and no
     /// error (the same fact ADR-0035 records for the projects root).
     pub data_root: PathBuf,
-    /// The image a container runs: `agent_image`.
+    /// The image a container runs: `base_image`, Holosmith's own image or one a machine named.
     pub image: String,
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
     pub docker_host: Option<String>,
@@ -456,7 +456,7 @@ impl ContainerSettings {
         Self {
             projects_root: config.projects_root.clone(),
             data_root: config.data_root.clone(),
-            image: config.agent_image.clone(),
+            image: config.base_image.clone(),
             docker_host: config.docker_host.clone(),
             limits: Limits {
                 cpus: config.container_cpus,
@@ -494,7 +494,7 @@ pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
 /// or the launch command would be a place to forget it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContainer {
-    /// The image the container runs: `agent_image` (spec item 10 §3 builds it).
+    /// The image the container runs: `base_image` (spec item 10 §3 builds the default).
     pub image: String,
     /// `s_<id>`: how the container is named, and how finds a leftover one.
     pub name: String,
@@ -1569,7 +1569,7 @@ mod tests {
         // Built from the config rather than from `ContainerSettings`: the proxy has no session, so it has no
         // mounts and no limits, and the image it runs is named from this binary's own version (ADR-0045).
         let config = Config {
-            agent_image: "agent-image:0.1.0".to_string(),
+            base_image: "holosmith-base:0.1.0".to_string(),
             egress: crate::config::Egress {
                 allow: vec!["crates.io".to_string()],
             },
@@ -1579,7 +1579,7 @@ mod tests {
         assert_eq!(
             proxy.image,
             format!("holosmith-proxy:{}", crate::VERSION),
-            "the proxy image is this binary's own version, not the configured agent image"
+            "the proxy image is this binary's own version, not the configured session image"
         );
         assert_eq!(proxy.allow, ["crates.io"]);
     }

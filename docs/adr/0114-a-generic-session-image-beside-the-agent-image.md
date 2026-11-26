@@ -12,6 +12,10 @@ node, git, CA certificates, `openssl` and `procps` in it and **nothing else**; `
 what it is, because the session path still points at it and this repository still needs a container it can run its own
 gate in. `server deploy`'s step 3 builds three images: proxy, base, agent.
 
+**Superseded in part by ADR-0117:** `agent-image:<version>` is no longer what a session's container runs by default.
+The key is `base_image`, defaulted to this decision's `holosmith-base:<version>`, and the agent image is what a
+machine whose projects are this tree names explicitly.
+
 **Supersedes ADR-0057's** sentence that "the two images are built from Dockerfiles embedded in the binary". That
 decision's subject was *where the recipe lives* — inside the artifact, because a deploy runs on a machine that has the
 artifact and nothing else — and it is unchanged: there are three `include_str!`ed recipes now, and

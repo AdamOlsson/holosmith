@@ -742,7 +742,7 @@ The per-session mutex a container start holds, so two starts of one session cann
 _Avoid_: Create lock, session mutex, start guard
 
 **Session container**:
-The container one session runs in: the name `s_<id>`, the image `agent_image` names, and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
+The container one session runs in: the name `s_<id>`, the image `base_image` names, and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
 _Avoid_: Agent container, sandbox, box
 
 **Mounts**:
@@ -1066,8 +1066,8 @@ _Avoid_: Build container, build image, toolchain image, CI image
 **Session toolchain**:
 What a session's container carries of the compiler its tree is written in, as part of the **fixed** set: rustc, cargo,
 rustfmt and clippy at the version the agent recipe's `FROM rust:` line names, both musl targets, and both musl.cc cross
-linkers. It is not an `agent_toolchains` entry — that key names Debian packages *beyond* the fixed set — so no config
-key removes it and none moves its version. The analogue of the **pinned pi version** for rust is those `FROM` lines in
+linkers. There is no package key and no toolchain label: everything a recipe installs is fixed, so no config key
+removes it and none moves its version. The analogue of the **pinned pi version** for rust is those `FROM` lines in
 `agent.Dockerfile` and `builder.Dockerfile`, which a test asserts are one identical string; there is no `pins/rust.txt`
 because a Dockerfile cannot `include` anything. A session can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
 and `npm test` (ADR-0105) out of the **Vendored crate set** it carries too; what it does not have is a Docker daemon,
@@ -1254,7 +1254,7 @@ healthcheck
 **Smoke config**:
 The config file a **smoke run** writes before it asks the daemon anything, under its root: role `server`, backend
 `docker`, `control_listen = "127.0.0.1:0"` (the port is the kernel's), a `preview_listen` picked by a bind-and-drop,
-both roots under the run's own directory, `agent_image` = the **smoke image**, `container_prefix` and `network_prefix`
+both roots under the run's own directory, `base_image` = the **smoke image**, `container_prefix` and `network_prefix`
 both `smoke_`, the disk floor and the per-session cap off, `idle_stop_min` 0 and `max_live_sessions` 1. "Cannot touch
 real state" is those four settings **and** the five names the two prefixes compose.
 _Avoid_: Test config, temporary config, sandbox config
@@ -1263,7 +1263,7 @@ _Avoid_: Test config, temporary config, sandbox config
 `holosmith-smoke:<version>`, which a **smoke run** builds from the candidate's own bytes: the **agent image**'s
 digest-pinned node base, `COPY holosmith`, and `/usr/local/bin/pi` a wrapper onto `holosmith container fake-pi "$@"`
 (`crates/holosmith/images/smoke.Dockerfile`, embedded like the two product recipes). Nothing is installed on it — the
-**fake pi** replays records — and node stays because the boot's network self-test probes `agent_image` as `node -e`.
+**fake pi** replays records — and node stays because the boot's network self-test probes `base_image` as `node -e`.
 Labelled `org.holosmith.smoke-recipe-sha256` with the SHA-256 of (recipe ‖ candidate bytes), so a changed recipe or a
 different candidate rebuilds and the same candidate again does not. It is not one of the **image build**'s two: a
 promotion never ships it, and `server deploy` does not build it.
@@ -1311,22 +1311,24 @@ _Avoid_: Install step, deploy phase, stage, deployment
 The three images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
 `holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run;
 `holosmith-base:<version>`, pi at the pinned version, node, git, CA certificates, openssl and `procps` and nothing
-else, which is the session image for a project that is not this repository (ADR-0114); and `agent-image:<version>`,
-the same session plus the artifact, this repository's toolchain and the configured toolchains, which a session's
-container runs. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and the context is
+else, which is the session image for a project that is not this repository and the value `base_image` defaults to
+(ADR-0114, ADR-0117); and `agent-image:<version>`, the same session plus the artifact, this repository's Rust
+toolchain, python3 and ripgrep, the crate set and the npm cache, which a machine whose projects are this tree points
+`base_image` at. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and the context is
 an archive holding the Dockerfile, the running binary and — on the agent image — the crate set a build can vendor from
 (`images::Kind::context`). Its machine names are `images::Kind`, `images::ensure` and
 `images::proxy_image`/`images::base_image`/`images::agent_image`.
 _Avoid_: Container image, docker image, image pull, base image
 
 **Image label**:
-One of the five `org.holosmith.*` values a built image carries — version, git tag, pinned pi, the SHA-256 of the
-binary it was built from, and (on the agent image only) the toolchain list — written by the Dockerfile from
-build arguments and read back by `server deploy`'s step 3 skip rule and by `doctor`'s `image` finding. The
-digest is what makes a **rebuilt** artifact a rebuild: `git describe` is the same for two builds of the same
-commit, dirty tree included. An image with no Holosmith labels is one another tool built (`pi-agent:local`),
-which is a supported machine rather than a mismatch. Its machine names are `images::LABEL_VERSION`,
-`LABEL_GIT_TAG`, `LABEL_PI`, `LABEL_BINARY` and `LABEL_TOOLCHAINS`.
+One of the four `org.holosmith.*` values a built image carries — version, git tag, pinned pi and the SHA-256 of the
+binary it was built from — written by the Dockerfile from build arguments and read back by `server deploy`'s step 3
+skip rule and by `doctor`'s `image` finding. The digest is what makes a **rebuilt** artifact a rebuild: `git
+describe` is the same for two builds of the same commit, dirty tree included. A recipe's package set is a literal in
+the recipe, so there is no label for it: an image built by a release whose recipe differed is stale through the
+digest, which moves with the `include_str!`ed recipe. An image with no Holosmith labels is one another tool built
+(`pi-agent:local`), which is a supported machine rather than a mismatch. Its machine names are
+`images::LABEL_VERSION`, `LABEL_GIT_TAG`, `LABEL_PI` and `LABEL_BINARY`.
 _Avoid_: Tag, annotation, metadata, image version
 
 **Run record**:

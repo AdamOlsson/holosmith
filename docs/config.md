@@ -86,8 +86,7 @@ deploy and never regenerated (ADR-0058).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `agent_image` | string | `agent-image:<version>` | The image a session's container runs. Non-empty. The version is this binary's, which is the image a deployed machine already has. |
-| `agent_toolchains` | string array | `["python3", "ripgrep"]` | Debian packages the agent image installs **beyond** the fixed set — git, openssl, CA certificates, `build-essential` (the `cc` bundled SQLite is compiled with), `curl` (which fetches the two musl.cc cross toolchains at build time), `file` (which `scripts/check-static.sh` reads an artifact's link state with), `procps` (the `kill` that `smoke` checks and stops its candidate with), **and the Rust toolchain** (rustc, cargo, rustfmt, clippy, both musl targets and both musl.cc cross linkers), which is part of the recipe and not configurable. Empty is legitimate (a machine whose projects need only git); a blank name is refused, because it fails at `apt-get install ""`. The image's `org.holosmith.toolchains` label carries the list it was built with, so a changed list is a rebuild and not a re-tag. |
+| `base_image` | string | `holosmith-base:<version>` | The image Holosmith owns and projects extend: what a session's container runs, and what `server deploy`'s step 3 builds. Non-empty. The default is the generic image at this binary's version, which is what a deployed machine already has; point it at an image built by hand — `pi-agent:local`, or an image you built and tagged yourself from a project's own `docker/Dockerfile` — and step 3's line says the image it built is not the one a session will use. A package a project needs goes in that image you build, tag and name here, not in a key; a project conventionally keeps the recipe in its own `docker/Dockerfile`, and a recipe Holosmith reads itself is planned rather than shipped. |
 | `container_cpus` | integer | `2` | Whole CPUs per session container. Docker reads `0` as unlimited, so the floor is 1. |
 | `container_memory_mb` | integer | `4096` | MiB of memory per session container. At least 1. |
 | `container_pids` | integer | `512` | Process count per session container. At least 1. |
@@ -243,6 +242,18 @@ over, and `secrets/vapid.toml` is generated once. The deploy never edits either.
 The order that works on a fresh machine: run `deploy --dry-run`, run the deploy, edit the config (deploy's own
 defaults are `localhost` origins and an empty allow-list), then run the deploy again. Everything else about the
 install path is in `AGENTS.md`.
+
+## Keys that are gone
+
+A key this file used to document and no longer does is refused, not ignored: the walk reports it by name —
+`config.toml:1:1: agent_toolchains: unknown key`, then `1 problem in config.toml` — and every command that loads a
+config treats a problem as fatal, `serve` included. The rows are here so that searching for a name an older machine
+still carries finds the answer.
+
+| Gone | What to write instead |
+|---|---|
+| `agent_toolchains` | Nothing. A recipe's package set is fixed; a package a project needs goes in an image you build and tag yourself (`docker build -t <name> …`) and then name in `base_image` — a project conventionally keeps that recipe in its own `docker/Dockerfile`, and a recipe Holosmith reads itself is planned rather than shipped. The agent recipe's own two are `python3` — which the gate's `command -v python3` guards measure with, so an image without it would turn those cases into `SKIP`s — and `ripgrep` beside it. |
+| `agent_image` | The same value under the name `base_image`: one session image name, defaulting to `holosmith-base:<version>`, which is the image `server deploy` builds and a session's container runs (ADR-0117). |
 
 ## Where the reasons are
 

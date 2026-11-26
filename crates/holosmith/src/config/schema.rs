@@ -137,16 +137,10 @@ pub const KNOWN_KEYS: &[KeySpec] = &[
         set: set_projects_root,
     },
     KeySpec {
-        path: "agent_image",
+        path: "base_image",
         section: None,
         kind: Kind::String,
-        set: set_agent_image,
-    },
-    KeySpec {
-        path: "agent_toolchains",
-        section: None,
-        kind: Kind::StringArray,
-        set: set_agent_toolchains,
+        set: set_base_image,
     },
     KeySpec {
         path: "container_cpus",
@@ -602,26 +596,15 @@ fn set_projects_root(config: &mut Config, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The image a session's container runs. A name Docker resolves, so an empty string is not a
-/// typo this can catch — it is one Docker refuses with its own sentence, which is the honest place for it.
-fn set_agent_image(config: &mut Config, value: &Value) -> Result<(), String> {
+/// The image Holosmith owns and a project extends, which a session's container runs. A name Docker resolves, so an
+/// empty string is not a typo this can catch — it is one Docker refuses with its own sentence, which is the honest
+/// place for it.
+fn set_base_image(config: &mut Config, value: &Value) -> Result<(), String> {
     let image = string(value)?;
     if image.trim().is_empty() {
         return Err("must name an image, not an empty string".to_string());
     }
-    config.agent_image = image.to_string();
-    Ok(())
-}
-
-/// The packages the agent image installs. An empty list is a legitimate machine — an image with git,
-/// openssl and CA certificates and no toolchain — so only a blank *name* is refused: `apt-get install ""` is a
-/// build that fails on a line naming nothing, and a build is the wrong place to discover a typo.
-fn set_agent_toolchains(config: &mut Config, value: &Value) -> Result<(), String> {
-    let toolchains = strings(value)?;
-    if let Some(blank) = toolchains.iter().find(|name| name.trim().is_empty()) {
-        return Err(format!("must name a package, not {blank:?}"));
-    }
-    config.agent_toolchains = toolchains;
+    config.base_image = image.to_string();
     Ok(())
 }
 
@@ -942,7 +925,7 @@ mod tests {
 
     #[test]
     fn the_table_holds_the_documented_keys() {
-        assert_eq!(KNOWN_KEYS.len(), 40);
+        assert_eq!(KNOWN_KEYS.len(), 39);
     }
 
     #[test]

@@ -950,7 +950,7 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
     assert_eq!(image.outcome, Outcome::Fail);
     assert!(
         says(image).contains("0.0.0-not-the-pinned-one")
-            && says(image).contains("rebuild the agent image"),
+            && says(image).contains("rebuild the session image"),
         "the sentence is not the one a session fails with: {}",
         says(image)
     );
@@ -1046,28 +1046,23 @@ fn a_stored_tool_key_is_one_unknown_line_per_row_and_quick_asks_nothing() {
 ///
 /// Built from a real `Expectation`, so the digest is the bytes of the test run's own artifact — the label a
 /// rebuild at the same `git describe` would change (ADR-0057).
-fn labels(config: &Config) -> BTreeMap<String, String> {
+fn labels() -> BTreeMap<String, String> {
     // The product's own memoised digest of this process: the test binary is tens of megabytes and an unoptimised
     // SHA-256 is slow.
     let digest = images::own_digest().expect("the test binary is readable");
-    let expectation = images::Expectation::of_digest(images::Kind::Agent, config, &digest);
-    let mut labels = BTreeMap::from([
+    let expectation = images::Expectation::of_digest(images::Kind::Base, &digest);
+    BTreeMap::from([
         (images::LABEL_VERSION.to_string(), expectation.version),
         (images::LABEL_GIT_TAG.to_string(), expectation.git_tag),
         (images::LABEL_PI.to_string(), expectation.pi_version),
         (images::LABEL_BINARY.to_string(), expectation.binary),
-    ]);
-    labels.insert(
-        images::LABEL_TOOLCHAINS.to_string(),
-        expectation.toolchains.unwrap_or_default().join(" "),
-    );
-    labels
+    ])
 }
 
 #[test]
-fn full_compares_the_agent_images_labels_with_this_binarys() {
-    // The pi version is half the question: an image can run the pinned pi and still carry another toolchain list,
-    // which is the half `server deploy`'s step 3 compares (ADR-0057).
+fn full_compares_the_configured_images_labels_with_this_binarys() {
+    // The pi version is half the question: an image can run the pinned pi and still name another git tag, which is
+    // the half `server deploy`'s step 3 compares (ADR-0057).
     let _serial = one_at_a_time();
     let dir = TempDir::new("doctor-image-labels");
     let socket = dir.file("docker.sock");
@@ -1079,17 +1074,16 @@ fn full_compares_the_agent_images_labels_with_this_binarys() {
 
     // The image this binary builds: the pi agrees and the four labels say so, each by its own value.
     let built = FakeMachine {
-        image_labels: Ok(Some(labels(&config))),
+        image_labels: Ok(Some(labels())),
         ..FakeMachine::healthy()
     };
     let report = doctor::run(&config, Depth::Full, &tools, &built);
     let image = finding(&report, Check::Image);
     assert_eq!(image.outcome, Outcome::Pass, "{}", says(image));
     for fact in [
-        config.agent_image.clone(),
+        config.base_image.clone(),
         holosmith::VERSION.to_string(),
         holosmith::pins::pi_version().to_string(),
-        "python3 ripgrep".to_string(),
     ] {
         assert!(
             says(image).contains(&fact),
@@ -1098,10 +1092,13 @@ fn full_compares_the_agent_images_labels_with_this_binarys() {
         );
     }
 
-    // The same image with another toolchain list: the pi check passes and the labels are what fails, naming both
-    // the value the image carries and the one this binary would build.
-    let mut mismatched = labels(&config);
-    mismatched.insert(images::LABEL_TOOLCHAINS.to_string(), "python3".to_string());
+    // The same image with another git tag: the pi check passes and the labels are what fails, naming both the value
+    // the image carries and the one this binary would build.
+    let mut mismatched = labels();
+    mismatched.insert(
+        images::LABEL_GIT_TAG.to_string(),
+        "v0.0.0-not-this-release".to_string(),
+    );
     let stale = FakeMachine {
         image_labels: Ok(Some(mismatched)),
         ..FakeMachine::healthy()
@@ -1110,8 +1107,8 @@ fn full_compares_the_agent_images_labels_with_this_binarys() {
     let image = finding(&report, Check::Image);
     assert_eq!(image.outcome, Outcome::Fail, "{}", says(image));
     for fact in [
-        "toolchains".to_string(),
-        "python3 ripgrep".to_string(),
+        "git-tag".to_string(),
+        "v0.0.0-not-this-release".to_string(),
         "server deploy".to_string(),
     ] {
         assert!(

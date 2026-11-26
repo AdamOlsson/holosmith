@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-use holosmith::config::Config;
 use holosmith::docker::Docker;
 use holosmith::images::{self, Expectation, Kind, Log, Status};
 use holosmith::version::VersionInfo;
@@ -273,9 +272,8 @@ fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_abse
     );
 
     // **The absence is the contract**, so it is asserted rather than assumed: nothing this recipe *does* installs a
-    // compiler, a Rust toolchain, a cross linker, a crate set or an npm cache, and no label claims a toolchain list.
-    // The instructions are read rather than the whole file, because the header names each of them in the sentence
-    // that says why it is not here.
+    // compiler, a Rust toolchain, a cross linker, a crate set or an npm cache. The instructions are read rather than
+    // the whole file, because the header names each of them in the sentence that says why it is not here.
     let blocks = instructions(images::BASE_DOCKERFILE);
     let recipe = blocks.join(" ");
     for absent in [
@@ -286,8 +284,6 @@ fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_abse
         "cargo-vendor",
         "npm-cache",
         ".cargo/config.toml",
-        "LABEL org.holosmith.toolchains",
-        "HOLOSMITH_TOOLCHAINS",
     ] {
         assert!(
             !recipe.contains(absent),
@@ -594,8 +590,8 @@ fn a_label_only_build_argument_is_declared_below_every_run() {
     // machine, and its three label-only arguments are the agent image's three.
     //
     // The label-only set is *derived* from the recipe rather than listed here, so an argument a later edit adds to a
-    // `LABEL` is checked without this test being edited. `HOLOSMITH_PI_VERSION` and `HOLOSMITH_TOOLCHAINS` are not in
-    // it: the pi install and the apt line spend them, so their values do change what the image holds.
+    // `LABEL` is checked without this test being edited. `HOLOSMITH_PI_VERSION` is not in it: the pi install spends
+    // it, so its value does change what the image holds.
     for (name, kind, recipe) in [
         ("agent.Dockerfile", Kind::Agent, images::AGENT_DOCKERFILE),
         ("proxy.Dockerfile", Kind::Proxy, images::PROXY_DOCKERFILE),
@@ -613,8 +609,8 @@ fn a_label_only_build_argument_is_declared_below_every_run() {
                 panic!("{name} writes no label, so a deploy has nothing to compare")
             });
 
-        // The labels a deploy's skip rule and `doctor` read are still all written — five for the agent image, four
-        // for the proxy and the base — which is the half of the recipe a moved `ARG` could silently drop.
+        // The labels a deploy's skip rule and `doctor` read are still all written — four on every image — which is
+        // the half of the recipe a moved `ARG` could silently drop.
         for tag in kind.tags() {
             assert!(
                 labels.contains(&format!("{tag}=")),
@@ -720,7 +716,7 @@ fn both_recipes_read_an_unverifiable_certificate_as_a_warning_over_the_pin() {
 
 #[test]
 fn the_image_names_carry_this_binarys_version() {
-    // One spelling of each name: this function is what `agent_image`'s default and every proxy's `image` field
+    // One spelling of each name: this function is what `base_image`'s default and every proxy's `image` field
     // read, and a test that restated the format string would pass over a name nobody installs.
     assert_eq!(
         images::proxy_image(),
@@ -741,28 +737,29 @@ fn the_image_names_carry_this_binarys_version() {
             images::LABEL_GIT_TAG,
             images::LABEL_PI,
             images::LABEL_BINARY,
-            images::LABEL_TOOLCHAINS,
         ],
         [
             "org.holosmith.version",
             "org.holosmith.git-tag",
             "org.holosmith.pi-version",
             "org.holosmith.binary-sha256",
-            "org.holosmith.toolchains",
         ],
         "a label key is a contract with every image already built"
     );
-    assert_eq!(
-        Kind::Proxy.tags().len(),
-        4,
-        "the proxy image carries no toolchain label"
-    );
-    assert_eq!(
-        Kind::Base.tags().len(),
-        4,
-        "the base image installs no toolchain, so it carries no toolchain label"
-    );
-    assert_eq!(Kind::Agent.tags().len(), 5);
+    // No image carries a toolchain label any more, because the recipes install a fixed package set: there is no
+    // list a machine could change, so there is nothing for a label to carry and nothing for a skip rule to compare.
+    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+        assert_eq!(
+            kind.tags(),
+            [
+                images::LABEL_VERSION,
+                images::LABEL_GIT_TAG,
+                images::LABEL_PI,
+                images::LABEL_BINARY,
+            ],
+            "the {kind:?} image's label set is not the four every image has"
+        );
+    }
     assert_eq!(Kind::Proxy.image(), images::proxy_image());
     assert_eq!(Kind::Base.image(), images::base_image());
     assert_eq!(Kind::Agent.image(), images::agent_image());
@@ -791,11 +788,9 @@ fn labels_of(expectation: &Expectation) -> BTreeMap<String, String> {
             "HOLOSMITH_GIT_TAG" => images::LABEL_GIT_TAG,
             "HOLOSMITH_PI_VERSION" => images::LABEL_PI,
             "HOLOSMITH_BINARY_SHA256" => images::LABEL_BINARY,
-            "HOLOSMITH_TOOLCHAINS" => images::LABEL_TOOLCHAINS,
             _ => continue,
         };
-        // The label carries what the argument carried: a `LABEL` line cannot rewrite the string it was given, so
-        // the toolchain list is space-separated in the image exactly as it is in `${HOLOSMITH_TOOLCHAINS}`.
+        // The label carries what the argument carried: a `LABEL` line cannot rewrite the string it was given.
         labels.insert(label.to_string(), value.to_string());
     }
     labels
@@ -804,20 +799,19 @@ fn labels_of(expectation: &Expectation) -> BTreeMap<String, String> {
 /// An `Expectation` built from this test binary's own bytes, which is what `Expectation::of` demands.
 ///
 /// The digest is a read of a real file, so no test can construct an image's expected labels without one — that is
-/// the point of the fifth label (ADR-0057).
-fn expectation(kind: Kind, config: &Config) -> Expectation {
+/// the point of the digest label (ADR-0057).
+fn expectation(kind: Kind) -> Expectation {
     // The product's own memoised digest of this process: the test binary is tens of megabytes and an unoptimised
     // SHA-256 is slow, and the bytes cannot change under a single process.
     let digest = images::own_digest().expect("the test binary is readable");
-    Expectation::of_digest(kind, config, &digest)
+    Expectation::of_digest(kind, &digest)
 }
 
 #[test]
 fn a_mismatch_names_the_key_and_both_values() {
-    let config = Config::default();
-    let agent = expectation(Kind::Agent, &config);
-    // The build arguments are the facts the Dockerfile labels with, and the toolchain list is one word there
-    // because `apt-get install` reads it as several packages.
+    let agent = expectation(Kind::Agent);
+    // The build arguments are the facts the Dockerfile labels with, and them alone: every one of them is written by
+    // a `LABEL` line and read back by the skip rule.
     assert_eq!(
         agent.build_args(),
         [
@@ -834,10 +828,6 @@ fn a_mismatch_names_the_key_and_both_values() {
                 holosmith::pins::pi_version().to_string()
             ),
             ("HOLOSMITH_BINARY_SHA256".to_string(), agent.binary.clone()),
-            (
-                "HOLOSMITH_TOOLCHAINS".to_string(),
-                config.agent_toolchains.join(" ")
-            ),
         ]
     );
     let arguments = images::build_arguments("holosmith-proxy:9.9.9", &agent);
@@ -856,8 +846,8 @@ fn a_mismatch_names_the_key_and_both_values() {
     let labels = labels_of(&agent);
     assert_eq!(agent.mismatches(&labels), Vec::<String>::new());
     assert_eq!(
-        labels.get(images::LABEL_TOOLCHAINS).map(String::as_str),
-        Some("python3 ripgrep")
+        labels.get(images::LABEL_PI).map(String::as_str),
+        Some(holosmith::pins::pi_version())
     );
 
     // Arm two: a key that is absent, named by its last word and carrying the value that is missing.
@@ -896,23 +886,18 @@ fn a_mismatch_names_the_key_and_both_values() {
         );
     }
 
-    // Arm four: another toolchain list. The proxy image has no such label at all, so the same image passes its
-    // expectation — which is the difference between the agent image and the other two in one assertion.
-    let mut toolchains = labels.clone();
-    toolchains.insert(images::LABEL_TOOLCHAINS.to_string(), "python3".to_string());
-    let sentences = agent.mismatches(&toolchains);
-    assert_eq!(sentences.len(), 1, "{sentences:?}");
-    assert!(
-        sentences[0].contains("toolchains")
-            && sentences[0].contains("python3")
-            && sentences[0].contains("python3 ripgrep"),
-        "{}",
-        sentences[0]
+    // Arm four: a label this binary does not write is none of the read's business, on any image. A project builds an
+    // image of its own from a `docker/Dockerfile` and may label it as it likes, and an image built by a release that
+    // still wrote a toolchain list is not stale *for that label* — the four it does carry decide it.
+    let mut extra = labels.clone();
+    extra.insert(
+        "org.holosmith.toolchains".to_string(),
+        "python3".to_string(),
     );
-    // The base image is the same arm for the same reason: no toolchain list, so no key to compare.
-    for kind in [Kind::Proxy, Kind::Base] {
-        let other = expectation(kind, &config);
-        assert_eq!(other.mismatches(&toolchains), Vec::<String>::new());
+    extra.insert("org.example.project".to_string(), "mine".to_string());
+    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+        let other = expectation(kind);
+        assert_eq!(other.mismatches(&extra), Vec::<String>::new(), "{kind:?}");
     }
 }
 
@@ -1335,8 +1320,7 @@ impl images::Images for Labelled {
 
 #[test]
 fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
-    let config = Config::default();
-    let expectation = expectation(Kind::Agent, &config);
+    let expectation = expectation(Kind::Agent);
     let image = images::agent_image();
     let read = |answer| {
         let fake = Labelled::answering(answer);
@@ -1565,7 +1549,6 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
             .expect("the artifact reports its pi version")
             .clone(),
         binary: images::digest(&binary).expect("the artifact is readable"),
-        toolchains: None,
     };
     assert_eq!(
         expectation.pi_version,
@@ -1598,8 +1581,8 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
         "the image's labels are not the arguments it was built with: {labels:?}"
     );
     assert!(
-        !labels.contains_key(images::LABEL_TOOLCHAINS),
-        "the proxy image carries the agent image's toolchain label: {labels:?}"
+        !labels.contains_key("org.holosmith.toolchains"),
+        "the proxy image carries a toolchain label, which no recipe writes: {labels:?}"
     );
 
     // And it runs: every proxy is this one binary behind one entrypoint.
@@ -1721,14 +1704,10 @@ fn promoted() -> VersionInfo {
 }
 
 /// The images' label maps for `release`, keyed by tag, the way `docker image inspect` would answer them.
-fn labelled(
-    config: &Config,
-    release: &VersionInfo,
-    digest: &str,
-) -> BTreeMap<String, BTreeMap<String, String>> {
+fn labelled(release: &VersionInfo, digest: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut images_by_tag = BTreeMap::new();
     for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
-        let expectation = Expectation::of_release(kind, config, release, digest);
+        let expectation = Expectation::of_release(kind, release, digest);
         images_by_tag.insert(expectation.tag(), labels_of(&expectation));
     }
     images_by_tag
@@ -1736,14 +1715,13 @@ fn labelled(
 
 #[test]
 fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
-    let config = Config::default();
     let digest = images::own_digest().expect("the test binary is readable");
     let release = promoted();
 
     // Arm one: every image already carries this release's labels. Nothing to build, and the read asked about the
     // **candidate's** tags — `holosmith-proxy:9.9.9`, not the running binary's 0.1.0 — in the order they are built.
-    let fake = Tagged::answering(labelled(&config, &release, &digest));
-    let pending = images::outstanding(&fake, &config, &release, &digest);
+    let fake = Tagged::answering(labelled(&release, &digest));
+    let pending = images::outstanding(&fake, &release, &digest);
     assert!(pending.is_empty(), "{pending:?}");
     assert_eq!(
         fake.asked(),
@@ -1759,8 +1737,8 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     // describe (ADR-0057), and a promotion has to rebuild for the bytes it is making live. The base image's label
     // counts here even though its recipe copies no binary: the label is the build's fact, and a rule that skipped it
     // there would leave a promotion serving an image built from the previous artifact.
-    let fake = Tagged::answering(labelled(&config, &release, "0".repeat(64).as_str()));
-    let pending = images::outstanding(&fake, &config, &release, &digest);
+    let fake = Tagged::answering(labelled(&release, "0".repeat(64).as_str()));
+    let pending = images::outstanding(&fake, &release, &digest);
     assert_eq!(pending.len(), 3, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
@@ -1774,8 +1752,8 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     // are stale — the acceptance's "or a pinned version changed", measured in its own direction.
     let mut newer_pin = release.clone();
     newer_pin.pi_version = "0.0.0-not-the-pin".to_string();
-    let fake = Tagged::answering(labelled(&config, &release, &digest));
-    let pending = images::outstanding(&fake, &config, &newer_pin, &digest);
+    let fake = Tagged::answering(labelled(&release, &digest));
+    let pending = images::outstanding(&fake, &newer_pin, &digest);
     assert_eq!(pending.len(), 3, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
@@ -1789,7 +1767,7 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     let mut newer = release.clone();
     newer.version = "10.0.0".to_string();
     let fake = Tagged::answering(BTreeMap::new());
-    let pending = images::outstanding(&fake, &config, &newer, &digest);
+    let pending = images::outstanding(&fake, &newer, &digest);
     assert_eq!(pending.len(), 3, "{pending:?}");
     for (_, reason) in &pending {
         assert!(reason.contains("is not on this machine"), "{reason}");

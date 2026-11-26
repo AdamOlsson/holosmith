@@ -777,14 +777,14 @@ pub fn version_check(image: &str, found: &str) -> Result<String, String> {
     }
 }
 
-/// The sentence a mismatched agent image fails its session with.
+/// The sentence a session fails with when its image runs another pi.
 ///
 /// Three facts and the fix: which image, which pi it runs, which pi this binary is built for. The row's
 /// `status_reason` is where an operator reads it, so it names the image by the name the config gave it.
 pub fn version_sentence(image: &str, found: &str, pinned: &str) -> String {
     format!(
-        "the agent image {image} runs pi {found}, but this binary is built for pi {pinned}: rebuild the \
-         agent image from this release (agent_image names it)"
+        "the session image {image} runs pi {found}, but this binary is built for pi {pinned}: rebuild the \
+         session image from this release (base_image names it)"
     )
 }
 

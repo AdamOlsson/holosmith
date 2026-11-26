@@ -7,7 +7,7 @@
 #
 # The base is the agent image's own, by the same manifest-list digest, and **nothing is installed on it**: the fake
 # replays records and needs no git, no CA bundle and no openssl. Node stays because the base has it and because the
-# boot's network self-test runs its probe as `node -e` inside `agent_image` — which, in a smoke run, is this image.
+# boot's network self-test runs its probe as `node -e` inside `base_image` — which, in a smoke run, is this image.
 # The two recipes naming one digest is what keeps them from drifting, and a test holds them together.
 #
 # The build context is `images::archive`'s: exactly `Dockerfile` and `holosmith`, so the wrapper is written by a RUN

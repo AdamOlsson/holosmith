@@ -15,6 +15,10 @@ So the three commands a worker runs — `cargo fmt --check`, `cargo clippy`, `ca
 session, and the cause is not the egress allow-list: no host would have fixed a missing compiler. The decision is
 that the agent image carries the toolchain the tree is written in, as part of the **fixed** set.
 
+**Superseded in part by ADR-0117:** the fixed set is still fixed, and there is no configurable half beside it any
+more. `agent_toolchains` is gone, and the two packages it named by default — `python3` and `ripgrep` — are literals
+in the same `apt-get` line as the toolchain.
+
 ## D1 — unconditional, not a variant image
 
 The toolchain goes into `crates/holosmith/images/agent.Dockerfile`, the recipe `server deploy`'s step 3 builds and

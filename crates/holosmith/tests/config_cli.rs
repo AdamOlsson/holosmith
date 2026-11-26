@@ -23,7 +23,7 @@ fn default_config_path() -> String {
 /// Every other byte is the independent copy of the key set; `data_root` and `projects_root` are the two values that
 /// depend on the home, so the test supplies them from the same place the binary derives them. The golden spells them
 /// as `<root>/data` and `<root>/projects`. `<version>` is the same substitution `config::render`'s own golden test
-/// makes: the default `agent_image` tag carries this binary's version, and a fixture holding the number would be a
+/// makes: the default `base_image` tag carries this binary's version, and a fixture holding the number would be a
 /// second file every bump had to edit.
 fn golden() -> String {
     let root = holosmith::config::default_root();

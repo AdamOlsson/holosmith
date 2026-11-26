@@ -130,7 +130,7 @@ mod tests {
     }
 
     /// The golden file with the two values this build and the account decide filled in: `<root>` is the state
-    /// directory the defaults derive from, and `<version>` is this binary's version, which the default `agent_image`
+    /// directory the defaults derive from, and `<version>` is this binary's version, which the default `base_image`
     /// tag carries. Every other byte is the independent copy of the key set.
     ///
     /// The version is substituted rather than written out for the reason `VERSION` exists: a bump is one line in one

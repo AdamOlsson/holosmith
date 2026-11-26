@@ -443,20 +443,15 @@ pub struct Config {
     pub machine_name: String,
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
-    /// The image a session's container runs. Item 10 §3 builds it, so the default names the
-    /// image a deployed machine already has: `agent-image:<this binary's version>` — from
-    /// [`crate::images::agent_image`], which is the one place that name is spelled. compares the
-    /// image's pi version with the pinned one, and builds it for the machine it deploys to.
-    pub agent_image: String,
-    /// The Debian packages the agent image installs beyond git, openssl and CA certificates.
+    /// The image Holosmith owns and a project extends: the one a session's container runs, and the one
+    /// `server deploy`'s step 3 builds.
     ///
-    /// The spec's "the toolchains named in the config": `AGENTS.md`'s prerequisites says a machine's image
-    /// carries the toolchains its projects use, so they are a key rather than a constant — and the image's
-    /// `org.holosmith.toolchains` label carries the list it was built with, which is what makes a changed list
-    /// a rebuild rather than a re-tag. An empty list is a legitimate answer (a machine whose projects only need
-    /// git), so it is not refused; a blank name is, because `apt-get install ""` is a build failure whose line
-    /// names nothing.
-    pub agent_toolchains: Vec<String>,
+    /// The default names the image a deployed machine already has: `holosmith-base:<this binary's version>` —
+    /// from [`crate::images::base_image`], which is the one place that name is spelled. A machine may point it at
+    /// an image built by hand (`pi-agent:local`), which is how a development machine and the gate run a session in
+    /// an image no deploy built; step 3's line then says the image it built is not the one a session will use. The
+    /// agent image beside it — `images::agent_image` — is this repository's own choice, not a key.
+    pub base_image: String,
     /// What one session's container may use (spec item 6's resource limits): whole CPUs,
     /// mebibytes of memory, and a process count. Three integers because a config value has no decimal
     /// and Docker's `--cpus` accepts the integer form; the defaults are `docs/config.md`'s three `container_*` keys.
@@ -541,8 +536,7 @@ impl Default for Config {
             machine_name: crate::hosts::LOCAL.to_string(),
             data_root: root.join(DATA_DIR),
             projects_root: root.join(PROJECTS_DIR),
-            agent_image: crate::images::agent_image(),
-            agent_toolchains: vec!["python3".to_string(), "ripgrep".to_string()],
+            base_image: crate::images::base_image(),
             container_cpus: 2,
             container_memory_mb: 4096,
             container_pids: 512,
@@ -1312,8 +1306,7 @@ owner = "me@example.com"
 machine_name = "workshop"
 data_root = "/var/lib/holosmith/data"
 projects_root = "/var/lib/holosmith/projects"
-agent_image = "pi-agent:local"
-agent_toolchains = ["node", "ripgrep"]
+base_image = "pi-agent:local"
 container_cpus = 3
 container_memory_mb = 2048
 container_pids = 256
@@ -1480,8 +1473,7 @@ source = "/tmp"
             config.projects_root,
             Path::new("/var/lib/holosmith/projects")
         );
-        assert_eq!(config.agent_image, "pi-agent:local");
-        assert_eq!(config.agent_toolchains, ["node", "ripgrep"]);
+        assert_eq!(config.base_image, "pi-agent:local");
         assert_eq!(config.container_cpus, 3);
         assert_eq!(config.container_memory_mb, 2048);
         assert_eq!(config.container_pids, 256);
@@ -1730,32 +1722,26 @@ source = "/tmp"
     }
 
     #[test]
-    fn an_empty_agent_image_is_refused() {
+    fn an_empty_base_image_is_refused() {
         // An empty string is not a typo this can catch — it is one Docker refuses — but "no image at all"
         // is a value the validator can name, and naming it beats a container step whose sentence quotes
         // Docker's opinion about a name nobody meant to write.
         assert_eq!(
-            problems_of("agent_image = \"  \"\n"),
-            "config.toml:1:1: agent_image: must name an image, not an empty string\n\
+            problems_of("base_image = \"  \"\n"),
+            "config.toml:1:1: base_image: must name an image, not an empty string\n\
              1 problem in config.toml\n"
         );
     }
 
     #[test]
-    fn an_empty_toolchain_name_is_refused_and_an_empty_list_is_not() {
-        // The list is what `apt-get install` is given, so a blank entry becomes an argument that names no
-        // package: a build fails with a line about a package nobody wrote. An empty *list* is a supported
-        // machine (an image with git, openssl and CA certificates and nothing else), which is why it passes.
+    fn a_removed_key_is_refused_by_the_unknown_key_sentence() {
+        // The package list is not a key any more: a package goes in an image an operator builds from a project's
+        // `docker/Dockerfile` and names in `base_image`, and `docs/config.md`'s removed row says so. The refusal is
+        // the walker's existing one — `serve` treats every problem it finds as fatal, so an old file is a sentence
+        // naming the key and not a silent fallback.
         assert_eq!(
-            problems_of("agent_toolchains = [\"python3\", \"  \"]\n"),
-            "config.toml:1:1: agent_toolchains: must name a package, not \"  \"\n\
-             1 problem in config.toml\n"
-        );
-        assert_eq!(
-            parse("agent_toolchains = []\n")
-                .expect("an empty toolchain list is a supported image")
-                .agent_toolchains,
-            Vec::<String>::new()
+            problems_of("agent_toolchains = [\"node\"]\n"),
+            "config.toml:1:1: agent_toolchains: unknown key\n1 problem in config.toml\n"
         );
     }
 
