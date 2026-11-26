@@ -444,6 +444,10 @@ pub fn daemon_problem(docker: &Docker) -> Option<String> {
 /// rather than a wrong Dockerfile. The sentence itself is [`images::failure`]'s, so a pinned fetch that did not answer
 /// is named as one instead of as a broken recipe (ADR-0111); `holosmith build` still answers exit 1 for it, because
 /// the gate reads `server deploy`'s code and not this command's.
+///
+/// A build that **succeeded** over a certificate it could not verify is the one thing this recipe prints that would
+/// otherwise be swallowed: nothing builds this image but this function, and it has no sink, so
+/// `images::CERTIFICATE_CLAUSE` goes into the sentence `built_sentence` composes (ADR-0116 D3).
 pub fn ensure_image(docker: &Docker) -> Result<String, String> {
     let image = image();
     let wanted = recipe();
@@ -466,8 +470,24 @@ pub fn ensure_image(docker: &Docker) -> Result<String, String> {
             IMAGE_TIMEOUT.as_secs()
         )),
         Some(log) if !log.success => Err(images::failure(&image, &log.text)),
-        Some(_) => Ok(format!("{image} was built from this recipe")),
+        Some(log) => Ok(built_sentence(&image, &log.text)),
     }
+}
+
+/// The sentence [`ensure_image`] answers for a build that succeeded, with the certificate's clause when the log carried
+/// a warning.
+///
+/// This recipe fetches both musl.cc toolchains, and a host whose certificate does not verify is a fetch it retries
+/// with `--insecure` — safe, because the pin decides what lands in `/opt`, and still a fact an operator has to hear
+/// (ADR-0116). `holosmith build` passes no sink, so this sentence is the whole of what it says about it, and it says
+/// it **once** however many of the recipe's two fetches fell back: one build is one fact. A log that warned nothing
+/// answers the sentence unchanged, byte for byte, which is what every assertion about this line is about.
+fn built_sentence(image: &str, log: &str) -> String {
+    let sentence = format!("{image} was built from this recipe");
+    if images::certificate_warnings(log).is_empty() {
+        return sentence;
+    }
+    format!("{sentence}{}", images::CERTIFICATE_CLAUSE)
 }
 
 /// Run the container for one target, answering the artifact's bytes' tail of output — or the reason there is none.
@@ -647,6 +667,44 @@ mod tests {
                 X86_64.to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_builder_image_that_fell_back_says_so_once_and_a_silent_one_says_nothing_new() {
+        // The two fetches in one recipe print the same line when the same certificate is what failed, so a log can
+        // carry it twice; the sentence carries the fact once, in the one clause step 3's sentence also uses
+        // (ADR-0116 D3). Nothing builds this recipe's image but `ensure_image`, and it has no sink to print to.
+        let image = "holosmith-builder:0.1.0";
+        let warning = format!(
+            "{} (curl exit 60): retrying that URL without certificate verification, and the pinned digest decides",
+            images::CERTIFICATE_WARNING
+        );
+        let warned = built_sentence(
+            image,
+            &format!("#8 0.512 {warning}\n#9 0.512 {warning}\n#8 DONE 9.1s"),
+        );
+        assert_eq!(
+            warned,
+            format!(
+                "{image} was built from this recipe; {}",
+                images::CERTIFICATE_CLAUSE.trim_start_matches("; ")
+            ),
+            "the sentence does not carry the certificate's clause exactly once: {warned}"
+        );
+        assert_eq!(
+            warned.matches(images::CERTIFICATE_CLAUSE).count(),
+            1,
+            "the clause is not one clause: {warned}"
+        );
+        // And a build that warned nothing answers the sentence it always did, whether its log is a quiet build's or
+        // empty: every assertion about this line is about that shape.
+        for log in ["#8 DONE 9.1s", ""] {
+            assert_eq!(
+                built_sentence(image, log),
+                format!("{image} was built from this recipe"),
+                "the clause appears over a build that warned nothing: {log:?}"
+            );
+        }
     }
 
     #[test]

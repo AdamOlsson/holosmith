@@ -825,8 +825,10 @@ fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
         [
             "smoke".to_string(),
             format!("labels:holosmith-proxy:{}", info.version),
+            format!("labels:holosmith-base:{}", info.version),
             format!("labels:agent-image:{}", info.version),
             format!("build:holosmith-proxy:{}", info.version),
+            format!("build:holosmith-base:{}", info.version),
             format!("build:agent-image:{}", info.version),
             "drain".to_string(),
             "restart".to_string(),

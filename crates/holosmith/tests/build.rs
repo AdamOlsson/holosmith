@@ -225,6 +225,120 @@ fn a_directory_that_is_not_a_source_tree_is_refused_before_anything_runs() {
 }
 
 #[test]
+fn a_builder_image_that_fell_back_is_named_in_the_line_the_command_prints() {
+    // The builder recipe is built by `builder::ensure_image` and by nothing else, and it has no sink: the sentence it
+    // returns is the whole of what an operator running `holosmith build` hears about a fallback (ADR-0116 D3). Driven
+    // through the command, in both shapes, because the line is the command's — a log that warned and one that did not,
+    // the second of which must be the line this command has always printed.
+    let image = builder::image();
+    let warning = format!(
+        "{} (curl exit 60): retrying that URL without certificate verification, and the pinned digest decides",
+        images::CERTIFICATE_WARNING
+    );
+    let warned = builder_line(
+        "build-warn",
+        &format!("#8 0.512 {warning}\n#9 0.512 {warning}\n#8 DONE 9.1s"),
+    );
+    // The clause repeats the marker's own words without its `warning: ` prefix, so a clause appended twice would name
+    // the certificate twice: one is the whole of what a build may say about it, however many of the recipe's two
+    // fetches fell back.
+    let named = images::CERTIFICATE_WARNING.trim_start_matches("warning: ");
+    assert_eq!(
+        warned.matches(named).count(),
+        1,
+        "the line does not name the certificate exactly once: {warned}"
+    );
+    assert!(
+        warned.starts_with(&format!("{image} was built from this recipe; ")),
+        "the fallback is not the sentence's own clause: {warned}"
+    );
+    assert!(
+        warned.ends_with("fetched without verification and its digest matched"),
+        "the clause does not say what the pin did: {warned}"
+    );
+    assert_eq!(
+        builder_line("build-quiet", "#8 DONE 9.1s"),
+        format!("{image} was built from this recipe"),
+        "a build that warned nothing changed the line this command prints"
+    );
+}
+
+/// The `build: builder: ` line one `holosmith build` run prints, over a stand-in daemon whose builder-image build
+/// answers `log`.
+///
+/// The stand-in's `run` step fails, and that is deliberate: a stand-in cannot produce the static artifact this side
+/// checks, and the builder step's line is printed before the container ever runs. The failure is asserted so the line
+/// found here cannot be one from a command that stopped earlier than the one meant.
+fn builder_line(label: &str, log: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new(label);
+    let source = dir.file("source");
+    std::fs::create_dir_all(source.join("scripts")).expect("scripts/");
+    std::fs::write(source.join("Cargo.toml"), "[workspace]\n").expect("Cargo.toml");
+    std::fs::write(source.join("scripts/build.sh"), "#!/bin/sh\n").expect("build.sh");
+    let lines = dir.write("build.log", log);
+    let bin = dir.file("bin");
+    std::fs::create_dir_all(&bin).expect("bin/");
+    let docker = bin.join("docker");
+    // The three questions a build asks, in `case_build`'s order: who the daemon is (this machine's own word, as the
+    // gate's stand-in answers it), whether the image is there (it is not), and what a build prints. The log is a file
+    // rather than a heredoc so the warning's own apostrophe needs no quoting, and the archive on stdin is drained the
+    // way a real daemon reads it.
+    std::fs::write(
+        &docker,
+        "#!/bin/sh\n\
+         if [ \"${1:-}\" = \"-H\" ]; then shift 2; fi\n\
+         case \"${1:-} ${2:-}\" in\n\
+           \"version --format\")\n\
+             case \"$(uname -m)\" in\n\
+               aarch64 | arm64) printf 'arm64\\n' ;;\n\
+               *) printf 'amd64\\n' ;;\n\
+             esac ;;\n\
+           \"image inspect\") exit 1 ;;\n\
+           \"build -t\") cat >/dev/null; cat \"$HS_BUILD_LINES\" ;;\n\
+           *) exit 1 ;;\n\
+         esac\n",
+    )
+    .expect("the stand-in");
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
+    // 0644 like every fixture config the gate writes: a mode is what `doctor` reads, and one spelling of a fixture
+    // config is cheaper than remembering which readers care.
+    let config = dir.write("config.toml", "role = \"hub\"\n");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).expect("0644");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_holosmith"))
+        .args(["build", "--config"])
+        .arg(&config)
+        .arg("--out")
+        .arg(dir.file("out"))
+        .current_dir(&source)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HS_BUILD_LINES", &lines)
+        .output()
+        .expect("the command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success() && stderr.contains("the build of"),
+        "the stand-in's run step did not fail where this reads its line after: {stderr}"
+    );
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("build: builder: "))
+        .unwrap_or_else(|| panic!("the command printed no builder line: {stdout}{stderr}"))
+        .to_string()
+}
+
+#[test]
 fn the_default_target_is_one_of_the_two_release_triples() {
     let target = builder::default_target().expect("this test runs on a machine this build targets");
     assert!(

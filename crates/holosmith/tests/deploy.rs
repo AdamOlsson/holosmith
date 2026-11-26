@@ -309,6 +309,8 @@ struct Fake {
     builds: Mutex<Vec<(String, Vec<String>)>>,
     /// The output of a build that fails; `None` is a daemon that builds whatever it is handed.
     failing_build: Mutex<Option<String>>,
+    /// The output of a build that **succeeds**: what a recipe leaves behind when it built and had something to say.
+    warning_build: Mutex<Option<String>>,
     /// What the network self-test answers, which is a *finding* in step 7's `doctor --full` rather than a machine
     /// fact this deploy changes.
     selftest: Mutex<selftest::Outcome>,
@@ -328,6 +330,7 @@ impl Fake {
             arch: Mutex::new(Ok(daemon_word())),
             builds: Mutex::new(Vec::new()),
             failing_build: Mutex::new(None),
+            warning_build: Mutex::new(None),
             selftest: Mutex::new(selftest::Outcome::Passed),
         }
     }
@@ -363,6 +366,15 @@ impl Fake {
     fn with_failing_build(self, text: &str) -> Self {
         *self
             .failing_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_string());
+        self
+    }
+
+    /// The same machine, with a daemon whose builds succeed and print `text`.
+    fn with_warning_build(self, text: &str) -> Self {
+        *self
+            .warning_build
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_string());
         self
@@ -553,9 +565,17 @@ impl images::Images for Fake {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(tag.to_string(), labels_from_args(args));
+        // And it answers with the log a recipe's output made: empty for a recipe that had nothing to say, `text` for the
+        // one that fell back to an unverified fetch.
+        let text = self
+            .warning_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
         Ok(images::Log {
             success: true,
-            text: String::new(),
+            text,
         })
     }
 }
@@ -1902,6 +1922,95 @@ fn a_failed_build_is_step_threes_own_sentence_and_stops_the_run() {
         !report.render().contains("4. proxies:"),
         "a failed build did not stop the run:\n{}",
         report.render()
+    );
+}
+
+/// The clause step 3's sentence gains when a build's log carried a certificate warning: the same fact the recipe
+/// printed, in the sentence's own voice, because `server deploy` passes the silent sink and its report is the whole of
+/// what it prints (ADR-0116 D3).
+const CERTIFICATE_CLAUSE: &str = "; musl.cc's certificate did not verify, so the pinned tarball was fetched without \
+                                 verification and its digest matched";
+
+/// The line a recipe prints when curl's status says the certificate is what failed, as the shell writes it.
+///
+/// Built from the product's own marker, because the recipes, the reader and this test agreeing on the words is what
+/// that constant is for.
+fn certificate_warning() -> String {
+    format!(
+        "{} (curl exit 60): retrying that URL without certificate verification, and the pinned digest decides",
+        images::CERTIFICATE_WARNING
+    )
+}
+
+#[test]
+fn a_build_that_fell_back_to_an_unverified_fetch_says_so_in_step_threes_sentence() {
+    // `server deploy` passes the silent sink (ADR-0092), so a fact that lived only in a progress note would reach an
+    // install's terminal and nothing on the verb most machines run. Step 3's sentence is the whole of what a deploy
+    // prints about the step, so the fact travels there too — deduped on the message, because both toolchains' fetches in
+    // one recipe print the same line and every build here prints it again (ADR-0116 D3). A warning is not a failure: the
+    // step stays `changed`, the images are tagged, and the run goes on.
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("deploy-images-certificate");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(Some(format!("unix://{}", socket.display())));
+    config.control_listen = health_responder();
+    let root = rooted(&dir, "root");
+    let deployed = root.config(&config);
+    let warning = certificate_warning();
+    let machine = Fake::new().with_warning_build(&format!(
+        "#8 [7/17] RUN if curl …; fi\n#8 0.512 {warning}\n#9 0.512 {warning}\n#8 DONE 9.1s"
+    ));
+
+    let report = deploy::run(&deployed, &root, &real_tools(&dir), &machine, false);
+
+    assert!(
+        !report.failed(),
+        "a warning failed the run:\n{}",
+        report.render()
+    );
+    let step = line(&report, DeployStep::Images);
+    assert_eq!(step.word, Word::Changed, "{}", step.sentence);
+    let built = format!(
+        "built 3 images: {}, {}, {}",
+        images::proxy_image(),
+        images::base_image(),
+        images::agent_image()
+    );
+    assert_eq!(
+        step.sentence,
+        format!("{built}{CERTIFICATE_CLAUSE}"),
+        "the step's sentence is not what it built with the certificate's clause once on the end"
+    );
+    // The line the gate greps and the verbose report prints: `^3\. images: changed: ` and then that sentence.
+    let verbose = report.render_verbose();
+    assert!(
+        verbose
+            .lines()
+            .any(|rendered| rendered == format!("3. images: changed: {built}{CERTIFICATE_CLAUSE}")),
+        "the report's step 3 does not read as the sentence does:\n{verbose}"
+    );
+    // And the terse render, which is what a deploy actually prints: the sentence's first clause in the parenthetical,
+    // the clause on the indented remark line — the shape every `; …` remark takes (ADR-0085).
+    let terse = report.render();
+    assert!(
+        terse.contains(&format!(
+            "3. images ✓ ({built})\n    {}",
+            CERTIFICATE_CLAUSE.trim_start_matches("; ")
+        )),
+        "the terse report does not carry the clause:\n{terse}"
+    );
+    // The three images are the three the run built, in the order step 4 needs them: a warning about a fetch did not
+    // turn the step into one that built something else.
+    let tags: Vec<String> = machine.builds().into_iter().map(|(tag, _)| tag).collect();
+    assert_eq!(
+        tags,
+        [
+            images::proxy_image(),
+            images::base_image(),
+            images::agent_image()
+        ],
+        "the step did not tag all three images"
     );
 }
 
