@@ -611,15 +611,16 @@ export function stoppedDetail(
 
 // What a create's refusal says in the form's error area.
 //
-// Spec item 1's three refusals are the project's, not the request's: the operator has to be told what is
-// wrong with the repository, and a `git_not_directory:` prefix in front of that sentence is a machine
-// word the phone cannot act on. The story asks for exactly this — "the UI explains the refusal in one
-// sentence rather than showing a code" — so the three codes drop the prefix and every other answer keeps
-// the `code: message` shape the rest of the page uses.
+// The project's refusals are the project's, not the request's: the operator has to be told what is wrong with
+// the repository — or with the recipe its sessions' image is built from, whose sentence names the file to edit —
+// and a `git_not_directory:` prefix in front of that sentence is a machine word the phone cannot act on. The
+// story asks for exactly this — "the UI explains the refusal in one sentence rather than showing a code" — so
+// these codes drop the prefix and every other answer keeps the `code: message` shape the rest of the page uses.
 export const PROJECT_REFUSALS: readonly string[] = [
   "git_not_directory",
   "submodules_present",
   "worktree_config_enabled",
+  "unusable_image",
 ];
 
 export function createFailure(code: string, message: string): string {

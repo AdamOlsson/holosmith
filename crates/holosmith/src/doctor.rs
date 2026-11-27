@@ -5,7 +5,8 @@
 //! is item 10 §7 — run *after* the deploy, once the machine is already serving — which adds the egress
 //! self-test (whose bare probe **is** the network-off probe, ADR-0044/ADR-0046), the proxies' state, the pi
 //! version and labels of the image `base_image` names, and one line per tool row saying whether the key this
-//! machine stores for it still answers ([`tool_key`], ADR-0101).
+//! machine stores for it still answers ([`tool_key`], ADR-0101). Both depths end with one line per project saying
+//! which image its sessions run ([`project_images`], ADR-0123).
 //!
 //! Three rules hold the design together:
 //!
@@ -16,7 +17,9 @@
 //!   ADR-0044's rule for the self-test, applied to a machine with no systemd and no Tailscale daemon — where
 //!   `serve` by hand is a supported way to run (ADR-0054). The tool-key check leans on it again: a host that
 //!   answered 404, a TLS client that could not start and a machine with no key stored are all "not measured",
-//!   and only a 401 or a 403 is a failure.
+//!   and only a 401 or a 403 is a failure. An [`Outcome::Information`] is the fourth word and not a third verdict:
+//!   it is a fact an operator is better off knowing — a project whose sessions have no compiler — printed without
+//!   claiming anything about whether the machine may run (ADR-0123).
 //! - **`doctor` starts nothing that outlives it.** The self-test removes its own network and probe container,
 //!   the image question is a `docker run --rm --network none`, and the proxies are *read*, not started. There is
 //!   no unit file to write: `ExecStartPre=holosmith doctor --quick` is the line, and this story's contract
@@ -145,6 +148,13 @@ pub trait Machine {
     /// The names come from the run's own config ([`selftest::Names`]), because a smoke run's probes and proxies carry
     /// its prefix and a machine's own do not.
     fn selftest(&self, names: &selftest::Names, image: &str) -> selftest::Outcome;
+
+    /// Whether an image is on the daemon ([`Docker::image_exists`]).
+    ///
+    /// The whole currency question for a project's image, and the reason no label is read: the tag is a content
+    /// address over the project's recipe and the base image's tag ([`crate::projectimage`]), so "is that tag there"
+    /// is the answer and an absent one is an ordinary "not built yet" rather than an error.
+    fn image_exists(&self, image: &str) -> bool;
 }
 
 impl Machine for Docker {
@@ -162,6 +172,10 @@ impl Machine for Docker {
 
     fn selftest(&self, names: &selftest::Names, image: &str) -> selftest::Outcome {
         selftest::run(self, names, image)
+    }
+
+    fn image_exists(&self, image: &str) -> bool {
+        Docker::image_exists(self, image)
     }
 }
 
@@ -199,11 +213,12 @@ impl Report {
         };
         let _ = writeln!(
             text,
-            "doctor: {} findings: {} pass, {} fail, {} unknown",
+            "doctor: {} findings: {} pass, {} fail, {} unknown, {} info",
             self.findings.len(),
             count(Outcome::Pass),
             self.failures().count(),
-            count(Outcome::Unknown)
+            count(Outcome::Unknown),
+            count(Outcome::Information)
         );
         text
     }
@@ -212,11 +227,11 @@ impl Report {
 /// Run the checks `depth` names, in the order the report prints them.
 ///
 /// The order is the operator's: the machine's init, then the three `serve` refuses on (with V2's merge trial
-/// beside git), then disk, Tailscale, the ports, the database, the release tree and the installed paths' modes;
-/// `--full` appends the container questions. A **hub** is not asked the Docker or git questions at all — item 10 §6's
-/// `hub deploy` runs step 1 "without the Docker and git checks", because a hub runs no sessions — while disk,
-/// Tailscale, ports, the database, the release tree and the permissions still belong to it (a hub has a data root and
-/// a release tree too).
+/// beside git), then disk, Tailscale, the ports, the database, the release tree, the installed paths' modes and one
+/// finding per project; `--full` appends the container questions. A **hub** is not asked the Docker or git questions
+/// at all — item 10 §6's `hub deploy` runs step 1 "without the Docker and git checks", because a hub runs no
+/// sessions — while disk, Tailscale, ports, the database, the release tree, the permissions and the projects still
+/// belong to it (a hub has a data root, a release tree and a projects root too).
 pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) -> Report {
     let mut findings = vec![systemd(&tools.systemd)];
     let mut docker_ok = false;
@@ -235,6 +250,15 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
             _ => findings.push(finding),
         }
     }
+    // Why a container question has no verdict, in the words the report can stand behind: a `hub` is not asked them
+    // at all (item 10 §6), and a server whose daemon did not answer is a different fact. Saying "the docker check
+    // above failed" on a hub would name a line the report does not have. It is computed here because `--quick`
+    // asks it too: a project's image is a daemon question.
+    let because = if config.role == Role::Hub {
+        "a hub runs no sessions, so item 10 §6 asks it no Docker question"
+    } else {
+        "the docker check above failed"
+    };
     findings.push(tailscale(&tools.tailscale));
     // Item 10's two moments: `--quick` runs before a start, when a free port is the pass, and `--full` runs
     // after one, when the control port is held by this machine's own `serve` — so "serving" is what a port in
@@ -244,20 +268,17 @@ pub fn run(config: &Config, depth: Depth, tools: &Tools, machine: &dyn Machine) 
     findings.push(database(config));
     findings.push(release_tree(&tools.release_root, &tools.unit_path));
     findings.push(perms(config, tools));
+    // One finding per project, in **both** depths: which image a project's sessions run is what the next create is
+    // about to use, and `--quick` is the list `serve` refuses on and the unit's `ExecStartPre`. None of them can be
+    // a failure — a project with no recipe runs the base image and one with an unbuilt recipe is built on its first
+    // session — so they never refuse a boot (ADR-0123).
+    findings.extend(project_images(config, machine, docker_ok, because));
     if depth == Depth::Full {
         // The notification channel is the first `--full` question, and it is **not** asked by `--quick`: `--quick` is
         // the unit's `ExecStartPre` (item 10 §5), and a machine whose notification channel is missing must still boot.
         // See [`openssl`].
         findings.push(openssl(&tools.preflight.openssl));
         let image = config.base_image.as_str();
-        // Why the container questions have no verdict, in the words the report can stand behind: a `hub` is not
-        // asked them at all (item 10 §6), and a server whose daemon did not answer is a different fact. Saying
-        // "the docker check above failed" on a hub would name a line the report does not have.
-        let because = if config.role == Role::Hub {
-            "a hub runs no sessions, so item 10 §6 asks it no Docker question"
-        } else {
-            "the docker check above failed"
-        };
         let isolation = selftest::Names::of(config);
         findings.push(network(machine, &isolation, image, docker_ok, because));
         // The proxies by the names this run's config composes, so a smoke run's `doctor` looks at its own
@@ -1306,6 +1327,120 @@ fn not_measured(what: &str, because: &str) -> String {
     format!("{what}, and {because}: this is not a verdict about the machine")
 }
 
+/// One finding per project under the projects root: which image its sessions run, and whether that image is built.
+///
+/// **`--quick`'s**, in both depths, because a project's image is what the next create is about to run and `--quick`
+/// is the list `serve` refuses on and the unit's `ExecStartPre`. Nothing here can be a failure: a project with no
+/// recipe runs the base image, which is supported, and a project whose recipe has not been built yet will be built
+/// on its first session. The arms are [`project_image`]'s.
+///
+/// A projects root that does not exist has no projects, which is an empty list and not a failure — the first
+/// `project add` makes the directory, and `commands::project`'s list reads it the same way. `.worktrees` is skipped
+/// by name, because it is the build's own directory inside the projects root rather than a project, and so is a
+/// directory whose name is not one a create would take ([`crate::projects::name_is_valid`]).
+fn project_images(
+    config: &Config,
+    machine: &dyn Machine,
+    docker_ok: bool,
+    because: &str,
+) -> Vec<Finding> {
+    let Ok(entries) = std::fs::read_dir(&config.projects_root) else {
+        return Vec::new();
+    };
+    let mut projects: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            // A project name is what the form takes, so a directory that is not one is not a project — and a name
+            // that is not UTF-8 cannot be reported by name either.
+            if !crate::projects::name_is_valid(&name) || name == crate::worktree::WORKTREES {
+                return None;
+            }
+            Some((name, entry.path()))
+        })
+        .collect();
+    // Sorted by name, so one machine's report is one report: a directory listing's order is the filesystem's.
+    projects.sort();
+    projects
+        .into_iter()
+        .map(|(project, root)| {
+            project_image(
+                &project,
+                &root,
+                &config.base_image,
+                machine,
+                docker_ok,
+                because,
+            )
+        })
+        .collect()
+}
+
+/// The finding for one project: the base image when it has no recipe, and its own tag when it has one.
+///
+/// | state | outcome |
+/// | --- | --- |
+/// | no `docker/Dockerfile` | **info** — its sessions run the base image, which has no compiler |
+/// | a recipe that cannot become an image | **info**, in the recipe's own sentence naming the path — the create refuses, this line does not |
+/// | a recipe, and the daemon did not answer | **unknown**, in the `because` voice the other container questions use |
+/// | a recipe, and its image is there | **pass**, with the tag |
+/// | a recipe, and its image is not there | **info** — it will be built on the first session |
+fn project_image(
+    project: &str,
+    root: &Path,
+    base_image: &str,
+    machine: &dyn Machine,
+    docker_ok: bool,
+    because: &str,
+) -> Finding {
+    let resolved = match crate::projectimage::resolve(root, project, base_image) {
+        Ok(resolved) => resolved,
+        // A recipe the create would refuse is a fact worth printing and not a failure: a machine whose project
+        // needs an edit still starts `serve`, and the create is where the refusal belongs.
+        Err(problem) => return Finding::information(Check::Project, problem.sentence()),
+    };
+    let Some(build) = resolved.build else {
+        return Finding::information(
+            Check::Project,
+            format!(
+                "{project} has no {}, so its sessions run the base image {base_image}: pi, git and certificates, \
+                 and no compiler",
+                crate::projectimage::RECIPE
+            ),
+        );
+    };
+    if !docker_ok {
+        return Finding::unknown(
+            Check::Project,
+            not_measured(
+                &format!(
+                    "whether {project}'s image {} is built needs the daemon",
+                    resolved.image
+                ),
+                because,
+            ),
+        );
+    }
+    if machine.image_exists(&resolved.image) {
+        return Finding::pass(
+            Check::Project,
+            format!(
+                "{project}: {} is built from {}",
+                resolved.image,
+                build.recipe.display()
+            ),
+        );
+    }
+    Finding::information(
+        Check::Project,
+        format!(
+            "{project}: {} is not built yet, so it will be built on the first session",
+            resolved.image
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -1326,6 +1461,7 @@ mod tests {
                 Finding::pass(Check::Docker, "the daemon answers"),
                 Finding::fail(Check::Git, "git is old: upgrade git"),
                 Finding::unknown(Check::Tailscale, "no daemon"),
+                Finding::information(Check::Project, "no compiler"),
             ],
         };
         let text = report.render();
@@ -1334,10 +1470,17 @@ mod tests {
         assert_eq!(lines[1], "docker: pass: the daemon answers");
         assert_eq!(lines[2], "git: fail: git is old: upgrade git");
         assert_eq!(lines[3], "tailscale: unknown: no daemon");
-        assert_eq!(lines[4], "doctor: 3 findings: 1 pass, 1 fail, 1 unknown");
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[4], "project: info: no compiler");
+        assert_eq!(
+            lines[5],
+            "doctor: 4 findings: 1 pass, 1 fail, 1 unknown, 1 info"
+        );
+        assert_eq!(lines.len(), 6);
+        // An information is counted in the tally and is not a failure: it is a fact, not a verdict (ADR-0123).
         assert!(report.failed());
         assert_eq!(report.failures().count(), 1);
+        assert_eq!(report.findings[3].outcome, Outcome::Information);
+        assert!(!report.findings[3].is_failure());
     }
 
     #[test]
@@ -1935,5 +2078,156 @@ mod tests {
         fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
             selftest::Outcome::Unknown("no image".to_string())
         }
+
+        fn image_exists(&self, _image: &str) -> bool {
+            false
+        }
+    }
+
+    /// The same machine with every image there, which is the only difference the pass arm has.
+    struct Built;
+
+    impl Machine for Built {
+        fn running(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn image_pi(&self, _image: &str) -> Result<String, String> {
+            Ok(crate::pins::pi_version().to_string())
+        }
+
+        fn image_labels(&self, _image: &str) -> Result<Option<BTreeMap<String, String>>, String> {
+            Ok(Some(BTreeMap::new()))
+        }
+
+        fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
+            selftest::Outcome::Passed
+        }
+
+        fn image_exists(&self, _image: &str) -> bool {
+            true
+        }
+    }
+
+    /// One finding per project, sorted by name, and **nothing fails** — the acceptance's three arms (ADR-0123).
+    ///
+    /// The daemon question is the machine's, so the two answers are two `Machine` values rather than two runs: what
+    /// is measured here is the arm, not a daemon.
+    #[test]
+    fn a_projects_image_is_one_information_per_project_and_never_a_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-doctor-projects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("projects");
+        // Sorted order is the assertion, and it is not the order they were made in.
+        for name in ["zeta", "alpha"] {
+            std::fs::create_dir_all(projects.join(name)).expect("the project is creatable");
+        }
+        std::fs::create_dir_all(projects.join("beta").join("docker"))
+            .expect("the recipe's directory is creatable");
+        std::fs::write(
+            projects.join("beta").join(crate::projectimage::RECIPE),
+            b"FROM holosmith-base:0.1.0\n",
+        )
+        .expect("the recipe is writable");
+        // An empty recipe: the create refuses it, and this report says so without failing.
+        std::fs::create_dir_all(projects.join("gamma").join("docker"))
+            .expect("the recipe's directory is creatable");
+        std::fs::write(
+            projects.join("gamma").join(crate::projectimage::RECIPE),
+            b"",
+        )
+        .expect("the recipe is writable");
+        // The build's own directory, which is not a project.
+        std::fs::create_dir_all(
+            projects
+                .join(crate::worktree::WORKTREES)
+                .join("0123456789abcdef"),
+        )
+        .expect("the worktree directory is creatable");
+        let config = Config {
+            projects_root: projects.clone(),
+            base_image: "holosmith-base:0.1.0".to_string(),
+            ..Config::default()
+        };
+
+        // 1. The daemon did not answer: the two recipes have no verdict, and the two projects without one are
+        //    facts that need no daemon.
+        let unmeasured = project_images(&config, &NoDaemon, false, "the docker check above failed");
+        let outcomes: Vec<Outcome> = unmeasured.iter().map(|finding| finding.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::Information,
+                Outcome::Unknown,
+                Outcome::Information,
+                Outcome::Information
+            ],
+            "{}",
+            unmeasured
+                .iter()
+                .map(|finding| finding.to_string())
+                .collect::<Vec<String>>()
+                .join("\n")
+        );
+        assert!(unmeasured.iter().all(|finding| !finding.is_failure()));
+        // Sorted by project name, so the report is the same report twice. The sentence names its project —
+        // first in every arm but the unmeasured one, whose `not_measured` clause leads with the question.
+        for (finding, project) in unmeasured.iter().zip(["alpha", "beta", "gamma", "zeta"]) {
+            assert!(
+                finding.sentence.contains(project),
+                "{} does not name {project}",
+                finding.sentence
+            );
+        }
+        assert!(
+            unmeasured[0].sentence.contains("holosmith-base:0.1.0")
+                && unmeasured[0].sentence.contains("no compiler"),
+            "the no-recipe arm does not say which image runs and what it lacks: {}",
+            unmeasured[0].sentence
+        );
+        assert!(
+            unmeasured[2].sentence.contains("docker/Dockerfile"),
+            "the unusable recipe does not name its path: {}",
+            unmeasured[2].sentence
+        );
+
+        // 2. A daemon that answers and has not built the recipe: an information that says when it will be.
+        let unbuilt = project_images(&config, &NoDaemon, true, "the docker check above failed");
+        assert!(
+            unbuilt
+                .iter()
+                .all(|finding| finding.outcome == Outcome::Information),
+            "{}",
+            unbuilt
+                .iter()
+                .map(|finding| finding.to_string())
+                .collect::<Vec<String>>()
+                .join("\n")
+        );
+        assert!(
+            unbuilt[1]
+                .sentence
+                .contains("will be built on the first session"),
+            "the unbuilt arm does not say when it is built: {}",
+            unbuilt[1].sentence
+        );
+
+        // 3. A daemon that answers and has the image: the recipe is a pass carrying the tag, and nothing else moved.
+        let answered = project_images(&config, &Built, true, "the docker check above failed");
+        assert_eq!(answered[1].outcome, Outcome::Pass);
+        assert!(
+            answered[1].sentence.contains("hs-beta:"),
+            "the pass does not carry the tag: {}",
+            answered[1].sentence
+        );
+
+        // 4. A projects root that is not there has no projects, which is no finding and not a failure.
+        let missing = Config {
+            projects_root: dir.join("no-projects-here"),
+            ..config
+        };
+        assert!(project_images(&missing, &Built, true, "unused").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

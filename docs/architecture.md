@@ -55,9 +55,10 @@ is enabled, the egress proxy (CONNECT/443, allow-list) and the MCP proxy (a tool
 the proxies above, so a compiler, a linker or a package manager is either in the image or nowhere: an image build is the
 step with internet, and what a session can build with is what that build installed and cached. An allow-list entry or the
 Internet-access toggle changes which hosts a session reaches, never what it compiles with ([egress](egress.md)). The
-image a session's container runs is `base_image` — the generic `holosmith-base:<version>` by default, which carries pi,
-git, node and certificates and no compiler — so a project that needs a toolchain gets it there, in an image it builds
-and names in that key ([configuration](config.md)).
+image a session's container runs is **its project's**: `hs-<project>:<digest>` when the project carries a recipe at
+`<project root>/docker/Dockerfile`, and `base_image` when it does not — the generic `holosmith-base:<version>` by
+default, which carries pi, git, node and certificates and no compiler. So a project that needs a toolchain gets it in
+its own recipe, which its sessions' image is built from ([configuration](config.md), ADR-0123).
 
 **Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes. A release
 artifact is built by the tree's own `scripts/build.sh`, which leaves `dist/<triple>/holosmith` and its digest beside it;

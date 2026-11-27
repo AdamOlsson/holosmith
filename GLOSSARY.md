@@ -742,7 +742,7 @@ The per-session mutex a container start holds, so two starts of one session cann
 _Avoid_: Create lock, session mutex, start guard
 
 **Session container**:
-The container one session runs in: the name `s_<id>`, the image `base_image` names, and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
+The container one session runs in: the name `s_<id>`, the image its project resolves to (a **project image**, or `base_image` when the project carries no recipe), and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
 _Avoid_: Agent container, sandbox, box
 
 **Mounts**:
@@ -750,7 +750,7 @@ The four bind mounts of spec item 1 that make a session's files reachable: the w
 _Avoid_: Volumes, binds, mounts list
 
 **Refused project**:
-A project repository the machine will not mount into a container, answered by the create (and by a resume) with one sentence and one of three codes: `git_not_directory` (a `.git` that is not a directory, or no checkout at all), `submodules_present` (`.gitmodules` or `.git/modules`), `worktree_config_enabled` (`extensions.worktreeConfig`). Its machine name is `Refusal` and `worktree::refuse`, asked through `Backends::refuse`; nothing is written for it, and a stub run refuses nothing because it mounts no repository.
+A project the machine will not start a session for, answered by the create (and by a resume) with one sentence and one of four codes: `git_not_directory` (a `.git` that is not a directory, or no checkout at all), `submodules_present` (`.gitmodules` or `.git/modules`), `worktree_config_enabled` (`extensions.worktreeConfig`), and `unusable_image` (a `docker/Dockerfile` that is not a regular file, is empty, cannot be read, or a project name Docker cannot spell as a repository — the sentence names the path). Its machine name is `Refusal`, answered by `worktree::refuse` and by `projectimage::resolve` for the image, asked through `Backends::refuse`; nothing is written for it, and a stub run refuses nothing because it mounts no repository. A project with **no** recipe is not refused: it runs `base_image`.
 _Avoid_: Invalid project, bad repo, unsafe project
 
 **Session branch**:
@@ -1301,15 +1301,26 @@ _Avoid_: Install step, deploy phase, stage, deployment
 **Image build**:
 The three images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
 `holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run;
-`holosmith-base:<version>`, pi at the pinned version, node, git, CA certificates, openssl and `procps` and nothing
-else, which is the session image for a project that is not this repository and the value `base_image` defaults to
-(ADR-0114, ADR-0117); and `agent-image:<version>`, the same session plus the artifact, this repository's Rust
-toolchain, python3 and ripgrep, the crate set and the npm cache, which a machine whose projects are this tree points
-`base_image` at. It is a **build**, not a pull: nothing in this phase pushes or fetches an image, and the context is
-an archive holding the Dockerfile, the running binary and — on the agent image — the crate set a build can vendor from
-(`images::Kind::context`). Its machine names are `images::Kind`, `images::ensure` and
+`holosmith-base:<version>`, pi at the pinned version, node, git, CA certificates, openssl and `procps` and nothing else,
+which is the session image for a project that carries no recipe of its own, the base a project's recipe extends, and the
+value `base_image` defaults to (ADR-0114, ADR-0117, ADR-0123); and `agent-image:<version>`, the same session plus the
+artifact, this repository's Rust toolchain, python3 and ripgrep, the crate set and the npm cache, which a machine whose
+projects are this tree points `base_image` at. It is a **build**, not a pull: nothing in this phase pushes or fetches an
+image, and the context is an archive holding the Dockerfile, the running binary and — on the agent image — the crate set
+a build can vendor from (`images::Kind::context`). Its machine names are `images::Kind`, `images::ensure` and
 `images::proxy_image`/`images::base_image`/`images::agent_image`.
 _Avoid_: Container image, docker image, image pull, base image
+
+**Project image**:
+The image one project's sessions run, resolved from that project's own tree: `hs-<project>:<digest>` when the project
+carries a recipe at `<project root>/docker/Dockerfile`, and `base_image` when it does not. The digest is the SHA-256 of
+the recipe's bytes and the base image's tag, so the whole currency question is whether that tag exists — no
+`org.holosmith.*` label is written or read. The build context is the project root, which Docker filters by the project's
+own `.dockerignore` when it has one. Its machine names are `projectimage::resolve`, `projectimage::ProjectImage` and
+`projectimage::Build`; nothing else may compose the tag, and a recipe that cannot become one is a **refused project**
+(ADR-0123). What the digest does not cover is the files the recipe copies: a `COPY Cargo.lock …` over a moved lock is
+invisible to it, and that staleness has its own change.
+_Avoid_: Agent image (that is the product one), base image, custom image, per-project build
 
 **Image label**:
 One of the four `org.holosmith.*` values a built image carries — version, git tag, pinned pi and the SHA-256 of the
@@ -1345,10 +1356,12 @@ machine names are `doctor::run`, `Depth`, `Tools`, `Machine` and `Report`; the n
 _Avoid_: Healthcheck, verify
 
 **Finding**:
-One check's answer: the check's word, whether it **passed**, **failed** or is **unknown**, and the sentence the
-operator reads. Only a failure changes `doctor`'s exit code; an unknown is "this check produced no verdict about
-whether `serve` may run here", and its sentence says what was missing and what does need it.
-_Avoid_: Result, verdict (`Verdict` is the schema's word), status
+One check's answer: the check's word, whether it **passed**, **failed**, is **unknown** or is **information**, and the
+sentence the operator reads. Only a failure changes `doctor`'s exit code; an unknown is "this check produced no
+verdict about whether `serve` may run here", and its sentence says what was missing and what does need it. An
+information is neither a verdict nor a failure — a fact an operator is better off knowing, such as a project whose
+sessions have no compiler — and the word after the check is `info`.
+_Avoid_: Result, verdict (`Verdict` is the schema's word), status, note (an information is a finding, counted in the tally)
 
 **Admin socket**:
 The local unix socket used for commands that must never be reachable over HTTP: `<admin dir>/drain.sock`, 0600 in a

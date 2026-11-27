@@ -37,7 +37,9 @@ use serde_json::json;
 use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
 use crate::agent::{self, Agent, AgentError, Ended};
 use crate::config::LinearMcp;
-use crate::container::{ContainerSettings, GIT_CONFIG_FILE, SessionContainer, network_name};
+use crate::container::{
+    ContainerSettings, GIT_CONFIG_FILE, SessionContainer, container_name, network_name,
+};
 use crate::docker::{Docker, DockerError};
 use crate::events::EventWriter;
 use crate::exit::SessionLog;
@@ -99,13 +101,15 @@ pub struct DockerBackend {
     /// is a handle and an `Arc` per session this process served, which is the trade [`Self::starts`] already
     /// makes for the same reason.
     agents: Arc<Mutex<HashMap<String, Launched>>>,
-    /// The pi version the image runs, asked once per process (`Some(Err(..))` is a remembered failure).
+    /// The pi version each image runs, asked once per image per process (an `Err` value is a remembered failure).
     ///
-    /// One question, one answer: `docker run --entrypoint pi <image> --version` costs a container start, and
+    /// One question, one answer per image: `docker run --entrypoint pi <image> --version` costs a container start, and
     /// the answer cannot change while this process lives (an image is replaced by an upgrade, which restarts
-    /// the server). A `tokio` mutex because the answer arrives through `spawn_blocking` and the wait is an
+    /// the server). A map rather than one slot because a session's image is its project's
+    /// ([`crate::projectimage::resolve`]): two projects may run two images, and one project's version is no answer
+    /// about the other's. A `tokio` mutex because the answer arrives through `spawn_blocking` and the wait is an
     /// `await`.
-    version: Arc<tokio::sync::Mutex<Option<Result<String, String>>>>,
+    version: Arc<tokio::sync::Mutex<HashMap<String, Result<String, String>>>>,
     /// `<data>/sessions/<id>/session.log`: the session's stderr and the launch line (spec item 15).
     log: SessionLog,
     /// How many RPC commands this process has written, which is what makes a command's id unique.
@@ -158,7 +162,7 @@ impl DockerBackend {
             settings,
             starts: Arc::new(Mutex::new(HashMap::new())),
             agents: Arc::new(Mutex::new(HashMap::new())),
-            version: Arc::new(tokio::sync::Mutex::new(None)),
+            version: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             commands: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -200,32 +204,30 @@ impl DockerBackend {
         agents.remove(session_id);
     }
 
-    /// The pi version the agent image runs, asserted against `pins/pi.txt` once per process.
+    /// The pi version one image runs, asserted against `pins/pi.txt` once per image per process.
     ///
     /// The story's fourth acceptance line: "the agent image's pi version equals the binary's pinned pi
-    /// version; a mismatch fails the session with a clear error". A cached failure is re-answered rather
-    /// than re-asked, because a machine whose image is wrong is wrong for every session and the operator
-    /// needs the sentence once per row, not one container start per session.
-    async fn image_version(&self) -> Result<String, BackendError> {
+    /// version; a mismatch fails the session with a clear error". `image` is the **session's** image and not the
+    /// base's: a project with a recipe runs `hs-<project>:<digest>`, whose pi is whatever its recipe left there, so
+    /// a check against the base would be a sentence about an image this session does not run. A cached failure is
+    /// re-answered rather than re-asked, because an image that is wrong is wrong for every session that runs it
+    /// and the operator needs the sentence once per row, not one container start per session.
+    async fn image_version(&self, image: &str) -> Result<String, BackendError> {
         let mut cache = self.version.lock().await;
-        if let Some(known) = cache.as_ref() {
+        if let Some(known) = cache.get(image) {
             return known.clone().map_err(BackendError::failed);
         }
         let docker = self.settings.docker();
-        let image = self.settings.image.clone();
-        let asked = tokio::task::spawn_blocking(move || agent::version_of(&docker, &image)).await;
+        let wanted = image.to_string();
+        let asked = tokio::task::spawn_blocking(move || agent::version_of(&docker, &wanted)).await;
         let answer = match asked {
-            Ok(Ok(version)) => agent::version_check(&self.settings.image, &version),
+            Ok(Ok(version)) => agent::version_check(image, &version),
             Ok(Err(reason)) => Err(format!(
-                "the agent image {} could not say which pi it runs: {reason}",
-                self.settings.image
+                "the image {image} could not say which pi it runs: {reason}"
             )),
-            Err(error) => Err(format!(
-                "the agent image {} was not asked in time ({error})",
-                self.settings.image
-            )),
+            Err(error) => Err(format!("the image {image} was not asked in time ({error})")),
         };
-        *cache = Some(answer.clone());
+        cache.insert(image.to_string(), answer.clone());
         answer.map_err(BackendError::failed)
     }
 
@@ -256,7 +258,14 @@ impl DockerBackend {
     }
 
     /// This session's container, from the machine's settings and the row.
-    fn container(&self, session: &Session) -> SessionContainer {
+    ///
+    /// `Err` is a recipe that cannot become the image its sessions run ([`crate::projectimage::Unusable`]): the
+    /// create answers the same refusal before the row exists, so a project that changed under a session is
+    /// refused here with the sentence that names the path.
+    fn container(
+        &self,
+        session: &Session,
+    ) -> Result<SessionContainer, crate::projectimage::Unusable> {
         SessionContainer::of(&self.settings, session)
     }
 
@@ -280,13 +289,21 @@ impl DockerBackend {
         crate::mcpproxy::mcp_proxy_name(&self.settings.container_prefix)
     }
 
-    /// Whether `project`'s repository may be mounted, and why not when it may not.
+    /// Whether `project`'s repository may be mounted, and the image its sessions run may be resolved, and why not
+    /// when they may not.
     ///
     /// The create asks this **before** the session row exists, so it cannot go through [`Self::worktree`]:
     /// the repository is named by the projects root and the project alone. It is a host read like every
-    /// other in this backend, and [`crate::worktree::refuse`] is where the rules are.
+    /// other in this backend, and [`crate::worktree::refuse`] is where the mount rules are. The recipe's is the
+    /// second half: `<project root>/docker/Dockerfile` decides the image ([`crate::projectimage::resolve`]), and a
+    /// create that would fail at the container step is refused here, in one sentence naming the path, rather than
+    /// by a `docker run` three steps later.
     pub fn refuse_project(&self, project: &str) -> Result<(), Refusal> {
-        refuse(&repository_of(&self.settings.projects_root, project))
+        let repository = repository_of(&self.settings.projects_root, project);
+        refuse(&repository)?;
+        crate::projectimage::resolve(&repository, project, &self.settings.image)
+            .map(|_| ())
+            .map_err(Refusal::UnusableImage)
     }
 
     /// The id of one command this backend writes, unique for the process's lifetime.
@@ -530,7 +547,11 @@ impl DockerBackend {
     /// cover: a container the process lost track of — a crash, a `kill -9`, a session removed from the row
     /// while its container lived.
     async fn start_container(&self, session: &Session) -> Result<(), BackendError> {
-        let container = self.container(session);
+        // The image is the project's, resolved here: a recipe that cannot become one is the create's
+        // refusal, and a project that changed under a running session is refused with the same sentence.
+        let container = self.container(session).map_err(|problem| {
+            BackendError::failed(format!("the container step: {}", problem.sentence()))
+        })?;
         let home = container.home.clone();
         agent::ensure_home(&home, session).map_err(|error| {
             BackendError::failed(format!(
@@ -589,9 +610,9 @@ impl DockerBackend {
             .mounts
             .check()
             .map_err(|missing| BackendError::failed(format!("the container step: {missing}")))?;
-        // Asked before the launch, and cached for the process: a stale image is a machine problem, not a
+        // Asked before the launch, and cached for the process per image: a stale image is a machine problem, not a
         // session's, and the sentence says which image and which two versions.
-        let version = self.image_version().await?;
+        let version = self.image_version(&container.image).await?;
         let arguments = container.run_args();
         let name = container.name.clone();
         // The previous container goes through the backend's own removal rather than through `Docker` directly, so
@@ -734,7 +755,9 @@ impl DockerBackend {
         // boundary before the new container is up. Measured on the resume-after-a-refused-prompt, which
         // lost that race about one run in two.
         self.supersede_agent(&session.id);
-        let name = self.container(session).name;
+        // The name is the naming rule's and not the image's, so a recipe that cannot become one does not stop a
+        // teardown: a session whose project needs an edit still has a container to remove or stop.
+        let name = container_name(&self.settings.container_prefix, &session.id);
         let removed = Self::docker(Step::Container, self.settings.docker(), move |docker| {
             Ok(docker.remove_container(&name))
         })
@@ -984,7 +1007,9 @@ impl SessionBackend for DockerBackend {
     /// [`crate::stop::Stopper`] records it before calling this (ADR-0038). The classification of how
     /// the container then exited is [`crate::exit`]'s, and its observer is the attached stdio.
     async fn stop(&self, session: &Session) -> Result<(), BackendError> {
-        let name = self.container(session).name;
+        // The name is the naming rule's and not the image's, so a recipe that cannot become one does not stop a
+        // teardown: a session whose project needs an edit still has a container to remove or stop.
+        let name = container_name(&self.settings.container_prefix, &session.id);
         // `?` on the outer `Result` is deliberate: a daemon that cannot answer is a failed stop, and the
         // ladder's `warn` is where that has to become visible.
         let stopped = Self::docker(Step::Container, self.settings.docker(), move |docker| {

@@ -272,6 +272,10 @@ impl doctor::Machine for NoDaemon {
     fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
         selftest::Outcome::Unknown("this machine has no daemon".to_string())
     }
+
+    fn image_exists(&self, _image: &str) -> bool {
+        false
+    }
 }
 
 impl images::Images for NoDaemon {
@@ -473,7 +477,7 @@ fn the_terse_report_is_the_deploys_marked_steps_then_installs_own_unnumbered_one
                 deploy::Line {
                     step: DeployStep::Preflight,
                     word: Word::Satisfied,
-                    sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                    sentence: "10 findings: 8 pass, 0 fail, 2 unknown, 0 info (systemd, disk)".to_string(),
                     fix: None,
                 },
                 deploy::Line {

@@ -976,11 +976,12 @@ fn preflight(config: &Config, tools: &doctor::Tools, machine: &dyn Machine) -> L
         .map(|finding| finding.check.as_str())
         .collect();
     let mut sentence = format!(
-        "{} findings: {} pass, {} fail, {} unknown",
+        "{} findings: {} pass, {} fail, {} unknown, {} info",
         findings.len(),
         count(Outcome::Pass),
         count(Outcome::Fail),
-        count(Outcome::Unknown)
+        count(Outcome::Unknown),
+        count(Outcome::Information)
     );
     if !unknown.is_empty() {
         sentence.push_str(&format!(" ({})", unknown.join(", ")));

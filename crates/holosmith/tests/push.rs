@@ -890,7 +890,9 @@ fn no_session_container_carries_a_subscription_the_pair_or_the_word_push() {
         state.config.projects_root.clone(),
         state.config.data_root.clone(),
     );
-    let arguments = SessionContainer::of(&settings, &session).run_args();
+    let arguments = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image")
+        .run_args();
     let endpoint_value = endpoint("containers");
     for argument in &arguments {
         for forbidden in ["push", "vapid", "subscribe", &endpoint_value] {

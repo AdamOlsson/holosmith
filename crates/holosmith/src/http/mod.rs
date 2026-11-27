@@ -43,7 +43,8 @@ pub(crate) use sessions::complete_deletion;
 ///
 /// `holosmith project add` prints the same code and sentence for a clone it refused with one of the three shapes
 /// a repository is refused for, so a project added by the command and a project named by a create fail in one set
-/// of words rather than two that drift. The fourth answer, [`crate::worktree::Refusal::Unreadable`], has no code
-/// on either side: this mapping logs git's words and answers ADR-0008's sentence, and the command prints git's
-/// words to the terminal the clone ran in.
+/// of words rather than two that drift. [`crate::worktree::Refusal::Unreadable`] has no code on either side: this
+/// mapping logs git's words and answers ADR-0008's sentence, and the command prints git's words to the terminal the
+/// clone ran in. [`crate::worktree::Refusal::UnusableImage`] carries its own sentence, because it names the recipe's
+/// path and that is the operator's next edit (ADR-0123).
 pub(crate) use sessions::refusal_error;

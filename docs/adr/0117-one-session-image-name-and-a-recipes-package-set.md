@@ -15,6 +15,10 @@ escape hatch: `HOLOSMITH_TEST_IMAGE` and a hand-tagged `pi-agent:local` are how 
 `scripts/verify.sh` point a boot at an image built by hand. The hatch has to survive, so the key does not disappear —
 it changes subject from "what a session runs" to "the image Holosmith owns and projects extend".
 
+**Superseded in part by ADR-0123:** `base_image` is still this decision's key and a recipe's package set is still the
+recipe's, but the sentence that a recipe Holosmith reads itself is planned rather than shipped is not: the tree reads a
+project's `docker/Dockerfile` and names the image it builds.
+
 **Supersedes ADR-0057's** toolchain label: the labels are still the read and the recipes are still embedded, but the
 set is four and the toolchain list is not one of them. **Supersedes ADR-0105's** `agent_toolchains` sentence: the fixed
 set is still fixed, and there is no configurable half beside it. **Supersedes ADR-0114's** configured `agent_image`:
@@ -61,10 +65,10 @@ either name finds the answer.
   `git`, the isolation probe's `node -e`, and the absence of `cargo` — and no case starts a session in it: every turn
   the gate measures is the agent image's. A session's provisioning against the generic image stands on ADR-0114's
   contract rather than on a measurement of this change.
-- **The image a project builds for itself.** Nothing in this tree reads, builds or names a project's
-  `docker/Dockerfile`: the operator's `docker build -t <name> …` is theirs, on their machine, and the by-hand image the
-  gate already runs sessions in (`pi-agent:local`) is what stands in for one. The mechanism that would read a project's
-  recipe is planned rather than shipped.
+- **The image a project builds for itself.** **Superseded in part by ADR-0123:** the reading and the naming are
+  shipped — a project's `docker/Dockerfile` decides its tag and `doctor` prints it — and the *build* is the next change.
+  The operator's `docker build -t <name> …` is still theirs, on their machine, and the by-hand image the gate already
+  runs sessions in (`pi-agent:local`) is what stands in for one.
 - **The refusal at a boot and at a promotion.** The walk's sentence is pinned by a unit test and fired by every command
   that loads a config, but no case boots `serve` against an installed file that still names the old key and reads its
   refusal, nor promotes over one.

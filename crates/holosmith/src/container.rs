@@ -409,7 +409,8 @@ pub struct ContainerSettings {
     /// container: a data root on a tmpfs the daemon does not share gives the agent an empty directory and no
     /// error (the same fact ADR-0035 records for the projects root).
     pub data_root: PathBuf,
-    /// The image a container runs: `base_image`, Holosmith's own image or one a machine named.
+    /// The base image's tag: `base_image`, Holosmith's own image or one a machine named. A session runs it when its
+    /// project carries no recipe of its own, and a project's own recipe extends it ([`crate::projectimage`]).
     pub image: String,
     /// The daemon's address, as `docker -H` takes it; `None` is the CLI's own default.
     pub docker_host: Option<String>,
@@ -494,7 +495,8 @@ pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
 /// or the launch command would be a place to forget it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContainer {
-    /// The image the container runs: `base_image` (spec item 10 §3 builds the default).
+    /// The image this container runs: `hs-<project>:<digest>` when the project carries a recipe, and the base
+    /// image's tag when it does not ([`crate::projectimage::resolve`]).
     pub image: String,
     /// `s_<id>`: how the container is named, and how finds a leftover one.
     pub name: String,
@@ -530,11 +532,24 @@ impl SessionContainer {
     /// `worktree` column: the naming rule has one home, and a row written by an older binary would
     /// otherwise decide where the container's files are. The agent directory is the one mount the row
     /// does not name at all: it is `<data>/sessions/<id>/pi-home` by construction ([`crate::agent::home`]).
-    pub fn of(settings: &ContainerSettings, session: &Session) -> Self {
+    ///
+    /// **The image is the project's, resolved here** ([`crate::projectimage::resolve`]): `hs-<project>:<digest>`
+    /// when the project carries `docker/Dockerfile`, and the base image's tag when it does not. `Err` is a recipe
+    /// that cannot become an image — not a file, empty, unreadable, or a project name Docker cannot spell — and it
+    /// is the same refusal the create answers before the row exists, so the sentence is one sentence.
+    pub fn of(
+        settings: &ContainerSettings,
+        session: &Session,
+    ) -> Result<Self, crate::projectimage::Unusable> {
         let worktree = Worktree::of(&settings.projects_root, &session.project, &session.id);
         let home = crate::agent::home(&settings.data_root, &session.id);
-        Self {
-            image: settings.image.clone(),
+        let resolved = crate::projectimage::resolve(
+            &crate::worktree::repository_of(&settings.projects_root, &session.project),
+            &session.project,
+            &settings.image,
+        )?;
+        Ok(Self {
+            image: resolved.image,
             name: container_name(&settings.container_prefix, &session.id),
             session_id: session.id.clone(),
             network: network_name(&settings.network_prefix, &session.id),
@@ -545,7 +560,7 @@ impl SessionContainer {
             limits: settings.limits,
             preview_port: settings.preview_port,
             user: owner_of(&settings.data_root),
-        }
+        })
     }
 
     /// The `docker run` arguments, from `run` to the last of the agent's own arguments.
@@ -939,6 +954,7 @@ mod tests {
 
     fn container() -> SessionContainer {
         SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
+            .expect("a project with no recipe runs the base image")
     }
 
     /// the composition, in one place: the empty prefix is today's name byte for byte, and `smoke_` is the smoke
@@ -984,7 +1000,8 @@ mod tests {
             ..Config::default()
         };
         let settings = ContainerSettings::of(&config);
-        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"));
+        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"))
+            .expect("a project with no recipe runs the base image");
         assert_eq!(container.name, "smoke_s_0123456789abcdef".to_string());
         assert_eq!(
             container.network,
@@ -1075,8 +1092,10 @@ mod tests {
             volumes
         }
 
-        let one = SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"));
-        let other = SessionContainer::of(&settings(), &session("holosmith", "fedcba9876543210"));
+        let one = SessionContainer::of(&settings(), &session("holosmith", "0123456789abcdef"))
+            .expect("a project with no recipe runs the base image");
+        let other = SessionContainer::of(&settings(), &session("holosmith", "fedcba9876543210"))
+            .expect("a project with no recipe runs the base image");
         let theirs = volumes(&other);
         let shared: Vec<PathBuf> = volumes(&one)
             .into_iter()
@@ -1121,7 +1140,8 @@ mod tests {
         // is what makes the claim about the path rather than about the naming of ids. (Two sessions never share
         // an id — it is the row's primary key — so the worktree's `.worktrees/<id>` needs no project in its
         // name.)
-        let elsewhere = SessionContainer::of(&settings(), &session("other", "fedcba9876543210"));
+        let elsewhere = SessionContainer::of(&settings(), &session("other", "fedcba9876543210"))
+            .expect("a project with no recipe runs the base image");
         let elsewhere_volumes = volumes(&elsewhere);
         for (host, _) in volumes(&one) {
             assert!(
@@ -1226,7 +1246,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("the data root is creatable");
         let mut settings = ContainerSettings::at("/projects", &dir);
         settings.image = "agent-image:0.1.0".to_string();
-        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"));
+        let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"))
+            .expect("a project with no recipe runs the base image");
         let owner = owner_of(&dir).expect("the data root this test just made has an owner");
         assert_eq!(container.user, Some(owner));
         let arguments = container.run_args();
@@ -1238,6 +1259,50 @@ mod tests {
             arguments[at + 1],
             format!("{}:{}", owner.0, owner.1),
             "the container does not run as the data root's owner"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project's own recipe is the tag its container runs, the base image is the fallback, and a recipe that
+    /// cannot become an image is the refusal the create answers — the one builder reads the one resolver
+    /// ([`crate::projectimage::resolve`], ADR-0123).
+    #[test]
+    fn a_projects_recipe_names_the_image_its_container_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("holosmith-session-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(projects.join("plain")).expect("the project is creatable");
+        std::fs::create_dir_all(projects.join("built").join("docker"))
+            .expect("the recipe's directory is creatable");
+        let recipe = projects.join("built").join(crate::projectimage::RECIPE);
+        std::fs::write(&recipe, b"FROM holosmith-base:0.1.0\n").expect("the recipe is writable");
+        let mut settings = ContainerSettings::at(&projects, dir.join("data"));
+        settings.image = "holosmith-base:0.1.0".to_string();
+
+        let plain = SessionContainer::of(&settings, &session("plain", "0123456789abcdef"))
+            .expect("a project with no recipe runs the base image");
+        assert_eq!(plain.image, "holosmith-base:0.1.0");
+        let built = SessionContainer::of(&settings, &session("built", "0123456789abcdef"))
+            .expect("a written recipe is an image");
+        assert!(built.image.starts_with("hs-built:"), "{}", built.image);
+        assert_ne!(built.image, plain.image);
+        // The image is the first non-flag argument, so the run vector carries it and the command follows.
+        let arguments = built.run_args();
+        let at = arguments
+            .iter()
+            .position(|argument| *argument == built.image)
+            .unwrap_or_else(|| panic!("the run vector does not carry the image: {arguments:?}"));
+        assert_eq!(arguments[at + 1], "pi");
+
+        // A recipe Docker would refuse is the refusal, with the sentence that names the path.
+        std::fs::write(&recipe, b"  \n").expect("the recipe is writable");
+        let refused = SessionContainer::of(&settings, &session("built", "0123456789abcdef"))
+            .expect_err("an empty recipe is not an image");
+        assert!(
+            refused.sentence().contains(&recipe.display().to_string()),
+            "the refusal does not name the recipe: {}",
+            refused.sentence()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

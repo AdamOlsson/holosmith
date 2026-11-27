@@ -217,6 +217,7 @@ fn settings(projects_root: &Path) -> ContainerSettings {
 /// The container the mount rule describes, for `projects_root`.
 fn container(projects_root: &Path, id: &str) -> SessionContainer {
     SessionContainer::of(&settings(projects_root), &session(id))
+        .expect("a project with no recipe runs the base image")
 }
 
 /// The script the container runs: the six V1 outcomes, each reported as `name=exit-code`.
@@ -461,7 +462,8 @@ fn a_commits_author_is_the_builds_and_a_plain_git_commit_works_in_the_container(
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
     let session = session(ID_AUTHOR);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
@@ -539,7 +541,8 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
     let session = session(ID_RUN);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
@@ -824,7 +827,8 @@ fn a_second_start_never_fails_on_a_leftover_name() {
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
     let session = session(ID_START);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
@@ -939,7 +943,8 @@ fn removing_the_container_loses_nothing_the_worktree_holds() {
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
     let session = session(ID_RESUME);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     rm_container(&container.name);
     docker.remove_network(&container.network);
 
@@ -1020,7 +1025,8 @@ async fn two_starts_of_one_session_do_not_race() {
     let settings = settings(&scratch.path);
     let backend = DockerBackend::new(settings.clone());
     let docker = settings.docker();
-    let container = SessionContainer::of(&settings, &session(ID_RACE));
+    let container = SessionContainer::of(&settings, &session(ID_RACE))
+        .expect("a project with no recipe runs the base image");
     rm_container(&container.name);
     docker.remove_network(&container.network);
     backend

@@ -443,8 +443,9 @@ pub struct Config {
     pub machine_name: String,
     pub data_root: PathBuf,
     pub projects_root: PathBuf,
-    /// The image Holosmith owns and a project extends: the one a session's container runs, and the one
-    /// `server deploy`'s step 3 builds.
+    /// The image Holosmith owns and a project extends: what a session runs when its project carries no recipe of
+    /// its own, the base a project's own recipe builds on, and the one `server deploy`'s step 3 builds
+    /// ([`crate::projectimage::resolve`]).
     ///
     /// The default names the image a deployed machine already has: `holosmith-base:<this binary's version>` —
     /// from [`crate::images::base_image`], which is the one place that name is spelled. A machine may point it at

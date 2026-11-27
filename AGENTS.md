@@ -275,8 +275,10 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
 
 **A session has no network, so a project's image installs and caches everything at build time: an image build has
 internet and a session does not.** What a session can run is therefore what the image its container was started from put
-there — `base_image`, the generic `holosmith-base:<version>` by default, which carries pi, git, node and certificates
-and no compiler. Nothing inside a session adds a toolchain to that list: an allow-list entry names a host, which is
+there, and that image is the **project's own**: a project with `<project root>/docker/Dockerfile` runs
+`hs-<project>:<digest>` — the digest over the recipe's bytes and the base image's tag — and one without runs
+`base_image`, the generic `holosmith-base:<version>` by default, which carries pi, git, node and certificates and no
+compiler (ADR-0123). Nothing inside a session adds a toolchain to that list: an allow-list entry names a host, which is
 `docs/egress.md`'s subject, and no entry supplies a compiler or a package manager the image lacks.
 
 This repository is the project that needs a Rust toolchain, so its own image is `agent-image:<version>`, built from its

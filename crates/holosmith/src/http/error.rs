@@ -108,6 +108,9 @@ pub const SUBMODULES_PRESENT: &str = "submodules_present";
 /// A create named a project with `extensions.worktreeConfig` enabled (spec item 1).
 pub const WORKTREE_CONFIG_ENABLED: &str = "worktree_config_enabled";
 
+/// A create named a project whose `docker/Dockerfile` cannot become the image its sessions run.
+pub const UNUSABLE_IMAGE: &str = "unusable_image";
+
 /// A create was refused because the machine already runs the maximum number of live sessions
 ///
 pub const CAP_REACHED: &str = "cap_reached";
@@ -593,6 +596,16 @@ impl ApiError {
             "the project enables extensions.worktreeConfig, which would let the agent write a \
              per-worktree config, so it was refused",
         )
+    }
+
+    /// What a create naming a project whose recipe cannot become an image answers.
+    ///
+    /// The sentence is the recipe's own ([`crate::projectimage::Unusable::sentence`]): it names the path, what is
+    /// wrong with it, and the edit that fixes it, because the operator's next step is in that file. A project with
+    /// no recipe at all is not this answer — it runs the base image — so nothing here is a refusal of a project
+    /// that has not written one yet.
+    pub fn unusable_image(sentence: String) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, UNUSABLE_IMAGE, sentence)
     }
 
     /// What a delete answers when the session's work could not be snapshotted.
@@ -1399,14 +1412,21 @@ mod tests {
 
     #[test]
     fn every_project_refusal_is_a_422_with_its_own_code_and_its_own_sentence() {
-        // the three refusals. Three codes because the operator's next step differs per hole, and a
-        // sentence each because the page prints the sentence alone: a shared sentence would make the
-        // codes indistinguishable to the human even though the machine can tell them apart.
+        // The four refusals. A code each because the operator's next step differs per hole, and a sentence each
+        // because the page prints the sentence alone: a shared sentence would make the codes indistinguishable to
+        // the human even though the machine can tell them apart. The fourth is the recipe's, and its sentence is
+        // built from the path the resolver found — here a stand-in, since what this test measures is the pair.
         let mut sentences = std::collections::BTreeSet::new();
         for (error, code) in [
             (ApiError::git_not_directory(), GIT_NOT_DIRECTORY),
             (ApiError::submodules_present(), SUBMODULES_PRESENT),
             (ApiError::worktree_config_enabled(), WORKTREE_CONFIG_ENABLED),
+            (
+                ApiError::unusable_image(
+                    "/srv/projects/app/docker/Dockerfile is empty".to_string(),
+                ),
+                UNUSABLE_IMAGE,
+            ),
         ] {
             assert!(
                 !error.body.message.contains(code),
@@ -1416,7 +1436,7 @@ mod tests {
             sentences.insert(error.body.message.clone());
             assert_answer(error, StatusCode::UNPROCESSABLE_ENTITY, code);
         }
-        assert_eq!(sentences.len(), 3, "two project refusals share a sentence");
+        assert_eq!(sentences.len(), 4, "two project refusals share a sentence");
     }
 
     #[test]

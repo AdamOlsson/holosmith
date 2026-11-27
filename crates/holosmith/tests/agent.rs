@@ -247,7 +247,8 @@ fn a_real_container_runs_pi_and_answers_the_ready_handshake() {
     let settings = scratch.settings(&image);
     let backend = DockerBackend::new(settings.clone());
     let session = session(ID);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     remove(&container.name);
     let runtime = runtime();
 
@@ -408,7 +409,8 @@ fn the_turns_commands_reach_pi_and_a_refusal_is_pis_sentence() {
     let settings = scratch.settings(&image);
     let backend = DockerBackend::new(settings.clone());
     let session = session(ID_COMMANDS);
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     remove(&container.name);
     let runtime = runtime();
 

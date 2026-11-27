@@ -417,6 +417,9 @@ async fn refuse_project(state: &AppState, project: &str) -> Option<ApiError> {
 /// A repository git could not read is not something the operator can fix from the phone: git's own words
 /// go to the log, and the client gets the one sentence every unplanned failure gets (ADR-0008).
 ///
+/// The recipe's refusal carries its own sentence, because it names the path the operator has to edit — and it is
+/// the same sentence `doctor` prints, so a create and a report cannot describe one broken recipe two ways.
+///
 /// Shared with `commands::project`, which prints the same code and sentence for a clone it refused: one
 /// mapping, so what the API answers for a project and what `project add` refuses it with cannot drift.
 pub(crate) fn refusal_error(refusal: Refusal) -> ApiError {
@@ -424,6 +427,7 @@ pub(crate) fn refusal_error(refusal: Refusal) -> ApiError {
         Refusal::NotADirectory => ApiError::git_not_directory(),
         Refusal::SubmodulesPresent => ApiError::submodules_present(),
         Refusal::WorktreeConfigEnabled => ApiError::worktree_config_enabled(),
+        Refusal::UnusableImage(problem) => ApiError::unusable_image(problem.sentence()),
         // A repository git cannot read has not been checked at all, and git's words are the operator's:
         // `internal` logs the operation and the error, and the client gets ADR-0008's fixed sentence.
         Refusal::Unreadable(error) => internal("refuse_project", error),
