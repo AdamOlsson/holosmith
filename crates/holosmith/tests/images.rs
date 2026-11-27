@@ -1342,7 +1342,13 @@ impl images::Images for Labelled {
         self.answer.clone()
     }
 
-    fn build(&self, tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+    fn build(
+        &self,
+        tag: &str,
+        _input: images::Input<'_>,
+        _args: &[String],
+        _log: Option<&Path>,
+    ) -> Result<Log, String> {
         Ok(Log {
             success: true,
             text: format!("built {tag}"),
@@ -1595,8 +1601,14 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     let context =
         images::archive(images::PROXY_DOCKERFILE, &[], &binary).expect("the context is written");
     let arguments = images::build_arguments(TAG, &expectation);
-    let built = <Docker as images::Images>::build(&daemon, TAG, &context, &arguments)
-        .expect("the daemon was asked");
+    let built = <Docker as images::Images>::build(
+        &daemon,
+        TAG,
+        images::Input::Archive(&context),
+        &arguments,
+        None,
+    )
+    .expect("the daemon was asked");
     assert!(
         built.success,
         "the proxy image did not build: {}",
@@ -1647,8 +1659,14 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
     let broken = format!("{base}\nCOPY missing-file /x\n");
     let context = images::archive(&broken, &[], &binary).expect("the context is written");
     let arguments = images::build_arguments(BROKEN, &expectation);
-    let failed = <Docker as images::Images>::build(&daemon, BROKEN, &context, &arguments)
-        .expect("the daemon was asked");
+    let failed = <Docker as images::Images>::build(
+        &daemon,
+        BROKEN,
+        images::Input::Archive(&context),
+        &arguments,
+        None,
+    )
+    .expect("the daemon was asked");
     assert!(
         !failed.success,
         "a Dockerfile that copies a file the context does not hold built anyway"
@@ -1711,7 +1729,13 @@ impl images::Images for Tagged {
         Ok(self.labels.get(image).cloned())
     }
 
-    fn build(&self, tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+    fn build(
+        &self,
+        tag: &str,
+        _input: images::Input<'_>,
+        _args: &[String],
+        _log: Option<&Path>,
+    ) -> Result<Log, String> {
         Ok(Log {
             success: true,
             text: format!("built {tag}"),

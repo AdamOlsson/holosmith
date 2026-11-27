@@ -131,7 +131,7 @@ pub const LABEL_PI: &str = "org.holosmith.pi-version";
 /// running it. The acceptance's word is "the binary", so the read measures the binary.
 pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 
-/// One image build's bound: the agent image's first build installs pi and the musl.cc cross toolchain over the network.
+/// One **product** image's build bound: the agent image's first build installs pi and the musl.cc cross toolchain over the network.
 ///
 /// Forty minutes rather than the proxies' minute, because the agent image's `npm install` fetches pi from one
 /// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks a cross
@@ -144,6 +144,15 @@ pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 /// is "the build did not finish", which stops the step with a sentence rather than hanging a deploy nobody is
 /// watching.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(2400);
+
+/// One **project's** build bound: an hour, because a project's first build is slower than any of the three above.
+///
+/// A project's recipe installs its own toolchain — this repository's installs a Rust toolchain, runs `cargo vendor`
+/// over the lock and `npm ci` over the web app — and none of it is measured here: the number is the agent image's
+/// [`BUILD_TIMEOUT`] with room on top, because the one build this repository can time is not the build a project's
+/// author wrote. It is a **bound** and not a timeout to fail by, for the same reason: a build that does not finish
+/// inside it is `Ok(None)` from [`Docker::build_bounded`], which is a sentence rather than a wedged session.
+pub const PROJECT_BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// `holosmith-proxy:<version>`: the image the machine's three proxies run, named from this binary.
 ///
@@ -507,6 +516,25 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// What one `docker build` is handed as its context.
+///
+/// Two shapes because the two things this tree builds are two different things: the three product images are an
+/// archive on stdin — the Dockerfile and the binary, embedded in this binary, with no directory on disk that holds a
+/// copy of either — and a project's image is a directory on disk, `<project root>`, which Docker filters by the
+/// project's own `.dockerignore` and reads `docker/Dockerfile` from (ADR-0123).
+///
+/// The shape decides three things at once, which is why it is one value: whether the child's stdin is a pipe or
+/// `/dev/null`, how long the build may take ([`BUILD_TIMEOUT`] or [`PROJECT_BUILD_TIMEOUT`]), and what a build that
+/// never finished is told it was building.
+#[derive(Debug, Clone, Copy)]
+pub enum Input<'a> {
+    /// A tar on stdin: `Dockerfile`, the binary, then [`Kind::context`]'s entries.
+    Archive(&'a [u8]),
+    /// A directory on disk, and the recipe inside it: Docker reads `Dockerfile` from the context's root and a
+    /// project's recipe is at `<project root>/docker/Dockerfile`, so the recipe is `-f`'s argument (ADR-0123).
+    Directory { recipe: &'a Path, context: &'a Path },
+}
+
 /// The child's answer: whether the build succeeded, and its combined output.
 ///
 /// Both halves are needed: a failure's sentence is parsed out of the output, and a success prints nothing worth
@@ -531,8 +559,23 @@ pub trait Images {
     /// `Ok(Some(empty))` for an image that carries no labels at all.
     fn labels(&self, image: &str) -> Result<Option<BTreeMap<String, String>>, String>;
 
-    /// `docker build -t <tag> --build-arg … -`, with `archive` on its stdin.
-    fn build(&self, tag: &str, archive: &[u8], args: &[String]) -> Result<Log, String>;
+    /// One `docker build` for `tag`, answering its combined output.
+    ///
+    /// `args` is the argument vector up to what the input itself contributes, `-t <tag>` included: an archive's is
+    /// [`build_arguments`]' — the labels' `--build-arg`s and a trailing `-`, which is the context on stdin — and a
+    /// directory's is [`build_head`]'s, with the path appended here, because a `Path` is not the `String` an argument
+    /// vector holds.
+    ///
+    /// `log` is where the build's whole output is kept when somebody will read it: `server deploy` keeps nothing,
+    /// and a session's lazy build keeps `<data>/images/<repository>.log`, because the sentence that build puts on the
+    /// row is a bounded tail.
+    fn build(
+        &self,
+        tag: &str,
+        input: Input<'_>,
+        args: &[String],
+        log: Option<&Path>,
+    ) -> Result<Log, String>;
 }
 
 impl Images for Docker {
@@ -554,16 +597,50 @@ impl Images for Docker {
             .map_err(|error| error.to_string())
     }
 
-    fn build(&self, tag: &str, archive: &[u8], args: &[String]) -> Result<Log, String> {
-        match Docker::build_bounded(self, args, archive, BUILD_TIMEOUT) {
+    fn build(
+        &self,
+        tag: &str,
+        input: Input<'_>,
+        args: &[String],
+        log: Option<&Path>,
+    ) -> Result<Log, String> {
+        let bound = match input {
+            Input::Archive(_) => BUILD_TIMEOUT,
+            Input::Directory { .. } => PROJECT_BUILD_TIMEOUT,
+        };
+        let (stdin, arguments) = match input {
+            Input::Archive(archive) => (Some(archive), args.to_vec()),
+            Input::Directory { recipe, context } => {
+                let mut arguments = args.to_vec();
+                arguments.push("-f".to_string());
+                arguments.push(recipe.to_string_lossy().into_owned());
+                arguments.push(context.to_string_lossy().into_owned());
+                (None, arguments)
+            }
+        };
+        match Docker::build_bounded(self, &arguments, stdin, log, bound) {
             Ok(Some(log)) => Ok(log),
-            Ok(None) => Err(format!(
-                "the build of {tag} did not finish within {}s and was killed: a first build installs pi, pulls \
-                 both bases, vendors the crate set and fetches the cross toolchain over the network, so this is a \
-                 machine that could not reach it rather than a Dockerfile that is wrong",
-                BUILD_TIMEOUT.as_secs()
-            )),
-            Err(error) => Err(error.to_string()),
+            // The two contexts do not fail the same way: the product images' first build installs pi, pulls both
+            // bases, vendors the crate set and fetches the cross toolchain over the network, and a project's builds
+            // whatever its author wrote. One sentence each, so an operator reading the row is told about the build
+            // that was actually running.
+            Ok(None) => Err(match input {
+                Input::Archive(_) => format!(
+                    "the build of {tag} did not finish within {}s and was killed: a first build installs pi, pulls \
+                     both bases, vendors the crate set and fetches the cross toolchain over the network, so this is a \
+                     machine that could not reach it rather than a Dockerfile that is wrong{}",
+                    bound.as_secs(),
+                    log_clause(log)
+                ),
+                Input::Directory { .. } => format!(
+                    "the build of {tag} did not finish within {}s and was killed: a project's first build installs \
+                     the toolchain its recipe names and fetches whatever that recipe fetches, so this is a recipe \
+                     that takes longer than one build may rather than a Dockerfile that is wrong{}",
+                    bound.as_secs(),
+                    log_clause(log)
+                ),
+            }),
+            Err(error) => Err(format!("{error}{}", log_clause(log))),
         }
     }
 }
@@ -677,7 +754,7 @@ fn write_octal(field: &mut [u8], value: u64) {
 /// rust stage is sent no argument at all, because a `--build-arg` a recipe does not declare is a BuildKit warning
 /// over nothing.
 pub fn build_arguments(tag: &str, expectation: &Expectation) -> Vec<String> {
-    let mut arguments = vec!["build".to_string(), "-t".to_string(), tag.to_string()];
+    let mut arguments = build_head(tag);
     for (key, value) in expectation.build_args() {
         arguments.push("--build-arg".to_string());
         arguments.push(format!("{key}={value}"));
@@ -688,6 +765,25 @@ pub fn build_arguments(tag: &str, expectation: &Expectation) -> Vec<String> {
     }
     arguments.push("-".to_string());
     arguments
+}
+
+/// `build -t <tag>`: the two arguments every `docker build` in this tree starts with.
+///
+/// One function because two contexts follow it — an archive's `--build-arg`s and a trailing `-`, and a project's
+/// directory — and a tag built with a different flag is a tag nothing finds afterwards.
+pub fn build_head(tag: &str) -> Vec<String> {
+    vec!["build".to_string(), "-t".to_string(), tag.to_string()]
+}
+
+/// The clause that names a build's whole log, when the build kept one, and nothing when it did not.
+///
+/// A failure's sentence carries the tail; the file carries the rest, and an operator who has to hunt for it has been
+/// told half of what happened.
+pub fn log_clause(log: Option<&Path>) -> String {
+    match log {
+        Some(path) => format!("; the whole build log is {}", path.display()),
+        None => String::new(),
+    }
 }
 
 /// The failing instruction and layer from a build's output, as one sentence.
@@ -1073,6 +1169,11 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 ///
 /// The sentence also carries a `; …` clause when a build's log carried a certificate warning ([`CERTIFICATE_CLAUSE`]):
 /// the sink is `install`'s, and a verb that passes [`crate::progress::Silent`] has no other way to say it (ADR-0116 D3).
+///
+/// **`log` is where each build's whole output is kept, when somebody will read it.** `server deploy` and a promotion
+/// keep nothing — their sentence is the whole of what they print — and a session's lazy build keeps
+/// `<data>/images/<repository>.log`, because the sentence it puts on the row is a bounded tail and an operator who has
+/// to hunt for the rest has been told half of what happened ([`log_clause`]).
 #[allow(clippy::too_many_arguments)]
 pub fn ensure(
     images: &dyn Images,
@@ -1081,6 +1182,7 @@ pub fn ensure(
     release: &VersionInfo,
     pending: &[(Kind, String)],
     label: &str,
+    log: Option<&Path>,
     progress: &mut dyn Progress,
 ) -> Result<String, BuildError> {
     if pending.is_empty() {
@@ -1099,7 +1201,7 @@ pub fn ensure(
         let archive = archive(kind.dockerfile(), kind.context(), binary)?;
         let arguments = build_arguments(&tag, &expectation);
         progress.note(label, &format!("building {tag}"));
-        let built = images.build(&tag, &archive, &arguments);
+        let built = images.build(&tag, Input::Archive(&archive), &arguments, log);
         // A daemon that could not run the build at all did not build the image either.
         let success = built.as_ref().is_ok_and(|log| log.success);
         // A build that survived a certificate it could not verify is a build an operator has not heard about: the
@@ -1122,7 +1224,7 @@ pub fn ensure(
                 text,
             } => {
                 return Err(BuildError {
-                    sentence: failure(&tag, &text),
+                    sentence: format!("{}{}", failure(&tag, &text), log_clause(log)),
                     fetch_did_not_answer: fetch_did_not_answer(&text),
                 });
             }
@@ -1296,7 +1398,13 @@ mod tests {
             Ok(None)
         }
 
-        fn build(&self, _tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+        fn build(
+            &self,
+            _tag: &str,
+            _input: Input<'_>,
+            _args: &[String],
+            _log: Option<&Path>,
+        ) -> Result<Log, String> {
             Ok(Log {
                 success: true,
                 text: self.log.clone(),
@@ -1355,6 +1463,7 @@ mod tests {
             &release,
             &pending,
             "images",
+            None,
             &mut sink,
         )
         .expect("a successful build is not an error");
@@ -1390,6 +1499,7 @@ mod tests {
                 &release,
                 &pending,
                 "images",
+                None,
                 &mut sink,
             )
             .expect("a successful build is not an error"),

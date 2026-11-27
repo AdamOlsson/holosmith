@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use holosmith::commands::install::{self, What};
@@ -287,7 +287,13 @@ impl images::Images for NoDaemon {
         Ok(None)
     }
 
-    fn build(&self, _tag: &str, _archive: &[u8], _args: &[String]) -> Result<images::Log, String> {
+    fn build(
+        &self,
+        _tag: &str,
+        _input: images::Input<'_>,
+        _args: &[String],
+        _log: Option<&Path>,
+    ) -> Result<images::Log, String> {
         Err("this machine has no daemon".to_string())
     }
 }

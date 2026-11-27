@@ -281,6 +281,14 @@ there, and that image is the **project's own**: a project with `<project root>/d
 compiler (ADR-0123). Nothing inside a session adds a toolchain to that list: an allow-list entry names a host, which is
 `docs/egress.md`'s subject, and no entry supplies a compiler or a package manager the image lacks.
 
+**Nothing builds that image ahead of time, so the container step builds what `docker run` needs** — the base first, the
+project's own tag after, one build at a time per machine, under lock files in `<data>/images/locks` (ADR-0124). The
+whole log is `<data>/images/<repository>.log` and the row's `status_reason` carries a bounded tail, so `building
+hs-foo:…` and then the failing `RUN` are both facts an operator reads in the app. `holosmith image build <project>` is
+that build on its own — it needs a daemon and it is idempotent on the tag's existence — and `image build --base`
+pre-warms the base. A build has the internet and the session it produces does not, which is why a project's `apt-get`
+belongs in its recipe.
+
 This repository is the project that needs a Rust toolchain, so its own image is `agent-image:<version>`, built from its
 own recipe at `crates/holosmith/images/agent.Dockerfile`: the pinned rustc, this tree's crate set vendored beside it and
 the web app's packages in its npm cache (ADR-0106). A machine whose projects are this tree names it in `base_image`, and

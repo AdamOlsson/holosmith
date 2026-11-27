@@ -103,11 +103,12 @@ projects root that does not exist has no projects and therefore no line — the 
 
 ## What is not measured
 
-- **A session running a project's image.** Nothing builds `hs-<project>:<digest>` yet: the build is its own change, so a
-  session on a project whose recipe is present and whose image is absent fails the container step at the pi-version
-  probe — `the image <image> could not say which pi it runs: <docker's words>`, the daemon's pull error inside it —
-  rather than starting. The `info` sentence above describes the behaviour that change gives it, and says "will be built" for
-  that reason. Every turn the gate measures runs the base image, because no gate project carries a recipe.
+- **A session running a project's image, before ADR-0124.** This decision named the image and built nothing: a session
+  on a project whose recipe was present and whose image was absent failed the container step at the pi-version probe —
+  `the image <image> could not say which pi it runs: <docker's words>`, the daemon's pull error inside it. **ADR-0124
+  closes that**: the container step builds what `docker run` needs, the base first and the project's own tag after,
+  under a per-image lock and a machine-wide one, and the `info` sentence above — "will be built on the first session" —
+  is now the behaviour rather than the plan.
 - **A stale copy.** The digest cannot see a `COPY`'d file move, by D2's design. A case that proved it would be a case
   about the excluded thing.
 - **The recipe's own correctness.** A Dockerfile that is a file but not a valid build is the daemon's to refuse, and

@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
-use super::{BackendError, Provisioned, SessionBackend, Step, TurnEnd};
+use super::{BackendError, Provisioned, SessionBackend, Step, StepNotes, TurnEnd};
 use crate::clock;
 use crate::events::{
     EventWriter, MESSAGE_DELTA, MESSAGE_END, NewEvent, TOOL_END, TOOL_START, TURN_END, TURN_START,
@@ -358,7 +358,12 @@ impl StubBackend {
 }
 
 impl SessionBackend for StubBackend {
-    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
+    async fn provision(
+        &self,
+        session: &Session,
+        step: Step,
+        _notes: Option<StepNotes>,
+    ) -> Result<Provisioned, BackendError> {
         // Recorded before the wait, so a test can observe a step in flight — and so the failure
         // is ordered after the delay a real step would have spent: a stub that failed instantly
         // would hide a provisioner that assumed the step had taken time.
@@ -585,7 +590,9 @@ mod tests {
         let session = session();
         let (_scratch, events) = crate::events::scratch_writer();
         for step in Step::ALL {
-            stub.provision(&session, step).await.expect("a step passes");
+            stub.provision(&session, step, None)
+                .await
+                .expect("a step passes");
             stub.undo(&session, step).await.expect("an undo passes");
         }
         stub.start_turn(&session, "fix the parser", &events)
@@ -712,18 +719,18 @@ mod tests {
     async fn the_step_it_was_told_to_fail_fails_and_the_others_do_not() {
         let stub = immediate().failing_at(Step::Container);
         let session = session();
-        stub.provision(&session, Step::Worktree)
+        stub.provision(&session, Step::Worktree, None)
             .await
             .expect("worktree is not the failing step");
         let error = stub
-            .provision(&session, Step::Container)
+            .provision(&session, Step::Container, None)
             .await
             .expect_err("container is the failing step");
         assert_eq!(
             error.to_string(),
             "the stub backend was told to fail at the container step"
         );
-        stub.provision(&session, Step::Pi)
+        stub.provision(&session, Step::Pi, None)
             .await
             .expect("pi is not the failing step");
         // The failure is a provisioning failure only: undo must still work, or the provisioner
@@ -743,7 +750,7 @@ mod tests {
             "serve's stub paces itself with DEFAULT_STEP_DELAY"
         );
         let started = std::time::Instant::now();
-        stub.provision(&session(), Step::Worktree)
+        stub.provision(&session(), Step::Worktree, None)
             .await
             .expect("a step passes");
         assert!(
@@ -758,7 +765,7 @@ mod tests {
         let stub = immediate();
         let handed_over = stub.clone();
         handed_over
-            .provision(&session(), Step::Worktree)
+            .provision(&session(), Step::Worktree, None)
             .await
             .expect("a step passes");
         assert_eq!(stub.calls(), [Call::Provision(Step::Worktree)]);

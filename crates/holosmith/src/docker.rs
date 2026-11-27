@@ -436,14 +436,18 @@ impl Docker {
             .map(|text| text.trim().to_string())
     }
 
-    /// Run one `docker build` with `archive` on its stdin under a bound, answering its combined output.
+    /// Run one `docker build` under a bound, answering its combined output.
+    ///
+    /// `input` is the context when the context is a tar on stdin, and `None` when the context is a directory the
+    /// argument vector already names; `log` is where the output is kept, when somebody will read it.
     pub(crate) fn build_bounded(
         &self,
         arguments: &[String],
-        archive: &[u8],
+        input: Option<&[u8]>,
+        log: Option<&std::path::Path>,
         bound: std::time::Duration,
     ) -> Result<Option<crate::images::Log>, DockerError> {
-        self.run_captured(arguments, Some(archive), bound)
+        self.run_captured(arguments, input, bound, log)
     }
 
     /// Run one `docker` child under a bound with its **output captured in a file** and, when it needs one, its input
@@ -456,9 +460,11 @@ impl Docker {
     ///   stops reading stdin cannot hold this call past its deadline: the poll below kills the child and the writer
     ///   dies on a closed pipe. A child that takes no input gets `/dev/null`, because a container that inherits
     ///   this process's stdin could consume a caller's pipe.
-    /// - **Its output is hundreds or thousands of lines.** stdout and stderr go to a **temporary file**, not to
-    ///   pipes: a pipe nobody drains fills at 64 KiB and the build deadlocks, and a `Command::output` that buffered
-    ///   them would hand back the same thing only after the build was over anyway.
+    /// - **Its output is hundreds or thousands of lines.** stdout and stderr go to a **file**, not to pipes: a pipe
+    ///   nobody drains fills at 64 KiB and the build deadlocks, and a `Command::output` that buffered them would
+    ///   hand back the same thing only after the build was over anyway. `log` names that file when it is one an
+    ///   operator will read — a session's image build keeps `<data>/images/<repository>.log` — and `None` makes it
+    ///   a scratch file in the temp directory that this call removes.
     /// - **A failed build is an answer, not an error.** So the status and the text come back together as a
     ///   [`crate::images::Log`], and `Ok(None)` means only "the build did not finish".
     pub(crate) fn run_captured(
@@ -466,9 +472,25 @@ impl Docker {
         arguments: &[String],
         input: Option<&[u8]>,
         bound: std::time::Duration,
+        log: Option<&std::path::Path>,
     ) -> Result<Option<crate::images::Log>, DockerError> {
         let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let path = capture_path();
+        // The scratch path is this call's to remove and a named log is not: `kept` is the one difference between
+        // "nobody reads this" and "an operator is told to".
+        let kept = log.is_some();
+        let path = log.map_or_else(capture_path, std::path::Path::to_path_buf);
+        if kept && let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                DockerError::new(
+                    &borrowed,
+                    format!(
+                        "the build's log directory {} could not be made ({error}): a failed build's sentence \
+                         names the log its whole output went to",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
         let capture = std::fs::File::create(&path).map_err(|error| {
             DockerError::new(
                 &borrowed,
@@ -547,7 +569,9 @@ impl Docker {
         let text = std::fs::read(&path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
-        let _ = std::fs::remove_file(&path);
+        if !kept {
+            let _ = std::fs::remove_file(&path);
+        }
         let Some(status) = finished else {
             return Ok(None);
         };

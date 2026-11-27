@@ -180,7 +180,13 @@ impl images::Images for Recorder {
         Ok(None)
     }
 
-    fn build(&self, tag: &str, _archive: &[u8], _args: &[String]) -> Result<Log, String> {
+    fn build(
+        &self,
+        tag: &str,
+        _input: images::Input<'_>,
+        _args: &[String],
+        _log: Option<&Path>,
+    ) -> Result<Log, String> {
         self.record(format!("build:{tag}"));
         Ok(Log {
             success: true,

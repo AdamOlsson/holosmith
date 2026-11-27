@@ -1854,8 +1854,10 @@ fn images_line(
         }
     };
     let label = DeployStep::Images.label();
+    // No log file: a deploy's sentence is the whole of what it prints, and a build here leaves nothing behind but
+    // the image it tagged.
     match images::ensure(
-        machine, &binary, &digest, &release, &pending, &label, progress,
+        machine, &binary, &digest, &release, &pending, &label, None, progress,
     ) {
         Ok(sentence) => (
             Line {

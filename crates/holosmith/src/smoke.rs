@@ -556,7 +556,7 @@ fn ensure_image(docker: &Docker, binary: &[u8], image: &str) -> Result<(), Strin
         "-".to_string(),
     ];
     let log = docker
-        .run_captured(&arguments, Some(&context), IMAGE_TIMEOUT)
+        .run_captured(&arguments, Some(&context), IMAGE_TIMEOUT, None)
         .map_err(|error| error.to_string())?;
     match log {
         None => Err(format!(

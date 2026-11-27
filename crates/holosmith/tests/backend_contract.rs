@@ -126,12 +126,12 @@ async fn the_stub_backend_passes_the_conformance_suite() {
     let worktree = fast_stub().failing_at(Step::Worktree);
     let failures = Failures {
         any: container
-            .provision(&session, Step::Container)
+            .provision(&session, Step::Container, None)
             .await
             .map(|_| ()),
         named: "container",
         worktree: worktree
-            .provision(&session, Step::Worktree)
+            .provision(&session, Step::Worktree, None)
             .await
             .map(|_| ()),
     };
@@ -144,7 +144,7 @@ async fn the_stub_backend_records_no_worktree() {
     // and a worktree under it would make every test that provisions need a repository (ADR-0015).
     let stub = fast_stub();
     assert_eq!(
-        stub.provision(&session(), Step::Worktree)
+        stub.provision(&session(), Step::Worktree, None)
             .await
             .expect("the stub provisions every step"),
         Provisioned::Nothing
@@ -164,9 +164,12 @@ async fn the_docker_backend_passes_the_conformance_suite() {
     ));
     let session = session();
     let failures = Failures {
-        any: docker.provision(&session, Step::Pi).await.map(|_| ()),
+        any: docker.provision(&session, Step::Pi, None).await.map(|_| ()),
         named: "pi",
-        worktree: docker.provision(&session, Step::Worktree).await.map(|_| ()),
+        worktree: docker
+            .provision(&session, Step::Worktree, None)
+            .await
+            .map(|_| ()),
     };
     conformance(&docker, "docker", failures).await;
 }

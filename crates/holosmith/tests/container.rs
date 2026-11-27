@@ -552,14 +552,14 @@ fn the_container_step_runs_a_limited_container_with_no_way_out() {
     runtime.block_on(async {
         assert_eq!(
             backend
-                .provision(&session, Step::Network)
+                .provision(&session, Step::Network, None)
                 .await
                 .expect("the network step works"),
             Provisioned::Nothing
         );
         assert_eq!(
             backend
-                .provision(&session, Step::Container)
+                .provision(&session, Step::Container, None)
                 .await
                 .expect("the container step works"),
             Provisioned::Nothing
@@ -703,11 +703,11 @@ fn runtime() -> tokio::runtime::Runtime {
 fn start(runtime: &tokio::runtime::Runtime, backend: &DockerBackend, session: &Session) {
     runtime.block_on(async {
         backend
-            .provision(session, Step::Network)
+            .provision(session, Step::Network, None)
             .await
             .expect("the network step works");
         backend
-            .provision(session, Step::Container)
+            .provision(session, Step::Container, None)
             .await
             .expect("the container step works");
     });
@@ -1030,7 +1030,7 @@ async fn two_starts_of_one_session_do_not_race() {
     rm_container(&container.name);
     docker.remove_network(&container.network);
     backend
-        .provision(&session(ID_RACE), Step::Network)
+        .provision(&session(ID_RACE), Step::Network, None)
         .await
         .expect("the network step works");
 
@@ -1040,7 +1040,9 @@ async fn two_starts_of_one_session_do_not_race() {
     for _ in 0..8 {
         let backend = backend.clone();
         handles.push(tokio::spawn(async move {
-            backend.provision(&session(ID_RACE), Step::Container).await
+            backend
+                .provision(&session(ID_RACE), Step::Container, None)
+                .await
         }));
     }
     let mut failures = Vec::new();

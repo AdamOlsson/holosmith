@@ -79,6 +79,18 @@ impl Serialize for Step {
     }
 }
 
+/// What a provisioning step says while it works, when somebody is listening.
+///
+/// [`crate::progress::Progress`]'s own trait over the session row rather than a terminal: the container step may have
+/// to build two images before `docker run`, and `building hs-foo:…` has to reach `GET /api/sessions` — a session that
+/// sits `starting` for six minutes with nothing on its row is the thing this exists to prevent
+/// ([`crate::imagebuild`]).
+///
+/// Boxed and owned because the step hands it to the worker that runs the build: a `&mut` borrow cannot outlive the
+/// call that made it, and a build is a subprocess that must not run on a `tokio` worker. `None` is "nobody is
+/// listening" — a resume, whose ladder has no row of its own to write, and a test that wants the step only.
+pub type StepNotes = Box<dyn crate::progress::Progress + Send>;
+
 /// Why a backend could not do something.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendError {
@@ -274,7 +286,16 @@ pub trait SessionBackend {
     /// Most steps record nothing and answer [`Provisioned::Nothing`]. The worktree step answers the path
     /// and the commit its branch starts from, because the provisioner is what writes a row (ADR-0019) —
     /// the backend has no `SessionRepository` and must not grow one.
-    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError>;
+    ///
+    /// `notes` is where a step says what it is doing while it takes minutes ([`StepNotes`]): the container step
+    /// builds any image `docker run` needs, and a step that said nothing would leave the row `starting` with no
+    /// sentence for as long as a build takes.
+    async fn provision(
+        &self,
+        session: &Session,
+        step: Step,
+        notes: Option<StepNotes>,
+    ) -> Result<Provisioned, BackendError>;
 
     /// Undo one completed provisioning step, leaving no partial resource behind.
     ///
@@ -415,10 +436,15 @@ impl Backends {
 }
 
 impl SessionBackend for Backends {
-    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
+    async fn provision(
+        &self,
+        session: &Session,
+        step: Step,
+        notes: Option<StepNotes>,
+    ) -> Result<Provisioned, BackendError> {
         match self {
-            Self::Stub(backend) => backend.provision(session, step).await,
-            Self::Docker(backend) => backend.provision(session, step).await,
+            Self::Stub(backend) => backend.provision(session, step, notes).await,
+            Self::Docker(backend) => backend.provision(session, step, notes).await,
         }
     }
 

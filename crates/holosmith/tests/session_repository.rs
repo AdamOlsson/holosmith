@@ -688,6 +688,57 @@ fn set_status_on_an_unknown_id_returns_none() {
 }
 
 #[test]
+fn set_reason_writes_only_while_the_row_is_starting() {
+    // A step's progress is the row's reason, and a step takes minutes: another writer can move the row under it —
+    // `pi_exit` to `stopped`, a crash to `error`, a delete to `deleting` — and the note that arrives afterwards, or
+    // the clear that follows it, must not land on the new state. `stopped · built hs-foo:…` would be a build's
+    // sentence where the exit's own reason belongs.
+    let dir = TempDir::new("set-reason");
+    let database = open(&dir);
+    let repository = database.sessions();
+    let created = repository
+        .create(&new_session(Some("set-reason")), NOW)
+        .expect("a session is creatable");
+    // While the row is `starting`, which is every step's state, the note lands.
+    repository
+        .set_reason(&created.id, Some("building hs-foo:1a2b"))
+        .expect("the note is writable");
+    let noted = repository
+        .get(&created.id)
+        .expect("the read succeeds")
+        .expect("the session exists");
+    assert_eq!(
+        noted.status_reason.as_deref(),
+        Some("building hs-foo:1a2b"),
+        "a step's note is not the row's reason"
+    );
+    assert_eq!(noted.status, Status::Starting, "a note is not a state");
+    // The other writer: the agent exited, so the row is stopped with its own reason.
+    repository
+        .set_status(&created.id, Status::Stopped, Some("pi_exit"), NOW + 30)
+        .expect("the update succeeds")
+        .expect("the session exists");
+    // The note that was in flight when it moved, and the clear a finished step would follow it with: neither is
+    // written, and neither is an error — the row is there, it is just no longer a step's to speak for.
+    repository
+        .set_reason(&created.id, Some("built hs-foo:1a2b"))
+        .expect("a note on a row that moved is not a failure");
+    repository
+        .set_reason(&created.id, None)
+        .expect("a clear on a row that moved is not a failure");
+    let stopped = repository
+        .get(&created.id)
+        .expect("the read succeeds")
+        .expect("the session exists");
+    assert_eq!(stopped.status, Status::Stopped);
+    assert_eq!(
+        stopped.status_reason.as_deref(),
+        Some("pi_exit"),
+        "a step's note or clear landed on a row that had left starting"
+    );
+}
+
+#[test]
 fn touch_moves_last_active_at_and_nothing_else() {
     // the turn runner touches at the prompt and again at the settle, and neither is a
     // state change, so the status write deliberately leaves the column alone and this is the only

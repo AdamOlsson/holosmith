@@ -177,6 +177,7 @@ fn main() -> ExitCode {
             }),
             HubAction::Host { action } => commands::hub::run_host(action, cli.config),
         },
+        Cmd::Image { action } => commands::image::run(action, cli.config),
         Cmd::Project { action } => commands::project::run(action, cli.config),
     }
 }

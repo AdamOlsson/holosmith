@@ -105,7 +105,7 @@ async fn the_worktree_step_makes_the_branch_and_names_the_commit_it_starts_from(
 
     let (path, base_commit, created) = made(
         backend
-            .provision(&session, Step::Worktree)
+            .provision(&session, Step::Worktree, None)
             .await
             .expect("the worktree step works on a repository"),
     );
@@ -152,7 +152,7 @@ async fn a_second_provision_adopts_the_worktree_and_keeps_the_base_the_row_has()
     let first = session("0123456789abcdef", None);
     let (path, base_commit, _) = made(
         backend
-            .provision(&first, Step::Worktree)
+            .provision(&first, Step::Worktree, None)
             .await
             .expect("the first provision works"),
     );
@@ -173,7 +173,7 @@ async fn a_second_provision_adopts_the_worktree_and_keeps_the_base_the_row_has()
     let resumed = session("0123456789abcdef", Some(&base_commit));
     let (again_path, again_base, created) = made(
         backend
-            .provision(&resumed, Step::Worktree)
+            .provision(&resumed, Step::Worktree, None)
             .await
             .expect("a provision over an existing worktree adopts it"),
     );
@@ -205,7 +205,7 @@ async fn a_session_whose_worktree_is_gone_is_attached_to_its_existing_branch() {
     let first = session("0123456789abcdef", None);
     let (path, base_commit, _) = made(
         backend
-            .provision(&first, Step::Worktree)
+            .provision(&first, Step::Worktree, None)
             .await
             .expect("the first provision works"),
     );
@@ -221,7 +221,7 @@ async fn a_session_whose_worktree_is_gone_is_attached_to_its_existing_branch() {
     let resumed = session("0123456789abcdef", Some(&base_commit));
     let (again_path, again_base, created) = made(
         backend
-            .provision(&resumed, Step::Worktree)
+            .provision(&resumed, Step::Worktree, None)
             .await
             .expect("a worktree is made again from the branch that survived"),
     );
@@ -283,7 +283,7 @@ async fn undo_removes_the_worktree_the_branch_and_the_registration() {
     let session = session("0123456789abcdef", None);
     let (path, _, _) = made(
         backend
-            .provision(&session, Step::Worktree)
+            .provision(&session, Step::Worktree, None)
             .await
             .expect("the worktree step works"),
     );
@@ -318,7 +318,7 @@ async fn deleting_a_session_removes_its_worktree_too() {
     let session = session("0123456789abcdef", None);
     let (path, _, _) = made(
         backend
-            .provision(&session, Step::Worktree)
+            .provision(&session, Step::Worktree, None)
             .await
             .expect("the worktree step works"),
     );
@@ -385,7 +385,7 @@ fn projects_on(dir: &TempDir, branch: &str) -> (PathBuf, PathBuf) {
 async fn provisioned_worktree(backend: &DockerBackend, session: &mut Session) -> (PathBuf, String) {
     let (path, base, _) = made(
         backend
-            .provision(session, Step::Worktree)
+            .provision(session, Step::Worktree, None)
             .await
             .expect("the worktree step works"),
     );
@@ -703,7 +703,7 @@ async fn a_project_that_is_not_a_repository_is_refused_with_its_path() {
     let backend = backend(&root);
 
     let error = backend
-        .provision(&session("0123456789abcdef", None), Step::Worktree)
+        .provision(&session("0123456789abcdef", None), Step::Worktree, None)
         .await
         .expect_err("there is no repository to branch from");
 

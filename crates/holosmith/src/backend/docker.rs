@@ -34,7 +34,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, TurnEnd};
+use super::{
+    BackendError, ExitWatcher, ProcessEnd, Provisioned, SessionBackend, Step, StepNotes, TurnEnd,
+};
 use crate::agent::{self, Agent, AgentError, Ended};
 use crate::config::LinearMcp;
 use crate::container::{
@@ -519,8 +521,12 @@ impl DockerBackend {
 
     /// The container itself, running pi (spec item 6).
     ///
-    /// Four things happen here, in this order, and each one is a refusal that must come before the next:
+    /// Five things happen here, in this order, and each one is a refusal that must come before the next:
     ///
+    /// 0. **The images `docker run` needs are built if they are absent** ([`crate::imagebuild`]): the base, and then
+    ///    the project's own tag. It is step zero because every clause below is about the image — the agent
+    ///    directory, the mounts, the version probe and the launch all belong to it — and a build that fails refuses
+    ///    here, before anything is made.
     /// 1. **The agent directory is made and seeded** (spec item 2). It is a mount's source, and
     ///    `docker run -v` creates a missing source as an empty root-owned directory (ADR-0035).
     /// 2. **The mounts are checked** for the same reason, over all five now.
@@ -530,11 +536,15 @@ impl DockerBackend {
     /// 4. **Any leftover container is removed and one attached `docker run` is spawned** (spec item 6).
     ///    Attached is what makes the container the agent: its stdin and stdout are pi's RPC channel and its
     ///    exit code is what [`crate::exit`] classifies.
-    async fn provision_container(&self, session: &Session) -> Result<Provisioned, BackendError> {
+    async fn provision_container(
+        &self,
+        session: &Session,
+        notes: Option<StepNotes>,
+    ) -> Result<Provisioned, BackendError> {
         // Serialised with a resume of the same session: both are "remove any leftover container, then start
         // one", and interleaving them is a name conflict neither caller could explain.
         let _start = self.start_lock(&session.id).await;
-        self.start_container(session)
+        self.start_container(session, notes)
             .await
             .map(|_| Provisioned::Nothing)
     }
@@ -546,12 +556,50 @@ impl DockerBackend {
     /// means a stopped container leaves no name behind, so the removal is for the case the flag cannot
     /// cover: a container the process lost track of — a crash, a `kill -9`, a session removed from the row
     /// while its container lived.
-    async fn start_container(&self, session: &Session) -> Result<(), BackendError> {
+    async fn start_container(
+        &self,
+        session: &Session,
+        notes: Option<StepNotes>,
+    ) -> Result<(), BackendError> {
         // The image is the project's, resolved here: a recipe that cannot become one is the create's
         // refusal, and a project that changed under a running session is refused with the same sentence.
         let container = self.container(session).map_err(|problem| {
             BackendError::failed(format!("the container step: {}", problem.sentence()))
         })?;
+        // **The images `docker run` needs, built if they are not there** ([`crate::imagebuild`]): the base first,
+        // the project's own tag after. It is before everything else in this step because everything else is about
+        // the image — the agent directory, the mounts and the launch all belong to it — and because the pi-version
+        // assertion below runs `docker run --entrypoint pi`, which for an absent image is a pull error rather than
+        // the build that would have made it. A build that fails leaves no image tagged and no container started.
+        let repository = repository_of(&self.settings.projects_root, &session.project);
+        let settings = self.settings.clone();
+        let project = session.project.clone();
+        let mut notes = notes;
+        tokio::task::spawn_blocking(move || {
+            let docker = settings.docker();
+            // The box is unwrapped here, which is what it was boxed for: a `&mut` sink cannot outlive the call that
+            // made it, and the build is a subprocess that must not run on a `tokio` worker.
+            let mut silent = crate::progress::Silent;
+            let sink: &mut dyn crate::progress::Progress = match notes.as_mut() {
+                Some(notes) => notes.as_mut(),
+                None => &mut silent,
+            };
+            crate::imagebuild::ensure(
+                &docker,
+                &settings,
+                &project,
+                &repository,
+                crate::imagebuild::Currency::Missing,
+                sink,
+            )
+        })
+        .await
+        .map_err(|error| {
+            BackendError::failed(format!(
+                "the container step: the images did not finish being built ({error})"
+            ))
+        })?
+        .map_err(|error| BackendError::failed(format!("the container step: {}", error.sentence)))?;
         let home = container.home.clone();
         agent::ensure_home(&home, session).map_err(|error| {
             BackendError::failed(format!(
@@ -864,11 +912,17 @@ impl SessionBackend for DockerBackend {
     /// The row's `status_reason` is where an operator reads a failure, so each step's refusal names the
     /// step and what was wrong with it. The four arms are written out rather than routed through a helper:
     /// a helper would need an arm for the steps that cannot fail this way, and those arms could never run.
-    async fn provision(&self, session: &Session, step: Step) -> Result<Provisioned, BackendError> {
+    async fn provision(
+        &self,
+        session: &Session,
+        step: Step,
+        notes: Option<StepNotes>,
+    ) -> Result<Provisioned, BackendError> {
         match step {
             Step::Worktree => self.provision_worktree(session).await,
             Step::Network => self.provision_network(session).await,
-            Step::Container => self.provision_container(session).await,
+            Step::Container => self.provision_container(session, notes).await,
+            // The pi step has nothing slow to announce: the container step already built whatever image it runs.
             Step::Pi => self.provision_agent(session).await,
         }
     }
@@ -1055,7 +1109,10 @@ impl SessionBackend for DockerBackend {
         ] {
             self.apply_proxy(session, proxy).await;
         }
-        self.start_container(session).await
+        // Nobody is listening on a resume: its ladder has no row of its own to write, and the images it needs are the
+        // ones the create built. It still ensures them, because a machine whose tags a `docker rmi` removed is
+        // exactly the machine this step exists to repair.
+        self.start_container(session, None).await
     }
 
     /// Remove everything the session owns: the container, its network, the worktree and its branch, and the
@@ -1301,7 +1358,7 @@ mod tests {
         // handshake, and a handshake with no process would be the worst answer of all — a session marked
         // `idle` that accepts a prompt nobody can answer. So the step fails, and it says which step.
         let error = backend()
-            .provision(&session(), Step::Pi)
+            .provision(&session(), Step::Pi, None)
             .await
             .expect_err("there is no agent process for a session nothing launched");
         let sentence = error.to_string();

@@ -156,7 +156,13 @@ impl images::Images for Recorder {
         Ok(None)
     }
 
-    fn build(&self, _image: &str, _archive: &[u8], _arguments: &[String]) -> Result<Log, String> {
+    fn build(
+        &self,
+        _image: &str,
+        _input: images::Input<'_>,
+        _arguments: &[String],
+        _log: Option<&Path>,
+    ) -> Result<Log, String> {
         self.record("build");
         Err("a rollback builds no image".to_string())
     }

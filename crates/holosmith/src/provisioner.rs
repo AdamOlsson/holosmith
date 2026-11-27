@@ -21,15 +21,17 @@
 //!   (`ProvisioningFailed`) and emits the four step reports itself, because a step beginning is
 //!   not a state change: its payload says `from: starting, to: starting, step: …`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::task::JoinHandle;
 
-use crate::backend::{Backends, ProcessEnd, Provisioned, SessionBackend, Step};
+use crate::backend::{Backends, ProcessEnd, Provisioned, SessionBackend, Step, StepNotes};
 use crate::clock;
 use crate::db::Database;
 use crate::events::{EventWriter, NewEvent};
 use crate::exit::Exits;
+use crate::progress::Progress;
 use crate::sessions::state::{SESSION_STATUS, SessionStatus, Transitioner, Trigger};
 use crate::sessions::{Session, Status};
 
@@ -110,8 +112,21 @@ impl Provisioner {
                 return;
             }
             self.announce(&session, step).await;
-            match self.backend.provision(&session, step).await {
+            // What the step says while it works lands on the row, which is what `GET /api/sessions` and the app's
+            // badge read: a container step that has to build two images takes minutes, and a `starting` row with no
+            // sentence is a session that looks wedged. `noted` is how the row is put back afterwards — only a step
+            // that said something has something to clear.
+            let noted = Arc::new(AtomicBool::new(false));
+            let notes = Some(Box::new(OnRow {
+                database: Arc::clone(&self.database),
+                session_id: session.id.clone(),
+                noted: Arc::clone(&noted),
+            }) as StepNotes);
+            match self.backend.provision(&session, step, notes).await {
                 Ok(provisioned) => {
+                    if noted.load(Ordering::Relaxed) {
+                        self.clear_reason(&session);
+                    }
                     // Only what this provision made is this provision's to take back: a worktree step that
                     // adopted the session's existing worktree leaves it (and the commits on it) alone when
                     // a later step fails. See `Provisioned::undoable`.
@@ -206,6 +221,23 @@ impl Provisioner {
                 session = %session.id,
                 %error,
                 "the worktree step's record was not written to the row"
+            );
+        }
+    }
+
+    /// Put the row's reason back once a step that wrote one has finished.
+    ///
+    /// A failed write is logged and provisioning carries on, for [`Self::record`]'s reason: the step succeeded either
+    /// way, and a reason left behind is a stale sentence on a row that is about to move — which the next transition
+    /// overwrites anyway.
+    fn clear_reason(&self, session: &Session) {
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = database.sessions().set_reason(&session.id, None) {
+            tracing::warn!(
+                target: "holosmith::provisioner",
+                session = %session.id,
+                %error,
+                "the row's reason was not cleared after the step that wrote it"
             );
         }
     }
@@ -335,9 +367,123 @@ impl Provisioner {
     }
 }
 
+/// A step's progress sink, written where the operator reads it: the row's `status_reason`.
+///
+/// [`Progress`]'s two methods take a label and a phrase, and this sink drops the label: a deploy's label is its
+/// report's step number, and a session has no report — the row is the report. A write that fails is logged rather than
+/// raised, because a sink is an observer (the trait's own rule) and a build that is running must not be stopped by a
+/// row that could not say so.
+///
+/// `noted` is shared with the provisioner, which is what puts the reason back when the step is over: the box is moved
+/// into the step, so a flag inside it could not be read afterwards.
+struct OnRow {
+    database: Arc<Mutex<Database>>,
+    session_id: String,
+    noted: Arc<AtomicBool>,
+}
+
+impl Progress for OnRow {
+    fn note(&mut self, _label: &str, phrase: &str) {
+        self.noted.store(true, Ordering::Relaxed);
+        let database = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = database
+            .sessions()
+            .set_reason(&self.session_id, Some(phrase))
+        {
+            tracing::warn!(
+                target: "holosmith::provisioner",
+                session = %self.session_id,
+                %error,
+                "a step's progress was not written to the row"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::OpenOptions;
+    use crate::sessions::NewSession;
+
+    #[test]
+    fn a_steps_note_lands_on_the_rows_reason_and_moves_no_state() {
+        // The sink is what makes a minutes-long step legible, and this is the layer that can fail for it: the write,
+        // and the status the write must not touch. A `starting` row that said `building hs-foo:…` is the whole of
+        // what an operator sees while a build runs, and `GET /api/sessions` is where they see it.
+        let directory = crate::sql::guard::TempDir::new("on-row");
+        let database = Arc::new(Mutex::new(
+            Database::open(
+                &directory.path().join("app.db"),
+                OpenOptions::default(),
+                clock::unix_now(),
+            )
+            .expect("a database opens"),
+        ));
+        let session = database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sessions()
+            .create(
+                &NewSession {
+                    project: "holosmith".to_string(),
+                    model: "claude".to_string(),
+                    thinking: "high".to_string(),
+                    network: false,
+                    client_key: None,
+                    base_commit: None,
+                },
+                clock::unix_now(),
+            )
+            .expect("a session is creatable");
+        let noted = Arc::new(AtomicBool::new(false));
+        let mut sink = OnRow {
+            database: Arc::clone(&database),
+            session_id: session.id.clone(),
+            noted: Arc::clone(&noted),
+        };
+        // The label is a deploy's and this sink drops it: the row's reason is the whole line.
+        sink.note("image", "building hs-foo:1a2b");
+        assert!(
+            noted.load(Ordering::Relaxed),
+            "the sink did not record that it wrote a reason"
+        );
+        let read = database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sessions()
+            .get(&session.id)
+            .expect("the row reads")
+            .expect("the row is there");
+        assert_eq!(
+            read.status_reason.as_deref(),
+            Some("building hs-foo:1a2b"),
+            "the step's note is not the row's reason"
+        );
+        assert_eq!(
+            read.status,
+            Status::Starting,
+            "a step's note moved the session's state"
+        );
+        // And the provisioner's clear is the same column: the sentence is the step's, not the row's for ever.
+        database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sessions()
+            .set_reason(&session.id, None)
+            .expect("the reason clears");
+        assert_eq!(
+            database
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .sessions()
+                .get(&session.id)
+                .expect("the row reads")
+                .expect("the row is there")
+                .status_reason,
+            None
+        );
+    }
 
     #[test]
     fn the_provisioner_reports_the_state_machines_event_type() {

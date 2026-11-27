@@ -58,7 +58,10 @@ Internet-access toggle changes which hosts a session reaches, never what it comp
 image a session's container runs is **its project's**: `hs-<project>:<digest>` when the project carries a recipe at
 `<project root>/docker/Dockerfile`, and `base_image` when it does not — the generic `holosmith-base:<version>` by
 default, which carries pi, git, node and certificates and no compiler. So a project that needs a toolchain gets it in
-its own recipe, which its sessions' image is built from ([configuration](config.md), ADR-0123).
+its own recipe, which its sessions' image is built from — on the first session that needs it, the base image first and
+the project's tag after, one build at a time per machine, with the whole log under `<data>/images` and
+`holosmith image build` for a machine that would rather build it before somebody's first turn
+([configuration](config.md), ADR-0123, ADR-0124).
 
 **Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes. A release
 artifact is built by the tree's own `scripts/build.sh`, which leaves `dist/<triple>/holosmith` and its digest beside it;
