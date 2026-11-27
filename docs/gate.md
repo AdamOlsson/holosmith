@@ -4,10 +4,10 @@ What `scripts/verify.sh` measures, in the order it measures it, and what each pi
 [Back to README](../README.md). The gate's rules and tiers are in [AGENTS.md](../AGENTS.md); this page is the map of
 what it runs.
 
-The numbers below are wall-clock from one run on the development host (8 cores, warm `target/`, both product images
+The numbers below are wall-clock from one run on the development host (8 cores, warm `target/`, the product images
 already built) at commit `7d7bf08`, 2026-11-25, less the cost of a case the tree no longer runs. They are one machine's,
 so read the shape: which item is expensive, and why. A cold worktree with an empty `target/` adds the compile; a machine
-rebuilding `agent-image` adds the image build.
+rebuilding `agent-image`, this repository's own image, adds the image build.
 
 ## Three tiers, one set of facts
 
@@ -16,16 +16,16 @@ rebuilding `agent-image` adds the image build.
 | worker | `scripts/gate-quick.sh <binary>...` | an agent's own turn | `fmt`, `clippy`, `cargo test --lib`, then only the integration binaries it was named |
 | proof | `scripts/verify.sh` | the parent, at the end | the whole thing below, including the artifact |
 
-`scripts/verify-in-container.sh` runs the *same* gate in `agent-image` on the host's daemon; every argument and exit
-status is `verify.sh`'s. `verify.sh --no-build` skips the two artifact phases (the artifact must already be in
-`dist/`), `--keep` keeps the work dir of a green run.
+`scripts/verify-in-container.sh` runs the *same* gate inside `agent-image`, the image this repository builds for itself,
+on the host's daemon; every argument and exit status is `verify.sh`'s. `verify.sh --no-build` skips the two artifact
+phases (the artifact must already be in `dist/`), `--keep` keeps the work dir of a green run.
 
 ## Before the first phase
 
 | Item | Cost | What it is |
 | --- | --- | --- |
 | cleanup + claim (`scripts/gate-cleanup.sh`) | under 1 s | kills what a *killed* run left behind, then writes `target/verify-run-<pid>/owner`, the marker every child of this run carries |
-| `scripts/check-crate-set.sh` | under 1 s | is the agent image vendored from this `Cargo.lock`? **exit 3** and one sentence when it is not — a stale image, not a code fix |
+| `scripts/check-crate-set.sh` | under 1 s | is this repository's image vendored from this `Cargo.lock`? **exit 3** and one sentence when it is not — a stale image, not a code fix |
 
 Both run ahead of the phases, and neither is counted as one.
 
@@ -78,8 +78,8 @@ names the check behind every verdict.
 
 | Case | Cost | Why |
 | --- | --- | --- |
-| `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, then `cargo build --locked`, `clippy`, `test --no-run` and `npm ci`/`npm test` inside it under `--network none` |
-| `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` and `agent-image`; the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
+| `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, the third product image, then `cargo build --locked`, `fmt --check`, `clippy`, `test` and `npm ci` inside it under `--network none` |
+| `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` (the generic session image) and `agent-image` (this repository's own); the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
 | `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on the musl artifact inside the container |
 | `case_idle_stop` | 66 s | `idle_stop_min` is whole minutes, so the sweeper is measured at its one-minute floor rather than behind a knob |
 | `case_web_update` | 30 s | a promotion started from the app, polled over its socket |
@@ -92,6 +92,14 @@ names the check behind every verdict.
 
 Everything else is at or under 7 s, and **68 of the 109 cases measured here are at or under 1 s** — they are HTTP and
 file facts about an artifact that is already running.
+
+The two cases above that copy this tree into a container are the only place in the gate where a session does its own
+build, and they are expensive because nothing is fetched there: every crate and every npm package comes from the
+image a session in this repository would run. That is the rule the arrangement rests on — a session runs what its
+image installed and cached when the image was built, and an allow-list entry is a host, not a compiler — so what a
+session can build with is a property of the image it was started from. `case_agent_toolchain` and
+`case_agent_offline_build` run inside `agent-image`, the image a machine whose projects are this tree names in
+`base_image`, and `case_server_images` is where that image is built, from the recipe embedded in the artifact.
 
 ## What a case needs, and what a SKIP means
 
