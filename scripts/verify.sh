@@ -657,6 +657,9 @@ serve_cases=(
   case_disk_quota
   case_image_fetch
   case_server_images
+  case_project_image
+  case_project_image_failure
+  case_base_image_lazy
   case_agent_toolchain
   case_agent_offline_build
   case_smoke
@@ -12129,6 +12132,499 @@ case_server_images() {
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
   timeout 60 docker rm -f "hs_images_egress_$$" "hs_images_key_$$" hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
+  rm -rf "$root"
+}
+
+# The tag's name is a digest and nothing else's, so the case reads it back rather than composing it: `projectimage`
+# is the one thing that may compose `hs-<project>:<digest>`, and a case that spelled it itself would be a second
+# spelling of the rule.
+project_image_tag() {
+  docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+    sed -n 's/^\(hs-recipe:[0-9a-f]*\)$/\1/p' | head -1
+}
+
+# The image a project's sessions run, built by the first session that needs it (ADR-0124).
+#
+# The recipe is two lines over the base `case_server_images` built and left in place, so what this case costs is one
+# layer and one container start. Four claims, and each is the one a Rust test cannot make — they are facts about a real
+# `docker build`:
+#
+#   built     the first create's container step built the base **and then** `hs-<project>:<digest>`, both before
+#             `docker run`: `holosmith-base` is removed first and asserted absent, the row reached `idle` — which is
+#             only possible from an image that existed — and both logs are under `<data>/images`. That the project's
+#             build succeeded at all is the order: its recipe is `FROM holosmith-base`, so a project image built before
+#             the base is not a thing that can happen.
+#   again     a second create of the same project does not rebuild it. Measured by the image's `Created`, and with
+#             teeth: the case rewrites a file the recipe `COPY`s and the digest cannot see (ADR-0123's excluded case),
+#             so a rebuild would produce a different image and a later `Created`.
+#   locked    the tag is removed, two creates are issued back to back with neither awaited, and exactly **one**
+#             `docker build` of the project's image runs — counted through a `docker` stand-in on `PATH`, because a
+#             `Created` comparison cannot tell one build from two. The count alone is the machine, though, not the
+#             project: the machine's lock serialises the two creates whether or not the project has one, and the second
+#             create's existence check is inside that lock either way. What the project's own lock adds is the file, so
+#             the assertion that fails without it is the stand-in's second column — `<data>/images/locks/hs-recipe.lock`
+#             held at the moment the build was spawned, which is `Lock::acquire` in `project_image` and nothing else.
+#             Both sessions reach `idle` and both containers run the one image that build tagged.
+#   forced    `holosmith image build <project>` is idempotent on the tag's existence and `--force` rebuilds it, measured
+#             by `Created` in both directions. This is the one way to rebuild a tag the digest says is current — and
+#             the verb is handed a config with `data_root` in it, so the log its own build keeps is asserted under
+#             `$data/images` rather than the machine's real data root.
+#
+# It leaves no image behind: the tag is removed at the end, and the base is `case_server_images`'s to keep.
+#
+case_project_image() {
+  local name=case_project_image root="$repo_root/target/verify-project-image-$$"
+  local projects="$root/projects" repo="$root/projects/recipe" data="$root/data"
+  local version base first second third fourth fifth created again forced body status image image_id
+  local plain which id real saved_path builds
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/image_cli.rs covers the verb'"'"'s refusals)\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  base="holosmith-base:$version"
+  [ -n "$version" ] || fail "$name/version" "the artifact's version report is incomplete: $plain"
+  if ! docker image inspect "$base" >/dev/null 2>&1; then
+    printf 'SKIP %s: no %s (case_server_images builds it and runs first)\n' "$name" "$base"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  # The absent base is this case's first half: the container step asks about it before it asks about the project's own
+  # tag, and a project's recipe is `FROM` it. The layer cache stays, so the rebuild answers every RUN `CACHED`.
+  timeout 120 docker image rm -f "$base" >/dev/null 2>&1 || true
+  if docker image inspect "$base" >/dev/null 2>&1; then
+    fail "$name/absent_base" "$base survived its removal, so the rebuild below would not be measured"
+  fi
+  assertions=$((assertions + 1))
+  mkdir -p "$repo/docker" || fail "$name/mkdir" "could not create $repo/docker"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  # The context is the project root, not a worktree (ADR-0123), so `stamp` is copied from the checkout and an
+  # uncommitted edit to it is what a second build would see.
+  printf 'one\n' >"$repo/stamp"
+  printf 'FROM %s\nCOPY stamp /opt/stamp\n' "$base" >"$repo/docker/Dockerfile"
+  git -C "$repo" add . || fail "$name/git" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    -m "the project's recipe" || fail "$name/git" "git commit did not work in $repo"
+  printf 'owner = "%s"\nmax_live_sessions = 3\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$data" "$base" >"$WORK/config-project-image.toml"
+
+  # The stand-in `docker` below counts builds and reads the lock, so it has to be on the boot's `PATH` and not only on
+  # this case's: it `exec`s the machine's own docker with the same argv, which is what makes everything else here real.
+  # The three facts it appends are a file's — a build's tag and whether that project's lock file was held when the
+  # daemon was asked — because `Created` cannot tell one build from two and nothing reads a lock but its holder.
+  real="$(command -v docker)"
+  mkdir -p "$root/bin" || fail "$name/mkdir" "could not create $root/bin"
+  cat >"$root/bin/docker" <<'SHIM'
+#!/bin/sh
+if [ "${1:-}" = "-H" ]; then shift 2; fi
+if [ "${1:-}" = "build" ] && [ "${2:-}" = "-t" ]; then
+  if [ -f "$HS_IMAGE_LOCK" ]; then held=held; else held=absent; fi
+  printf '%s %s\n' "$3" "$held" >>"$HS_IMAGE_BUILD_LOG"
+fi
+exec "$HS_IMAGE_REAL_DOCKER" "$@"
+SHIM
+  chmod 0755 "$root/bin/docker" || fail "$name/mkdir" "could not make $root/bin/docker executable"
+  saved_path="$PATH"
+  export PATH="$root/bin:$PATH"
+  export HS_IMAGE_REAL_DOCKER="$real"
+  export HS_IMAGE_BUILD_LOG="$root/builds.log"
+  export HS_IMAGE_LOCK="$data/images/locks/hs-recipe.lock"
+  start_serve "$WORK/config-project-image.toml" "$data"
+
+  fetch_body "${name}_create1" POST /api/sessions \
+    '{"project":"recipe","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-project-image-1" ||
+    fail "${name}_create1/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create1" "$(answer "${name}_create1")" 202
+  body="$(cat "$WORK/responses/${name}_create1.body")"
+  first="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$first" ] || fail "${name}_create1/id" "the response names no id: $body"
+  docker_session_id="$first"
+  wait_for_idle_docker "${name}_idle1" "$first"
+  # The image exists, and its name is the repository the case looked for: an `hs-recipe` with no digest would mean
+  # `projectimage` composed something else.
+  image="$(project_image_tag)"
+  [ -n "$image" ] ||
+    fail "$name/tag" "no hs-recipe image was built: $(docker image ls --format '{{.Repository}}:{{.Tag}}' | head -20)"
+  assertions=$((assertions + 1))
+  # The base is back, built by the same step and before the project's image: one log each, and the base's is what
+  # proves the order the decision names rather than a machine that happened to have it.
+  docker image inspect "$base" >/dev/null 2>&1 ||
+    fail "$name/base" "$base was not rebuilt before the project's image"
+  assertions=$((assertions + 1))
+  # The whole log is where the decision says, and it is the file the failure's sentence names: its presence is what
+  # proves the container step built this image rather than finding it.
+  for log in holosmith-base hs-recipe; do
+    [ -f "$data/images/$log.log" ] ||
+      fail "$name/log" "no $data/images/$log.log: the build kept no log"
+    assertions=$((assertions + 1))
+  done
+  created="$(docker image inspect --format '{{.Created}}' "$image" 2>/dev/null)"
+  [ -n "$created" ] || fail "$name/inspect" "$image could not be inspected"
+  image_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"
+
+  # A file the recipe copies and the digest cannot see: a rebuild would make a different image, so `Created` below is
+  # a measurement rather than a coincidence.
+  printf 'two\n' >"$repo/stamp"
+
+  # Two more creates with the tag already there: nothing is rebuilt, and both containers run the image the first
+  # build tagged. This is the free half of "a second create asks the tag and finds it".
+  for which in 2 3; do
+    fetch_body "${name}_create$which" POST /api/sessions \
+      '{"project":"recipe","model":"claude-sonnet-4.5","thinking":"high"}' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-project-image-$which" ||
+      fail "${name}_create$which/no_answer" "POST /api/sessions did not answer"
+    expect_status "${name}_create$which" "$(answer "${name}_create$which")" 202
+    body="$(cat "$WORK/responses/${name}_create$which.body")"
+    id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+    [ -n "$id" ] || fail "${name}_create$which/id" "the response names no id: $body"
+    case "$which" in
+      2) second="$id" ; docker_second_session_id="$id" ;;
+      3) third="$id" ;;
+    esac
+  done
+  wait_for_idle_docker "${name}_idle2" "$second"
+  wait_for_idle_docker "${name}_idle3" "$third"
+  again="$(docker image inspect --format '{{.Created}}' "$(project_image_tag)" 2>/dev/null)"
+  [ "$again" = "$created" ] ||
+    fail "$name/rebuild" "the tag was rebuilt by a later create: $created then $again"
+  assertions=$((assertions + 1))
+  for id in "$first" "$second"; do
+    [ "$(docker inspect --format '{{.Image}}' "s_$id" 2>/dev/null)" = "$image_id" ] ||
+      fail "$name/same_image" "session $id is not running the image the build tagged"
+    assertions=$((assertions + 1))
+  done
+
+  # The lock, which is the one acceptance no assertion above can fail: with the tag there, every create is a bare
+  # existence check and nothing contends. So the tag is removed — after the three containers holding it are gone,
+  # because a tag a live container uses cannot be deleted — and two creates are issued back to back with neither
+  # awaited, so the second meets the first mid-build.
+  remove_session "${name}_delete1" "$first" force
+  remove_session "${name}_delete2" "$second" force
+  remove_session "${name}_delete3" "$third" force
+  : >"$root/builds.log"
+  timeout 120 docker image rm -f "$(project_image_tag)" >/dev/null 2>&1 || true
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    fail "$name/lock/absent" "$image survived its removal, so the two creates below would build nothing"
+  fi
+  assertions=$((assertions + 1))
+  for which in 4 5; do
+    fetch_body "${name}_create$which" POST /api/sessions \
+      '{"project":"recipe","model":"claude-sonnet-4.5","thinking":"high"}' \
+      "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+      "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-project-image-$which" ||
+      fail "${name}_create$which/no_answer" "POST /api/sessions did not answer"
+    expect_status "${name}_create$which" "$(answer "${name}_create$which")" 202
+    body="$(cat "$WORK/responses/${name}_create$which.body")"
+    id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+    [ -n "$id" ] || fail "${name}_create$which/id" "the response names no id: $body"
+    case "$which" in
+      4) fourth="$id" ; docker_session_id="$id" ;;
+      5) fifth="$id" ; docker_second_session_id="$id" ;;
+    esac
+  done
+  wait_for_idle_docker "${name}_idle4" "$fourth"
+  wait_for_idle_docker "${name}_idle5" "$fifth"
+  # One build, from the stand-in's first column: two would mean both creates met an absent tag and neither found the
+  # other's build. This is the machine's fact — the machine's lock serialises the two creates either way.
+  builds="$(grep -c '^hs-recipe:' "$root/builds.log" 2>/dev/null || true)"
+  [ "$builds" = "1" ] ||
+    fail "$name/lock/builds" "the two creates ran $builds docker builds of hs-recipe, not one: $(cat "$root/builds.log")"
+  assertions=$((assertions + 1))
+  # And it ran with the project's lock held, which is the one assertion here that fails when `project_image` stops
+  # taking it: the machine's lock gives one build and one image id whatever the project's lock does. The stand-in
+  # answers at the moment `docker build` was spawned, and the holder's `Drop` is later still.
+  grep -q '^hs-recipe:[0-9a-f]* held$' "$root/builds.log" ||
+    fail "$name/lock/held" \
+      "the build ran without $HS_IMAGE_LOCK held, so the per-project lock was not taken: $(cat "$root/builds.log")"
+  assertions=$((assertions + 1))
+  # Both sessions run the one image that build tagged.
+  image_id="$(docker image inspect --format '{{.Id}}' "$(project_image_tag)" 2>/dev/null)"
+  [ -n "$image_id" ] || fail "$name/lock/inspect" "the rebuild left no $image to inspect"
+  for id in "$fourth" "$fifth"; do
+    [ "$(docker inspect --format '{{.Image}}' "s_$id" 2>/dev/null)" = "$image_id" ] ||
+      fail "$name/lock/same_image" "session $id is not running the image the one build tagged"
+    assertions=$((assertions + 1))
+  done
+  # The tag was rebuilt above, so the `Created` the verb's idempotency is compared against is that build's.
+  created="$(docker image inspect --format '{{.Created}}' "$(project_image_tag)" 2>/dev/null)"
+  [ -n "$created" ] || fail "$name/inspect" "$(project_image_tag) could not be inspected after its rebuild"
+
+  # The verb: idempotent on the tag's existence, and `--force` the one way to rebuild it. The log is removed first and
+  # asserted back under `$data/images`, which is what proves the verb took its data root from the config it was handed:
+  # without `data_root` in that file it would lock and log under the machine's real data root instead.
+  rm -f "$data/images/hs-recipe.log"
+  status=0
+  "$artifact" image build recipe --config "$WORK/config-project-image.toml" \
+    >"$WORK/$name.verb.out" 2>"$WORK/$name.verb.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/verb/exit" "image build exited $status: $(cat "$WORK/$name.verb.err")"
+  assertions=$((assertions + 1))
+  grep -q 'already there' "$WORK/$name.verb.out" ||
+    fail "$name/verb/idempotent" "image build did not say the tag was already there: $(cat "$WORK/$name.verb.out")"
+  assertions=$((assertions + 1))
+  [ "$(docker image inspect --format '{{.Created}}' "$(project_image_tag)" 2>/dev/null)" = "$created" ] ||
+    fail "$name/verb/rebuilt" "image build rebuilt a tag the digest says is current"
+  assertions=$((assertions + 1))
+  status=0
+  "$artifact" image build recipe --force --config "$WORK/config-project-image.toml" \
+    >"$WORK/$name.force.out" 2>"$WORK/$name.force.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/force/exit" "image build --force exited $status: $(cat "$WORK/$name.force.err")"
+  grep -q '^built hs-recipe:' "$WORK/$name.force.out" ||
+    fail "$name/force/sentence" "--force did not build the project's image: $(cat "$WORK/$name.force.out")"
+  assertions=$((assertions + 1))
+  [ -f "$data/images/hs-recipe.log" ] ||
+    fail "$name/verb/log" \
+      "the verb's build kept no log under $data/images, so it took its data root from somewhere other than the config"
+  assertions=$((assertions + 1))
+  forced="$(docker image inspect --format '{{.Created}}' "$(project_image_tag)" 2>/dev/null)"
+  [ "$forced" != "$created" ] ||
+    fail "$name/force/rebuilt" "--force rebuilt nothing: the image is still $created"
+  assertions=$((assertions + 1))
+
+  remove_session "${name}_delete4" "$fourth" force
+  remove_session "${name}_delete5" "$fifth" force
+  # The tag goes once its containers are gone, so a later run of this case measures its own build and the machine does
+  # not accumulate one image per gate run.
+  timeout 120 docker image rm -f "$(project_image_tag)" >/dev/null 2>&1 || true
+  docker_session_id=""
+  docker_second_session_id=""
+  # The machine as it was found: its own `docker` first again, and the stand-in's variables gone, because a case after
+  # this one boots the same shell.
+  export PATH="$saved_path"
+  unset HS_IMAGE_REAL_DOCKER HS_IMAGE_BUILD_LOG HS_IMAGE_LOCK
+  rm -rf "$root"
+}
+
+# A recipe that does not build is a failed session with a readable tail and a path to the whole log — never a
+# container started from a tag nothing wrote (ADR-0124).
+#
+# Four facts. The row says what it is building while it is still `starting` — `building hs-broken:…` is the progress
+# line the app's badge reads, and the recipe sleeps so that the window is observable rather than raced. It then leaves
+# `starting` for `error` rather than sitting there, its `status_reason` carries the failing instruction (so an operator
+# sees *which* `RUN` without hunting), and the log that sentence names exists and holds the child's own output. A fifth
+# is an absence: no container is left behind, because the step fails before `docker run`.
+case_project_image_failure() {
+  local name=case_project_image_failure root="$repo_root/target/verify-image-failure-$$"
+  local projects="$root/projects" repo="$root/projects/broken" data="$root/data"
+  local version base id body log saw
+  local plain
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  base="holosmith-base:$version"
+  if ! docker image inspect "$base" >/dev/null 2>&1; then
+    printf 'SKIP %s: no %s (case_server_images builds it and runs first)\n' "$name" "$base"
+    return 0
+  fi
+  stop_serve
+  rm -rf "$root"
+  # The absent base is this case's first half: the container step asks about it before it asks about the project's own
+  # tag, and a project's recipe is `FROM` it. The layer cache stays, so the rebuild answers every RUN `CACHED`.
+  timeout 120 docker image rm -f "$base" >/dev/null 2>&1 || true
+  if docker image inspect "$base" >/dev/null 2>&1; then
+    fail "$name/absent_base" "$base survived its removal, so the rebuild below would not be measured"
+  fi
+  assertions=$((assertions + 1))
+  mkdir -p "$repo/docker" || fail "$name/mkdir" "could not create $repo/docker"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  # The failing instruction is one line, so the sentence has something to name and the log has something to hold. It
+  # sleeps first, and that is what makes the row's own progress line observable: `building hs-broken:…` is written
+  # before the build starts, so a build that took a tenth of a second would be a race this case lost rather than a
+  # fact it measured.
+  printf 'FROM %s\nRUN sleep 3 && echo the recipe failed on purpose >&2 && exit 7\n' "$base" >"$repo/docker/Dockerfile"
+  git -C "$repo" add . || fail "$name/git" "git add did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    -m "a recipe that does not build" || fail "$name/git" "git commit did not work in $repo"
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$base" >"$WORK/config-image-failure.toml"
+  start_serve "$WORK/config-image-failure.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"broken","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-image-failure-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  # The failure is the row's, and the wait is the same 90 s a successful create gets: a build that has to fail still
+  # has to reach the daemon. The same loop is where the progress line is caught — `building hs-broken:…` on a row that
+  # is still `starting` is the sentence the app's badge reads while a build runs, and it is the thing this case exists
+  # to prove is not silence.
+  body=""
+  saw=""
+  for _ in $(seq 1 900); do
+    fetch "${name}_row" GET "/api/sessions/$id" "Host: 127.0.0.1" ||
+      fail "${name}_row/no_answer" "GET /api/sessions/$id did not answer"
+    body="$(cat "$WORK/responses/${name}_row.body")"
+    case "$body" in
+      *'"status":"starting"'*)
+        case "$body" in *'building hs-broken:'*) saw=1 ;; esac
+        sleep 0.1
+        ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$saw" ] ||
+    fail "$name/progress" "the row never said what it was building while it was starting: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF '"status":"error"' ||
+    fail "$name/status" "a recipe that does not build did not leave an error row: $body"
+  assertions=$((assertions + 1))
+  # The reason is read out of the whole row rather than out of a `sed` for the field: the sentence quotes the failing
+  # instruction, which carries `"` in it, and a field-level match would stop at the first one.
+  printf '%s\n' "$body" | grep -qF 'the recipe failed on purpose' ||
+    fail "$name/tail" "the row does not carry the failing RUN's own words: $body"
+  assertions=$((assertions + 1))
+  printf '%s\n' "$body" | grep -qF 'hs-broken.log' ||
+    fail "$name/log_path" "the failure's sentence does not name the log: $body"
+  assertions=$((assertions + 1))
+  log="$data/images/hs-broken.log"
+  [ -f "$log" ] || fail "$name/log" "the log the sentence names is not there: $log"
+  assertions=$((assertions + 1))
+  grep -qF 'the recipe failed on purpose' "$log" ||
+    fail "$name/log_content" "the log does not hold the failing RUN's output: $(tail -5 "$log")"
+  assertions=$((assertions + 1))
+  # Nothing was started: a failed build leaves no container, which is the "never a container from a torn-down tag"
+  # half of the acceptance.
+  if docker container inspect "s_$id" >/dev/null 2>&1; then
+    fail "$name/container" "a failed build left a container behind"
+  fi
+  assertions=$((assertions + 1))
+  # And no tag: `docker build -t` on a failed build writes nothing, so the project's image is absent and the next
+  # create tries again rather than running a half-built image.
+  if docker image ls --format '{{.Repository}}' | grep -qx 'hs-broken'; then
+    fail "$name/tag" "a failed build left an hs-broken tag behind"
+  fi
+  assertions=$((assertions + 1))
+
+  remove_session "${name}_delete" "$id" force
+  docker_session_id=""
+  rm -rf "$root"
+}
+
+# The base image is ensured by the same step, before a project's — and it is rebuilt from the embedded bytes when a
+# `docker rmi` (or a failed deploy, or the gate's own image case) removed it (ADR-0124).
+#
+# This is the machine-wide half of the story, and it is the case a machine that never ran `server deploy` meets: the
+# project carries **no** recipe, so its sessions run `holosmith-base:<version>`, and the only thing that can make that
+# image is the container step. The tag is removed and asserted absent first, then one create has to bring it back and
+# run in it.
+#
+# The verb's `--base` arm is here too, because it is executed by nothing else: `holosmith image build --base` says
+# `already there` on the tag the session just made, and `--base --force` rebuilds it — measured by `Created` in both
+# directions — with its log under this case's `$data/images`, which is what pins the verb to the config's `data_root`.
+case_base_image_lazy() {
+  local name=case_base_image_lazy root="$repo_root/target/verify-base-lazy-$$"
+  local projects="$root/projects" repo="$root/projects/plain" data="$root/data"
+  local version base id body container_image forced status created
+  local plain
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  base="holosmith-base:$version"
+  [ -n "$version" ] || fail "$name/version" "the artifact's version report is incomplete: $plain"
+  stop_serve
+  rm -rf "$root"
+  mkdir -p "$repo" || fail "$name/mkdir" "could not create $repo"
+  git -C "$repo" init --quiet . || fail "$name/git" "git init did not work in $repo"
+  git -C "$repo" -c user.name=verify -c user.email=verify@example commit --quiet \
+    --allow-empty -m "a project with no recipe" || fail "$name/git" "git commit did not work in $repo"
+  # The absent state is this case's, and it is asserted: "the image was already there" is exactly what it exists to
+  # rule out. The layer cache stays, so the rebuild below answers every RUN `CACHED` (ADR-0115). The two project tags
+  # the cases above this one make are removed with it, by their own repository names and no others — a `grep '^hs-'`
+  # would remove a real project's image on a machine that runs this gate over its own projects.
+  timeout 120 docker image rm -f "$base" >/dev/null 2>&1 || true
+  for image in $(docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+    grep -E '^hs-(recipe|broken):'); do
+    timeout 120 docker image rm -f "$image" >/dev/null 2>&1 || true
+  done
+  if docker image inspect "$base" >/dev/null 2>&1; then
+    fail "$name/absent" "$base survived its removal, so the rebuild below would not be measured"
+  fi
+  assertions=$((assertions + 1))
+  printf 'owner = "%s"\nmax_live_sessions = 1\nbackend = "docker"\nprojects_root = "%s"\ndata_root = "%s"\nbase_image = "%s"\nmin_free_gb = 1\nidle_stop_min = 0\n' \
+    "$owner" "$projects" "$data" "$base" >"$WORK/config-base-lazy.toml"
+  start_serve "$WORK/config-base-lazy.toml" "$data"
+
+  fetch_body "${name}_create" POST /api/sessions \
+    '{"project":"plain","model":"claude-sonnet-4.5","thinking":"high"}' \
+    "Host: 127.0.0.1" "Origin: $control_origin" "Content-Type: application/json" \
+    "X-Holosmith-Client: 1" "Tailscale-User-Login: $owner" "Idempotency-Key: verify-base-lazy-1" ||
+    fail "${name}_create/no_answer" "POST /api/sessions did not answer"
+  expect_status "${name}_create" "$(answer "${name}_create")" 202
+  body="$(cat "$WORK/responses/${name}_create.body")"
+  id="$(printf '%s\n' "$body" | sed -n 's/.*"id":"\([0-9a-f]\{16\}\)".*/\1/p')"
+  [ -n "$id" ] || fail "${name}_create/id" "the response names no id: $body"
+  docker_session_id="$id"
+  wait_for_idle_docker "${name}_idle" "$id"
+  # The base is back, built by the step, and its log is where a failure's sentence would have pointed.
+  docker image inspect "$base" >/dev/null 2>&1 ||
+    fail "$name/rebuilt" "$base was not rebuilt by the session that needed it"
+  assertions=$((assertions + 1))
+  [ -f "$data/images/holosmith-base.log" ] ||
+    fail "$name/log" "no $data/images/holosmith-base.log: the lazy base build kept no log"
+  assertions=$((assertions + 1))
+  # And the session ran **in** it: a container whose image is the base tag is the fact that the rebuild was for this
+  # session rather than for something else on the machine.
+  container_image="$(docker inspect --format '{{.Config.Image}}' "s_$id" 2>/dev/null)"
+  [ "$container_image" = "$base" ] ||
+    fail "$name/image" "the session's container runs $container_image, not $base"
+  assertions=$((assertions + 1))
+
+  # The verb's `--base` arm, which nothing else runs: idempotent on the tag the session just made, and `--force` the
+  # one way to rebuild it. The log is removed before the forced build, so its reappearing under `$data/images` is what
+  # proves the verb read `data_root` out of the config it was handed rather than the machine's default.
+  created="$(docker image inspect --format '{{.Created}}' "$base" 2>/dev/null)"
+  [ -n "$created" ] || fail "$name/base/inspect" "$base could not be inspected"
+  status=0
+  "$artifact" image build --base --config "$WORK/config-base-lazy.toml" \
+    >"$WORK/$name.base.out" 2>"$WORK/$name.base.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/base/exit" "image build --base exited $status: $(cat "$WORK/$name.base.err")"
+  assertions=$((assertions + 1))
+  grep -q 'already there' "$WORK/$name.base.out" ||
+    fail "$name/base/idempotent" \
+      "image build --base did not say the tag was already there: $(cat "$WORK/$name.base.out")"
+  assertions=$((assertions + 1))
+  [ "$(docker image inspect --format '{{.Created}}' "$base" 2>/dev/null)" = "$created" ] ||
+    fail "$name/base/rebuilt" "image build --base rebuilt a tag the existence check says is current"
+  assertions=$((assertions + 1))
+  rm -f "$data/images/holosmith-base.log"
+  status=0
+  "$artifact" image build --base --force --config "$WORK/config-base-lazy.toml" \
+    >"$WORK/$name.base-force.out" 2>"$WORK/$name.base-force.err" || status=$?
+  [ "$status" -eq 0 ] ||
+    fail "$name/base/force/exit" "image build --base --force exited $status: $(cat "$WORK/$name.base-force.err")"
+  grep -q '^built holosmith-base:' "$WORK/$name.base-force.out" ||
+    fail "$name/base/force/sentence" \
+      "--force did not build the base image: $(cat "$WORK/$name.base-force.out")"
+  assertions=$((assertions + 1))
+  forced="$(docker image inspect --format '{{.Created}}' "$base" 2>/dev/null)"
+  [ "$forced" != "$created" ] ||
+    fail "$name/base/force/rebuilt" "--force rebuilt nothing: the base is still $created"
+  assertions=$((assertions + 1))
+  [ -f "$data/images/holosmith-base.log" ] ||
+    fail "$name/base/force/log" \
+      "the verb's build kept no log under $data/images, so it took its data root from somewhere other than the config"
+  assertions=$((assertions + 1))
+
+  remove_session "${name}_delete" "$id" force
+  docker_session_id=""
   rm -rf "$root"
 }
 

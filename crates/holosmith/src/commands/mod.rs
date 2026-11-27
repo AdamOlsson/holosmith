@@ -6,6 +6,7 @@ pub mod deploy;
 pub mod doctor;
 pub mod drain;
 pub mod hub;
+pub mod image;
 pub mod install;
 pub mod key;
 pub mod logs;

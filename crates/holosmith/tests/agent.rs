@@ -186,7 +186,7 @@ async fn provision(backend: &DockerBackend, session: &Session) {
     for step in [Step::Network, Step::Container, Step::Pi] {
         assert_eq!(
             backend
-                .provision(session, step)
+                .provision(session, step, None)
                 .await
                 .expect("the step works"),
             Provisioned::Nothing,
@@ -363,11 +363,11 @@ fn an_image_whose_pi_cannot_answer_fails_the_session_at_the_container_step() {
 
     runtime.block_on(async {
         backend
-            .provision(&session, Step::Network)
+            .provision(&session, Step::Network, None)
             .await
             .expect("the network step does not need the image");
         let error = backend
-            .provision(&session, Step::Container)
+            .provision(&session, Step::Container, None)
             .await
             .expect_err("an image that cannot answer is a failed session");
         let BackendError::Failed { reason } = error else {

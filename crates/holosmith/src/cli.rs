@@ -229,6 +229,16 @@ pub enum Cmd {
         #[command(subcommand)]
         action: HubAction,
     },
+    /// Build a project's image, or the base image, without waiting for a session to need it.
+    ///
+    /// A project's sessions run `hs-<project>:<digest>`, a content address over its `docker/Dockerfile` and the base
+    /// image's tag, and the first session that needs one builds it — under a lock, so two creates do not run one
+    /// build. This verb is that build on its own: a fresh machine should not pay six minutes of it inside somebody's
+    /// first turn.
+    Image {
+        #[command(subcommand)]
+        action: ImageAction,
+    },
     /// Add a repository to the projects the sessions are created against, or print the ones this machine has.
     ///
     /// A project is a repository directly inside the projects root, and the name a session asks for is its
@@ -337,6 +347,38 @@ pub enum HostAction {
         /// The row's name.
         name: String,
         /// Remove the row even when it is this machine and it has live sessions (the API's `?force=true`).
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// What `image` does: build what a session's `docker run` would otherwise have to build itself.
+#[derive(Debug, Subcommand)]
+pub enum ImageAction {
+    /// Build one project's image from its own recipe, and the base image it builds `FROM` first.
+    ///
+    /// Nothing is rebuilt when the tag is already there: the tag is a digest over the recipe and the base image's
+    /// tag, so "it exists" is the whole currency question. Re-running is therefore free, and `--force` is the one way
+    /// to rebuild a tag the digest says is current — a recipe whose `COPY`'d file moved is stale with the same tag.
+    ///
+    /// The build has the internet, and the session it produces does not: the daemon builds on its own bridge, and
+    /// the container joins an internal network. A recipe that runs `apt-get` works here and nowhere else.
+    ///
+    /// Exit 1 is a build that failed, with the tail of what the daemon said on stderr and the path of the whole log
+    /// beside it. Exit 4 is a build whose pinned fetch did not answer — musl.cc unreachable while the image builds —
+    /// which is this machine's network rather than the recipe, and the same code `server deploy`'s image step answers.
+    Build {
+        /// The project whose image to build. Absent with `--base`.
+        #[arg(
+            value_name = "PROJECT",
+            required_unless_present = "base",
+            conflicts_with = "base"
+        )]
+        project: Option<String>,
+        /// Build the base image instead — `holosmith-base:<version>`, from the recipe embedded in this binary.
+        #[arg(long)]
+        base: bool,
+        /// Rebuild even when the tag is already there.
         #[arg(long)]
         force: bool,
     },

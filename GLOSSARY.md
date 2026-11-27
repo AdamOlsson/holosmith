@@ -1299,16 +1299,20 @@ exact argv and verifies on the next run (ADR-0086, ADR-0088). Its machine names 
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:
-The three images `server deploy`'s step 3 builds on this machine, from the Dockerfiles embedded in the binary:
-`holosmith-proxy:<version>`, the artifact on `alpine` plus openssl, which the three proxies run;
-`holosmith-base:<version>`, pi at the pinned version, node, git, CA certificates, openssl and `procps` and nothing else,
-which is the session image for a project that carries no recipe of its own, the base a project's recipe extends, and the
-value `base_image` defaults to (ADR-0114, ADR-0117, ADR-0123); and `agent-image:<version>`, the same session plus the
-artifact, this repository's Rust toolchain, python3 and ripgrep, the crate set and the npm cache, which a machine whose
-projects are this tree points `base_image` at. It is a **build**, not a pull: nothing in this phase pushes or fetches an
-image, and the context is an archive holding the Dockerfile, the running binary and — on the agent image — the crate set
-a build can vendor from (`images::Kind::context`). Its machine names are `images::Kind`, `images::ensure` and
-`images::proxy_image`/`images::base_image`/`images::agent_image`.
+One `docker build` this program runs, of which there are two shapes. The three **product** images, which
+`server deploy`'s step 3 builds from the Dockerfiles embedded in the binary: `holosmith-proxy:<version>`, the artifact on
+`alpine` plus openssl, which the three proxies run; `holosmith-base:<version>`, pi at the pinned version, node, git, CA
+certificates, openssl and `procps` and nothing else, which is the session image for a project that carries no recipe of
+its own, the base a project's recipe extends, and the value `base_image` defaults to (ADR-0114, ADR-0117, ADR-0123); and
+`agent-image:<version>`, the same session plus the artifact, this repository's Rust toolchain, python3 and ripgrep, the
+crate set and the npm cache, which a machine whose projects are this tree points `base_image` at. Their context is an
+archive holding the Dockerfile, the running binary and — on the agent image — the crate set a build can vendor from
+(`images::Kind::context`), and it is a **build**, not a pull. The second shape is a **project image**'s: the project root
+as a directory context, run lazily by the container step of the first session that needs it and by `holosmith image
+build`, under a per-image lock and the machine's, with its whole log at `<data>/images/<repository>.log` (ADR-0124).
+Either way a build has the internet and the session it produces does not. Its machine names are `images::Kind`,
+`images::ensure`, `images::Input`, `images::proxy_image`/`images::base_image`/`images::agent_image` and
+`imagebuild::{ensure, ensure_base}`.
 _Avoid_: Container image, docker image, image pull, base image
 
 **Project image**:
@@ -1316,10 +1320,13 @@ The image one project's sessions run, resolved from that project's own tree: `hs
 carries a recipe at `<project root>/docker/Dockerfile`, and `base_image` when it does not. The digest is the SHA-256 of
 the recipe's bytes and the base image's tag, so the whole currency question is whether that tag exists — no
 `org.holosmith.*` label is written or read. The build context is the project root, which Docker filters by the project's
-own `.dockerignore` when it has one. Its machine names are `projectimage::resolve`, `projectimage::ProjectImage` and
-`projectimage::Build`; nothing else may compose the tag, and a recipe that cannot become one is a **refused project**
-(ADR-0123). What the digest does not cover is the files the recipe copies: a `COPY Cargo.lock …` over a moved lock is
-invisible to it, and that staleness has its own change.
+own `.dockerignore` when it has one, and the recipe is named with `-f` because Docker reads `Dockerfile` from the
+context's own root. **The container step builds it when the tag is absent** — the base image first, the
+project's tag after, one build at a time per machine — and `holosmith image build <project>` is that build on its own,
+with `--force` as the only way to rebuild a tag the digest says is current (ADR-0124). Its machine names are
+`projectimage::resolve`, `projectimage::ProjectImage`, `projectimage::Build` and `imagebuild::ensure`; nothing else may
+compose the tag, and a recipe that cannot become one is a **refused project** (ADR-0123). What the digest does not cover
+is the files the recipe copies: a `COPY Cargo.lock …` over a moved lock is invisible to it, and `--force` is the repair.
 _Avoid_: Agent image (that is the product one), base image, custom image, per-project build
 
 **Image label**:

@@ -548,7 +548,13 @@ impl images::Images for Fake {
         <Fake as doctor::Machine>::image_labels(self, image)
     }
 
-    fn build(&self, tag: &str, _archive: &[u8], args: &[String]) -> Result<images::Log, String> {
+    fn build(
+        &self,
+        tag: &str,
+        _input: images::Input<'_>,
+        args: &[String],
+        _log: Option<&Path>,
+    ) -> Result<images::Log, String> {
         self.builds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

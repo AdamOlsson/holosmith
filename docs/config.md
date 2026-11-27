@@ -86,7 +86,7 @@ deploy and never regenerated (ADR-0058).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `base_image` | string | `holosmith-base:<version>` | The image Holosmith owns and projects extend: what a session runs **when its project carries no recipe of its own**, the base a project's own recipe builds on, and what `server deploy`'s step 3 builds. Non-empty. **A session has no network, so what it can run is exactly what its image installed and cached at build time** — an image build has internet and a session does not — which is why a toolchain a project needs goes in that project's image rather than in a key. A project with `<project root>/docker/Dockerfile` runs `hs-<project>:<digest>` instead, where the digest covers the recipe's bytes and this key's tag; Holosmith reads that recipe, names that tag and says in `doctor --quick` whether the image is built (ADR-0123). The default is the generic image at this binary's version, which is what a deployed machine already has and which carries pi, git, node and certificates and **no compiler**. Point it at an image built by hand — `pi-agent:local`, or one you built and tagged yourself — and step 3's line says the image it built is not the one a session will use. |
+| `base_image` | string | `holosmith-base:<version>` | The image Holosmith owns and projects extend: what a session runs **when its project carries no recipe of its own**, the base a project's own recipe builds on, and what `server deploy`'s step 3 builds. Non-empty. **A session has no network, so what it can run is exactly what its image installed and cached at build time** — an image build has internet and a session does not — which is why a toolchain a project needs goes in that project's image rather than in a key. A project with `<project root>/docker/Dockerfile` runs `hs-<project>:<digest>` instead, where the digest covers the recipe's bytes and this key's tag; Holosmith reads that recipe, names that tag, says in `doctor --quick` whether the image is built, and **builds it on the first session that needs it** — the base first, the project's tag after, one build at a time per machine, with the whole log under `<data>/images` and the failure's tail on the row (ADR-0123, ADR-0124). `holosmith image build <project>` is that build on its own, and `holosmith image build --base` pre-warms this image so a fresh machine does not pay for it inside somebody's first turn. The default is the generic image at this binary's version, which is what a deployed machine already has and which carries pi, git, node and certificates and **no compiler**. Point it at an image built by hand — `pi-agent:local`, or one you built and tagged yourself — and step 3's line says the image it built is not the one a session will use. |
 | `container_cpus` | integer | `2` | Whole CPUs per session container. Docker reads `0` as unlimited, so the floor is 1. |
 | `container_memory_mb` | integer | `4096` | MiB of memory per session container. At least 1. |
 | `container_pids` | integer | `512` | Process count per session container. At least 1. |
@@ -207,6 +207,13 @@ does, and a host whose disk is smaller is a host that lowers `max_live_sessions`
 allow-list carries no registry host because the crates and the web app's packages are in the agent image and a build
 needs no network (ADR-0106); a project that adds a dependency adds `crates.io`, `index.crates.io`, `static.crates.io`
 and `registry.npmjs.org` back (see `docs/egress.md`).
+
+**Neither disk number watches an image.** Image bytes live in the Docker daemon's storage rather than under the data
+root, and with `docker_host` pointing at another machine they are not on this machine at all: `min_free_gb` measures the
+data root and `session_disk_soft_gb` measures one worktree, so an image that filled the daemon's disk would be invisible
+to both. Nothing in Holosmith watches them and no key here does — `docker system df` is the read, and `docker image
+prune` is the repair. What the image path does bound is **how many builds run at once**: one per machine, under
+`<data>/images/locks`, so a machine cannot be made to write several images' worth of layers at the same moment.
 
 A pair: an always-on hub and one server behind it. The hub's registry names the server; the server trusts the hub by
 node name.

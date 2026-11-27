@@ -411,6 +411,7 @@ pub fn execute(
         &candidate.info,
         &pending,
         "images",
+        None,
         &mut progress::Silent,
     ) {
         Ok(sentence) => println!("{verb}: images: {sentence}"),

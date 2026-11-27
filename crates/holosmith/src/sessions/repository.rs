@@ -33,6 +33,17 @@ const INSERT: &str = "INSERT INTO sessions \
 const UPDATE_STATUS: &str =
     "UPDATE sessions SET status = ?2, status_reason = ?3, stopped_at = ?4 WHERE id = ?1";
 
+/// What a step is doing while it takes minutes: the row's `status_reason` and nothing else. A step that
+/// spends ten minutes building an image writes this before each build, so a `starting` row says what it is
+/// waiting for rather than nothing (ADR-0124).
+///
+/// The `status = 'starting'` is the guard, not the write: a step runs only while the row is `starting`, and another
+/// writer can move it mid-build — `pi_exit` to `stopped`, a crash to `error`, a delete to `deleting` — so a note and
+/// the clear that follows it must not land on a state whose own reason says why it left (`stopped · built
+/// hs-foo:…` would be a build's sentence on an exit's row).
+const SET_REASON: &str =
+    "UPDATE sessions SET status_reason = ?2 WHERE id = ?1 AND status = 'starting'";
+
 /// One bit of activity: `last_active_at` moves and nothing else (the prompt and settle, and
 /// the steer).
 const TOUCH: &str = "UPDATE sessions SET last_active_at = ?2 WHERE id = ?1";
@@ -329,6 +340,24 @@ impl<'a> SessionRepository<'a> {
             return Ok(None);
         }
         self.one("set_status", "WHERE id = ?1", &[&id])
+    }
+
+    /// Write what a provisioning step is doing: the row's `status_reason`, with the status left where it is.
+    ///
+    /// **Not a way to change a state**, which is why it is not `set_status`: the status column is not in the
+    /// statement, so a caller cannot move a row with it even by accident, and a caller that wants to move one goes
+    /// through [`super::state::Transitioner::apply`]. The one production caller is
+    /// [`crate::provisioner::Provisioner`], which passes a step's own [`crate::progress::Progress`] sink in here —
+    /// the backend may not write a row (ADR-0019) and the sink is the provisioner's.
+    ///
+    /// A row that has gone is not an error, for [`Self::touch`]'s reason: a session deleted while it was starting has
+    /// nothing left to say anything to. Neither is a row that has **left** `starting` — that is the same race with a
+    /// different winner, and the state it moved to owns the reason now ([`SET_REASON`]).
+    pub fn set_reason(&self, id: &str, reason: Option<&str>) -> Result<(), RepoError> {
+        self.connection
+            .execute(SET_REASON, params![id, reason])
+            .map_err(|error| RepoError::sqlite("set_reason", error))?;
+        Ok(())
     }
 
     /// Record whether the stop of this session's container was expected (spec item 6).

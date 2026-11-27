@@ -289,7 +289,7 @@ async fn the_delete_answer_names_the_work_it_keeps_and_the_command_that_recovers
     let session = row(&state, &id).expect("the row is there");
     let path = match state
         .backend
-        .provision(&session, Step::Worktree)
+        .provision(&session, Step::Worktree, None)
         .await
         .expect("the worktree step works on a real repository")
     {

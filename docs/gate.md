@@ -70,7 +70,7 @@ names the check behind every verdict.
 | docker backend | 8 | 37 s | the preflight, the hardened `.git` mounts on a real daemon, an agent launch, a resume, a turn, reconcile and its orphan sweep, the isolation selftest |
 | proxies | 7 | 14 s | key, MCP and egress proxies by their bytes (with a stand-in `openssl`), the Internet-access toggle on two real networks, the preview listener |
 | doctor and disk | 5 | 21 s | `--quick`, the tool-key finding, `--full`, the disk floor and the disk quota |
-| images and builds | 5 | 1406 s | the three product images, the session's toolchain in a container, an offline build, the smoke run |
+| images and builds | 8 | 1406 s | the three product images, a project's own image built by the first session that needs it and not rebuilt by the next two, a recipe that does not build leaving its tail on the row and its whole log on disk, the base image rebuilt when a session finds it absent, the session's toolchain in a container, an offline build, the smoke run |
 | promotion and release | 3 of 4 (`upgrade` skipped here) | 53 s | `upgrade`'s arms, `rollback`'s four arms, a promotion from the app and the update it performs |
 | deploy, install, service | 9 of 10 (`server_service` failed here) | 38 s | `server deploy`, the three install renderings, the root refusal, the unit and the keys, `deploy --ssh`, `status`, `logs`, `uninstall` |
 
@@ -90,7 +90,7 @@ names the check behind every verdict.
 | `case_stopped_expiry`, `case_internet_toggle` | 11 s each | a real session network compared by endpoint count; an aged row swept |
 | `case_smoke`, `case_reconcile_orphans`, `case_history` | 10 s each | a real smoke run; containers and networks swept; a page of a long transcript |
 
-Everything else is at or under 7 s, and **68 of the 109 cases measured here are at or under 1 s** — they are HTTP and
+Everything else is at or under 7 s, and **68 of the 112 cases measured here are at or under 1 s** — they are HTTP and
 file facts about an artifact that is already running.
 
 The two cases above that copy this tree into a container are the only place in the gate where a session does its own
@@ -101,10 +101,17 @@ session can build with is a property of the image it was started from. `case_age
 `case_agent_offline_build` run inside `agent-image`, the image a machine whose projects are this tree names in
 `base_image`, and `case_server_images` is where that image is built, from the recipe embedded in the artifact.
 
+The three image cases after it are the **lazy** half (ADR-0124): `case_project_image` makes a project carry a
+`docker/Dockerfile` and lets its first session build `hs-<project>:<digest>`, `case_project_image_failure` gives one a
+`RUN` that exits non-zero, and `case_base_image_lazy` removes `holosmith-base` and lets a session in a project with no
+recipe put it back. They are cheap — the recipe is one `COPY` over the base `case_server_images` just built, so the
+layer cache answers the build — and they are the only cases that measure a `docker build` this program started *on a
+session's behalf* rather than as a deploy step.
+
 ## What a case needs, and what a SKIP means
 
 A `SKIP` with its reason is a fact about *this machine*, never a defect in the tree: the case measured nothing, and its
-`ok` line is withheld, so the run's last line counts them (`SKIP 1 of 111 cases measured nothing`).
+`ok` line is withheld, so the run's last line counts them (`SKIP 1 of 114 cases measured nothing`).
 
 | Needs | Which cases |
 | --- | --- |
