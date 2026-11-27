@@ -1,9 +1,12 @@
-//! The three embedded Dockerfiles, the label read and the build's own shapes (ADR-0057).
+//! The two embedded Dockerfiles and this project's own recipe, the label read and the build's own shapes (ADR-0057,
+//! ADR-0126).
 //!
 //! Two halves, and the split is the design:
 //!
-//! - **The shapes are asserted without a daemon.** The Dockerfiles are compared with the files under
-//!   `crates/holosmith/images/` (so moving one breaks this test rather than a release), the archive is parsed as a
+//! - **The shapes are asserted without a daemon.** The embedded Dockerfiles are compared with the files under
+//!   `crates/holosmith/images/`, `docker/Dockerfile` is read from the tree, and the two spellings of a project's tag —
+//!   `projectimage::resolve`'s and `scripts/project-image.sh tag`'s — are compared with each other (so moving or
+//!   rewriting one breaks this test rather than a release), the archive is parsed as a
 //!   ustar and read back with the `tar` program every machine this repo builds on has, the label comparison is
 //!   driven over four arms, and the failure sentence is fed the output this machine's daemon printed for a broken
 //!   `RUN` and a broken `COPY`.
@@ -197,13 +200,12 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
     // the binary ships: a move or a rename breaks the build, and a copy that drifted breaks this test.
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("images");
     let pin = include_str!("../../../pins/pi.txt").trim();
-    // The recipe's place for the binary, and the one recipe that has none. `true` is the two images the proxy
-    // containers' `--entrypoint` reaches; the base image copies nothing, and that is asserted in its own direction
-    // below rather than excused from the loop: an assertion that skipped it would not notice a `COPY` appearing.
+    // The recipe's place for the binary, and the one recipe that has none. `true` is the image the proxy containers'
+    // `--entrypoint` reaches; the base image copies nothing, and that is asserted in its own direction below rather
+    // than excused from the loop: an assertion that skipped it would not notice a `COPY` appearing.
     for (file, word, embedded, copies_binary) in [
         ("proxy.Dockerfile", "proxy", images::PROXY_DOCKERFILE, true),
         ("base.Dockerfile", "base", images::BASE_DOCKERFILE, false),
-        ("agent.Dockerfile", "agent", images::AGENT_DOCKERFILE, true),
     ] {
         let on_disk = std::fs::read_to_string(directory.join(file))
             .unwrap_or_else(|error| panic!("{file} is not readable: {error}"));
@@ -247,30 +249,11 @@ fn each_embedded_dockerfile_is_the_file_in_images_and_carries_its_marker() {
         );
     }
     // The files are different recipes, so a reader must not be able to swap one for another unnoticed.
-    assert_ne!(images::PROXY_DOCKERFILE, images::AGENT_DOCKERFILE);
-    assert_ne!(images::BASE_DOCKERFILE, images::AGENT_DOCKERFILE);
     assert_ne!(images::BASE_DOCKERFILE, images::PROXY_DOCKERFILE);
 }
 
 #[test]
-fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_absent() {
-    // **Same base, by the same digest.** A session that moves from the base image to the agent image must not move to
-    // another distribution, and the smoke image's `the_smoke_recipe_names_the_agent_images_base` reads the agent
-    // recipe's last `FROM`: one line feeds both, so the comparison is against that line and not against the rust
-    // stage above it.
-    let last_base = |recipe: &str| -> String {
-        recipe
-            .lines()
-            .rfind(|line| line.starts_with("FROM "))
-            .unwrap_or_default()
-            .to_string()
-    };
-    assert_eq!(
-        last_base(images::BASE_DOCKERFILE),
-        last_base(images::AGENT_DOCKERFILE),
-        "the base image's base is not the agent image's"
-    );
-
+fn the_base_recipe_carries_no_toolchain_and_no_program_of_ours() {
     // **The absence is the contract**, so it is asserted rather than assumed: nothing this recipe *does* installs a
     // compiler, a Rust toolchain, a cross linker, a crate set or an npm cache. The instructions are read rather than
     // the whole file, because the header names each of them in the sentence that says why it is not here.
@@ -284,10 +267,12 @@ fn the_base_recipe_is_the_agent_images_base_with_this_repositorys_toolchain_abse
         "cargo-vendor",
         "npm-cache",
         ".cargo/config.toml",
+        "python3",
+        "ripgrep",
     ] {
         assert!(
             !recipe.contains(absent),
-            "the base recipe carries `{absent}` in an instruction, which is the agent image's half of the contract"
+            "the base recipe carries `{absent}` in an instruction, which is this project's half of the contract"
         );
     }
     // What it does carry, each entry a program some code already spawns or probes for.
@@ -397,59 +382,80 @@ fn argument_names(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// This repository's root: the directory the `crates/holosmith` crate sits two levels under.
+fn project_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// This project's own recipe, read from the tree.
+///
+/// A file and not a const, because it is **not embedded**: `docker/Dockerfile` is the recipe a session in this project
+/// builds from, resolved by `projectimage::resolve` and built from the project root as its context (ADR-0123,
+/// ADR-0126). `projectimage::RECIPE` is where its path is spelled, so this reads the same one the resolver does.
+fn project_recipe() -> String {
+    let path = project_root().join(holosmith::projectimage::RECIPE);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} is not readable: {error}", path.display()))
+}
+
 #[test]
-fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
+fn the_project_recipe_vendors_its_crates_and_points_cargo_at_them() {
     // A Dockerfile-shaped claim, so it is asserted here and not in a case that needs a daemon: the order of two
     // instructions and the agreement between a path written in one and the path another one names are exactly what a
     // mis-edit breaks, and what the gate's `case_agent_toolchain` would report as a network failure five minutes in.
-    let blocks = instructions(images::AGENT_DOCKERFILE);
+    let recipe = project_recipe();
+    let blocks = instructions(&recipe);
 
-    // The context and the recipe name the same files, in **both** directions: a context path no `COPY` names is a file
-    // the image silently never gets, and a `COPY` of a path the context does not carry is the daemon's "not found" —
-    // the direction that fails a build.
-    let copies: Vec<&str> = blocks
-        .iter()
-        .filter(|block| block.starts_with("COPY "))
-        .map(String::as_str)
-        .collect();
-    for (path, _) in Kind::Agent.context() {
-        assert!(
-            copies
-                .iter()
-                .any(|copy| copy.split_whitespace().any(|word| word == *path)),
-            "the agent recipe never copies {path} out of the context it is handed"
-        );
-    }
-    let context: Vec<&str> = Kind::Agent
-        .context()
-        .iter()
-        .map(|(path, _)| *path)
-        .collect();
-    for copy in &copies {
+    // **Every copied path is a real file in this tree**, because the context is the project root and a `COPY` of a
+    // path that is not there is the daemon's "not found" three minutes into a build. That is the assertion the old
+    // embedded context could make in both directions and this one makes against the filesystem: a project's recipe is
+    // read where the context is, so the tree is the list.
+    let root = project_root();
+    let mut copied = 0;
+    for block in blocks.iter().filter(|block| block.starts_with("COPY ")) {
         // `COPY --from=<stage>` reads another stage rather than the context.
-        if copy.contains("--from=") {
+        if block.contains("--from=") {
             continue;
         }
-        let words: Vec<&str> = copy.split_whitespace().skip(1).collect();
+        let words: Vec<&str> = block.split_whitespace().skip(1).collect();
         let (_, sources) = words
             .split_last()
-            .unwrap_or_else(|| panic!("a `COPY` names no destination: {copy}"));
-        // `holosmith` is the one word that is not a `Kind::Agent.context()` entry: the binary the build places there.
+            .unwrap_or_else(|| panic!("a `COPY` names no destination: {block}"));
         for source in sources {
             assert!(
-                *source == "holosmith" || context.contains(source),
-                "the agent recipe copies {source}, which the context it is handed does not carry: {copy}"
+                root.join(source).is_file(),
+                "the project recipe copies {source}, which is not a file in this tree's context: {block}"
             );
+            copied += 1;
         }
     }
-
-    // `file` is what `scripts/check-static.sh` asks about an artifact first (`file -b`), and `scripts/build.sh` ends
-    // with that script: an image without it builds a tree and then fails the build's own last step.
-    let (_, apt) = instruction(&blocks, "apt-get install");
     assert!(
-        apt.split_whitespace().any(|word| word == "file"),
-        "the apt line installs no `file`: {apt}"
+        copied >= 4,
+        "the project recipe copied {copied} paths out of its context, and the crate set and the npm cache need four"
     );
+    // And it copies **no binary**: a session's image runs no `holosmith`, which is why the base image carries none
+    // either (ADR-0126).
+    assert!(
+        !blocks.iter().any(|block| block.contains(" holosmith")),
+        "the project recipe copies a holosmith into an image whose contract is that it holds no program of ours"
+    );
+
+    // Three words of the apt line, and each one is a measurement rather than a preference. `file` is what
+    // `scripts/check-static.sh` reads an artifact's link state with (`file -b`), and `scripts/build.sh` ends in that
+    // script: an image without it builds a tree and then fails the build's own last step. `python3` is the program a
+    // score of the gate's cases guard on — `command -v python3` answering nothing turns each of those measurements
+    // into a `SKIP`, and a `SKIP` measures nothing — which is why this script runs the gate in this image at all.
+    // `ripgrep` is the other package the removed `agent_toolchains` default named, and it moves with `python3` rather
+    // than being separated (ADR-0117 D2). This is the static half; the daemon half is `case_server_images`' project
+    // arm, which asks `dpkg-query` inside the image it just built — so an edit that drops one of these words fails
+    // here, before a half-hour gate can turn the measurements it guards into `SKIP`s.
+    let (_, apt) = instruction(&blocks, "apt-get install");
+    for package in ["file", "python3", "ripgrep"] {
+        assert!(
+            apt.split_whitespace().any(|word| word == package),
+            "the project recipe's apt line does not install `{package}`: {apt}"
+        );
+    }
 
     // The vendor step, and the directory it writes, which the config below has to agree with.
     let (vendored_at, vendor) = instruction(&blocks, "cargo vendor --locked");
@@ -509,14 +515,10 @@ fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
     );
 
     // The npm half: the cache the fill writes is the one the `ENV` names, so `npm ci` in a session reads it with no
-    // flag — and the fill comes after the `npm cache clean --force` that would otherwise leave it empty.
-    let (filled_at, fill) = instruction(&blocks, "npm ci --cache");
+    // flag. There is no `npm cache clean --force` above it any more — pi arrives with the base image, so this recipe
+    // installs no global package — and the fill is still the last thing that touches the cache.
+    let (_, fill) = instruction(&blocks, "npm ci --cache");
     let cache = word_after(fill, "--cache");
-    let (cleaned_at, _) = instruction(&blocks, "npm cache clean --force");
-    assert!(
-        filled_at > cleaned_at,
-        "the npm cache is filled before the `npm cache clean --force` that empties it"
-    );
     let (_, npm_env) = instruction(&blocks, "npm_config_cache=");
     assert_eq!(
         word_after(npm_env, "npm_config_cache="),
@@ -530,6 +532,45 @@ fn the_agent_recipe_vendors_its_crates_and_points_cargo_at_them() {
     assert!(
         npm_env.contains("npm_config_logs_dir=/tmp/npm-logs"),
         "npm's logs directory is the read-only cache: {npm_env}"
+    );
+}
+
+#[test]
+fn the_project_recipe_builds_as_root_and_hands_the_run_back_to_the_bases_user() {
+    // The base image ends `USER node`, so a stage that starts `FROM` it begins as **uid 1000** — and every build step
+    // above the final `USER node` writes where only root may: `apt-get` owns `/var/lib/apt/lists`, `rustup component
+    // add` and `rustup target add` write `/usr/local/rustup`, the musl.cc fetch unpacks into `/opt`, `cargo vendor`
+    // writes `/opt/cargo-vendor`, `mkdir -p /.cargo` writes the filesystem root, `npm ci --cache` fills
+    // `/opt/npm-cache`, and each `chmod -R a+rX` changes modes on root's files. Measured without the reset: the build
+    // dies at the first `RUN` with `List directory /var/lib/apt/lists/partial is missing. - Acquire (13: Permission
+    // denied)`, and nothing else about the recipe reads as wrong — which is why this assertion exists rather than a
+    // sentence in the header.
+    //
+    // **The first instruction after the final `FROM`**, not merely one above the first `RUN`: the two
+    // `COPY --from=rust` lines that install the toolchain write `/usr/local` and sit between the reset and the first
+    // `RUN`, so a `USER root` moved below them would keep a `root_at < first_run` assertion green while the build died
+    // on its second instruction.
+    let blocks = instructions(&project_recipe());
+    let last_from = blocks
+        .iter()
+        .rposition(|block| block.starts_with("FROM "))
+        .unwrap_or_else(|| panic!("the project recipe has no `FROM`, so it is not a recipe"));
+    assert_eq!(
+        blocks.get(last_from + 1).map(String::as_str),
+        Some("USER root"),
+        "the first instruction after the final `FROM` is not `USER root`, so every step before the reset runs as the \
+         base image's `node` (uid 1000) — this recipe's `COPY --from=rust` into /usr/local included"
+    );
+    // And the image a session runs is the base's own user again: the last `USER` is `node`, because a plain `docker
+    // run` of this image has to be the non-root spelling ADR-0035 (and `case_server_images`) measures — a session's
+    // container passes `--user` over it, so this is what the image itself is.
+    let last_user = blocks
+        .iter()
+        .rposition(|block| block.starts_with("USER "))
+        .unwrap_or_else(|| panic!("the project recipe sets no user at all"));
+    assert_eq!(
+        blocks[last_user], "USER node",
+        "the project recipe's last `USER` is not `node`, so an image built from it does not run as the base's user"
     );
 }
 
@@ -560,7 +601,7 @@ fn the_agent_recipe_retries_a_toolchain_host_that_does_not_answer() {
     // gate back to recording a network blip as a tree nobody passed, so every download is asserted — with the digest
     // check that stays the pin beside them. The count is a constant and not a column now that one recipe carries a
     // cross toolchain: a second one would be a second caller of this test with its own count.
-    for download in toolchain_fetches("agent.Dockerfile", images::AGENT_DOCKERFILE, 1) {
+    for download in toolchain_fetches(holosmith::projectimage::RECIPE, &project_recipe(), 1) {
         for word in [
             "--retry 4",
             "--retry-delay 2",
@@ -570,7 +611,7 @@ fn the_agent_recipe_retries_a_toolchain_host_that_does_not_answer() {
         ] {
             assert!(
                 download.contains(word),
-                "agent.Dockerfile's download does not carry `{word}`: {download}"
+                "the project recipe's download does not carry `{word}`: {download}"
             );
         }
     }
@@ -590,7 +631,6 @@ fn a_label_only_build_argument_is_declared_below_every_run() {
     // `LABEL` is checked without this test being edited. `HOLOSMITH_PI_VERSION` is not in it: the pi install spends
     // it, so its value does change what the image holds.
     for (name, kind, recipe) in [
-        ("agent.Dockerfile", Kind::Agent, images::AGENT_DOCKERFILE),
         ("proxy.Dockerfile", Kind::Proxy, images::PROXY_DOCKERFILE),
         ("base.Dockerfile", Kind::Base, images::BASE_DOCKERFILE),
     ] {
@@ -641,9 +681,9 @@ fn a_label_only_build_argument_is_declared_below_every_run() {
             assert!(
                 declared_at > last_run,
                 "{argument} is declared above a `RUN` in {name}, and a `RUN` is in scope of every argument declared \
-                 above it: a tree whose only change is that value rebuilds every layer below it — in `agent.Dockerfile` \
-                 measured as 42–64 s of apt, both pinned musl.cc fetches, the pi install and the vendored crate set — for \
-                 a value only a `LABEL` reads"
+                 above it: a tree whose only change is that value rebuilds every layer below it — in this project's \
+                 recipe measured as 42–64 s of apt, the pinned musl.cc fetch, the rustup components and the vendored \
+                 crate set — for a value only a `LABEL` reads"
             );
         }
     }
@@ -656,7 +696,7 @@ fn the_agent_recipe_reads_an_unverifiable_certificate_as_a_warning_over_the_pin(
     // certificate is what failed, it only ever adds `--insecure` to the same URL, and the digest check still follows it:
     // the pin is what says the bytes are the vetted ones. Each of those three is a fact this asserts, and a comment
     // beside a recipe is not.
-    for fetch in toolchain_fetches("agent.Dockerfile", images::AGENT_DOCKERFILE, 1) {
+    for fetch in toolchain_fetches(holosmith::projectimage::RECIPE, &project_recipe(), 1) {
         // One fallback and not a fetch made without verification: the first attempt is curl's own flags, and
         // `--insecure` is the retry's.
         assert_eq!(
@@ -718,10 +758,6 @@ fn the_image_names_carry_this_binarys_version() {
         images::base_image(),
         format!("holosmith-base:{}", holosmith::VERSION)
     );
-    assert_eq!(
-        images::agent_image(),
-        format!("agent-image:{}", holosmith::VERSION)
-    );
     assert_eq!(images::BINARY_IN_IMAGE, "/usr/local/bin/holosmith");
     assert_eq!(
         [
@@ -740,7 +776,7 @@ fn the_image_names_carry_this_binarys_version() {
     );
     // No image carries a toolchain label any more, because the recipes install a fixed package set: there is no
     // list a machine could change, so there is nothing for a label to carry and nothing for a skip rule to compare.
-    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base] {
         assert_eq!(
             kind.tags(),
             [
@@ -754,10 +790,85 @@ fn the_image_names_carry_this_binarys_version() {
     }
     assert_eq!(Kind::Proxy.image(), images::proxy_image());
     assert_eq!(Kind::Base.image(), images::base_image());
-    assert_eq!(Kind::Agent.image(), images::agent_image());
     assert_eq!(Kind::Proxy.dockerfile(), images::PROXY_DOCKERFILE);
     assert_eq!(Kind::Base.dockerfile(), images::BASE_DOCKERFILE);
-    assert_eq!(Kind::Agent.dockerfile(), images::AGENT_DOCKERFILE);
+}
+
+#[test]
+fn this_projects_tag_is_what_the_script_says_and_what_the_resolver_says() {
+    // The gate's container and a session's container are one artifact (ADR-0126), and that is only true while the tag
+    // `scripts/verify-in-container.sh` runs the gate in and the tag `projectimage::resolve` gives a session are one
+    // string. Two spellings of a digest cannot be held together by a comment, so this runs the script over this tree and
+    // compares its answer with the resolver's — the script is what a shell caller reads, the resolver is what the
+    // product reads, and a difference is a session and a gate in two images.
+    let root = project_root();
+    // `env!("CARGO_PKG_NAME")` is the project's name, and the script spells it as a literal: a rename of the package
+    // that did not reach the script is a tag nothing resolves.
+    assert_eq!(env!("CARGO_PKG_NAME"), "holosmith");
+    let resolved =
+        holosmith::projectimage::resolve(&root, env!("CARGO_PKG_NAME"), &images::base_image())
+            .expect("this tree's recipe resolves");
+    assert!(
+        resolved.build.is_some(),
+        "this repository has no {}, so it has no project image to run a session or a gate in",
+        holosmith::projectimage::RECIPE
+    );
+    let script = Command::new("bash")
+        .arg(root.join("scripts/project-image.sh"))
+        .arg("tag")
+        .env("HOLOSMITH_BASE_IMAGE", images::base_image())
+        .output()
+        .expect("bash is on every machine this repository builds on");
+    assert!(
+        script.status.success(),
+        "scripts/project-image.sh tag answered {:?}: {}",
+        script.status.code(),
+        String::from_utf8_lossy(&script.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&script.stdout).trim(),
+        resolved.image,
+        "the script's tag and projectimage::resolve's are two spellings of one image"
+    );
+    // And the recipe the tag is taken over declares the arguments a build of it is handed, so a `FROM` line reads what
+    // the resolver filled rather than a literal.
+    let recipe = project_recipe();
+    // The base's argument carries a default so a bare `docker build .` fails at a resolvable `FROM`; the rust one is
+    // declared plainly. Both are declared **above** the first `FROM`, which is the only scope a `FROM` reads.
+    for line in [
+        format!("ARG {}=", holosmith::projectimage::BASE_IMAGE_ARG),
+        format!("ARG {}", images::RUST_IMAGE_ARG),
+        format!("FROM ${{{}}}", holosmith::projectimage::BASE_IMAGE_ARG),
+        format!("FROM rust:${{{}}} AS rust", images::RUST_IMAGE_ARG),
+    ] {
+        assert!(
+            recipe.lines().any(|have| have.trim().starts_with(&line)),
+            "the project recipe has no `{line}` line, so the `FROM`s a build resolves are not the values it is handed"
+        );
+    }
+    let first_from = recipe
+        .lines()
+        .position(|line| line.starts_with("FROM "))
+        .expect("the project recipe has a `FROM` line");
+    for argument in [
+        holosmith::projectimage::BASE_IMAGE_ARG,
+        images::RUST_IMAGE_ARG,
+    ] {
+        let declared = recipe
+            .lines()
+            .position(|line| line.trim().starts_with(&format!("ARG {argument}")))
+            .unwrap_or_else(|| panic!("the project recipe does not declare {argument}"));
+        assert!(
+            declared < first_from,
+            "{argument} is declared below the first `FROM`, where no `FROM` can read it"
+        );
+    }
+    // A project's image carries no Holosmith label: an image resolved from a recipe this binary has never read is not
+    // one it may claim to have built, and the tag is the content address instead (ADR-0123).
+    assert!(
+        !recipe.contains("org.holosmith."),
+        "the project recipe writes an `org.holosmith.*` label, which only the product images carry"
+    );
 }
 
 /// The labels the Dockerfile's `LABEL` lines write for `expectation`, as `docker image inspect` answers them.
@@ -766,7 +877,7 @@ fn the_image_names_carry_this_binarys_version() {
 /// spelling cannot drift apart in the tests either.
 fn labels_of(expectation: &Expectation) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
-    let args = images::build_arguments("test:image", expectation);
+    let args = images::build_arguments("test:image", expectation, false);
     let mut arguments = args.iter();
     while let Some(argument) = arguments.next() {
         if argument != "--build-arg" {
@@ -801,7 +912,7 @@ fn expectation(kind: Kind) -> Expectation {
 
 #[test]
 fn a_mismatch_names_the_key_and_both_values() {
-    let agent = expectation(Kind::Agent);
+    let agent = expectation(Kind::Base);
     // The build arguments are the facts the Dockerfile labels with, and them alone: every one of them is written by
     // a `LABEL` line and read back by the skip rule.
     assert_eq!(
@@ -822,7 +933,7 @@ fn a_mismatch_names_the_key_and_both_values() {
             ("HOLOSMITH_BINARY_SHA256".to_string(), agent.binary.clone()),
         ]
     );
-    let arguments = images::build_arguments("holosmith-proxy:9.9.9", &agent);
+    let arguments = images::build_arguments("holosmith-proxy:9.9.9", &agent, false);
     assert_eq!(arguments.first().map(String::as_str), Some("build"));
     assert_eq!(
         &arguments[1..3],
@@ -887,7 +998,7 @@ fn a_mismatch_names_the_key_and_both_values() {
         "python3".to_string(),
     );
     extra.insert("org.example.project".to_string(), "mine".to_string());
-    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base] {
         let other = expectation(kind);
         assert_eq!(other.mismatches(&extra), Vec::<String>::new(), "{kind:?}");
     }
@@ -896,40 +1007,55 @@ fn a_mismatch_names_the_key_and_both_values() {
 // ---- the build arguments the daemon is handed ----------------------------------------------
 
 #[test]
-fn the_agent_build_carries_the_rust_pin_and_the_other_images_carry_no_such_argument() {
+fn a_product_build_carries_the_labels_argument_and_nothing_a_recipe_does_not_declare() {
     // The rust base's reference is no longer a literal in a `FROM` line: an `ARG` is the only mechanism a Dockerfile
-    // has for a shared value, so the *binary* is what hands the pin over, and only to the image whose recipe has a
-    // rust stage (ADR-0118). Two facts follow, and each is a mistake a later edit could make: an argument the agent's
-    // vector dropped would fail the build before any layer runs, on the stage's base reference, and one the proxy's
-    // or the base's vector gained would be a `--build-arg` no recipe declares — a BuildKit warning over nothing.
-    let wanted = format!(
-        "{}={}",
-        images::RUST_IMAGE_ARG,
-        holosmith::pins::rust_image()
-    );
-    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+    // has for a shared value (ADR-0118). It is a **project's** argument now — `projectimage::Build::arguments` fills it
+    // for the recipe that declares it — so neither product recipe declares it and neither product build may carry it:
+    // a `--build-arg` no recipe declares is a BuildKit warning over nothing (ADR-0126).
+    for kind in [Kind::Proxy, Kind::Base] {
         let expectation = expectation(kind);
-        let arguments = images::build_arguments(&kind.image(), &expectation);
-        let carried = arguments
+        let arguments = images::build_arguments(&kind.image(), &expectation, false);
+        let declared: Vec<&String> = arguments
             .iter()
-            .filter(|argument| *argument == &wanted)
-            .count();
-        let rust_arguments = arguments
-            .iter()
-            .filter(|argument| argument.starts_with(images::RUST_IMAGE_ARG))
-            .count();
-        if kind == Kind::Agent {
-            assert_eq!(
-                carried, 1,
-                "the agent build does not carry the rust pin once: {arguments:?}"
-            );
-        } else {
-            assert_eq!(
-                rust_arguments, 0,
-                "the {kind:?} recipe has no rust stage, and its build carries an argument nothing reads: \
-                 {arguments:?}"
-            );
-        }
+            .filter(|argument| {
+                argument.starts_with(images::RUST_IMAGE_ARG)
+                    || argument.starts_with(holosmith::projectimage::BASE_IMAGE_ARG)
+            })
+            .collect();
+        assert!(
+            declared.is_empty(),
+            "the {kind:?} recipe declares no such argument, and its build carries one nothing reads: {declared:?}"
+        );
+        // What it does carry is the four label arguments, in `build_args`' order, and then the context on stdin.
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| *argument == "--build-arg")
+                .count(),
+            4,
+            "the {kind:?} build does not carry the four label arguments: {arguments:?}"
+        );
+        // And `--force`'s flag, which is one spelling for both build paths: a build whose inputs are unchanged is
+        // answered from the layer cache, so a forced build without it re-exports the same config and leaves the tag
+        // exactly as it was (`case_project_image`'s `force` arm compares two `Created` values).
+        let forced = images::build_arguments(&kind.image(), &expectation, true);
+        assert!(
+            forced.iter().any(|argument| argument == images::NO_CACHE),
+            "a forced {kind:?} build does not carry {}: {forced:?}",
+            images::NO_CACHE
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == images::NO_CACHE),
+            "a plain {kind:?} build carries {}: {arguments:?}",
+            images::NO_CACHE
+        );
+        assert_eq!(
+            forced.last().map(String::as_str),
+            Some("-"),
+            "`--no-cache` displaced the context on stdin: {forced:?}"
+        );
     }
 }
 
@@ -976,16 +1102,21 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     let program = vec![b'h'; 700];
     std::fs::write(&binary, &program).expect("the scratch binary is writable");
 
-    // The agent image, because it is the one whose context carries the six files: eight entries — its Dockerfile,
-    // its binary, and those six.
-    let context = Kind::Agent.context();
-    let bytes = images::archive(images::AGENT_DOCKERFILE, context, &binary)
+    // A context with entries in it, written here rather than read from a recipe: neither product recipe has files to
+    // reach any more — a project's recipe is built from a directory, not from this archive (ADR-0126) — and the point
+    // of this test is the archive's shape with entries in it. Two of them, in a stated order and with different sizes,
+    // so the padding and the sequence are both exercised.
+    let context: &images::Context = &[
+        ("Cargo.toml", "[workspace]\nmembers = []\n"),
+        ("web/package.json", "{}\n"),
+    ];
+    let bytes = images::archive(images::PROXY_DOCKERFILE, context, &binary)
         .expect("the archive is written");
     // Three identical inputs, one archive: uid, gid and mtime stay zero and nothing reads a clock, or every
     // rebuild would be a new context for the daemon's cache.
     assert_eq!(
         bytes,
-        images::archive(images::AGENT_DOCKERFILE, context, &binary)
+        images::archive(images::PROXY_DOCKERFILE, context, &binary)
             .expect("the archive is written")
     );
 
@@ -1010,13 +1141,13 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     assert_eq!(octal(&header[136..148]), 0);
     assert_eq!(
         octal(&header[124..136]),
-        images::AGENT_DOCKERFILE.len() as u64
+        images::PROXY_DOCKERFILE.len() as u64
     );
     assert_eq!(header[156], b'0', "the entry is a regular file");
     assert_eq!(&header[257..263], b"ustar\0");
     assert_eq!(&header[263..265], b"00");
 
-    let dockerfile_block = images::AGENT_DOCKERFILE.len().div_ceil(512) * 512;
+    let dockerfile_block = images::PROXY_DOCKERFILE.len().div_ceil(512) * 512;
     let second = 512 + dockerfile_block;
     assert_eq!(
         std::str::from_utf8(&bytes[second..second + 9]).expect("a name is UTF-8"),
@@ -1030,9 +1161,9 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     assert_eq!(&bytes[data..data + 700], &program[..]);
     assert!(bytes[data + 700..data + 1024].iter().all(|byte| *byte == 0));
 
-    // Then the context's entries, in the order [`Kind::context`] gives them: each under its real relative path,
-    // a 0644 regular file whose data is that file's text. This is where a build vendors the crate set from, so a
-    // lock that never reached the context is a failure here as well as on disk.
+    // Then the context's entries, in the order the slice gives them: each under its path, a 0644 regular file whose
+    // data is that entry's text. This is where a build vendors the crate set from, so a lock that never reached the
+    // context is a failure here as well as on disk.
     let mut at = data + 1024;
     for &(path, contents) in context {
         let header = &bytes[at..at + 512];
@@ -1065,9 +1196,8 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
         context.len()
     );
 
-    // `tar` reads the same eight entries, in the same order, and sees the binary's own 700 bytes rather than a
-    // block.
-    let names: Vec<String> = tar_lists(&dir, "agent-context.tar", &bytes, "-tf")
+    // `tar` reads the same four entries, in the same order, and sees the binary's own 700 bytes rather than a block.
+    let names: Vec<String> = tar_lists(&dir, "context.tar", &bytes, "-tf")
         .lines()
         .map(str::to_string)
         .collect();
@@ -1078,9 +1208,9 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
         .collect();
     assert_eq!(
         names, wanted,
-        "tar does not list the agent image's eight entries in the archive's order"
+        "tar does not list the context's entries in the archive's order"
     );
-    let listing = tar_lists(&dir, "agent-context.tar", &bytes, "-tvf");
+    let listing = tar_lists(&dir, "context.tar", &bytes, "-tvf");
     assert!(
         listing.contains(" 700 "),
         "tar does not see the binary's 700 bytes: {listing}"
@@ -1091,8 +1221,8 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
     // archive is one shape for every kind — and it is the one recipe that never `COPY`s them, so what a build sends
     // and what the image holds are two different questions for it.
     for (kind, name) in [(Kind::Proxy, "proxy"), (Kind::Base, "base")] {
-        let sent = images::archive(kind.dockerfile(), kind.context(), &binary)
-            .expect("the archive is written");
+        let sent =
+            images::archive(kind.dockerfile(), &[], &binary).expect("the archive is written");
         let names: Vec<String> = tar_lists(&dir, &format!("{name}-context.tar"), &sent, "-tf")
             .lines()
             .map(str::to_string)
@@ -1101,46 +1231,6 @@ fn the_archive_is_a_ustar_the_tar_program_reads() {
             names,
             ["Dockerfile", "holosmith"],
             "the {name} image's context is not the two entries"
-        );
-    }
-}
-
-#[test]
-fn the_agent_context_is_the_six_files_the_tree_has_on_disk() {
-    // A lock or manifest edit that does not reach the image would be a build vendoring another tree's crates, so
-    // every embedded entry is compared with the file at the path it is written under: the archive's copy and this
-    // repository's are one text. The list is asserted first, because a renamed path would otherwise only move what
-    // the comparison reads.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let context = Kind::Agent.context();
-    let paths: Vec<&str> = context.iter().map(|(path, _)| *path).collect();
-    assert_eq!(
-        paths,
-        [
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates/holosmith/Cargo.toml",
-            "crates/holosmith/src/lib.rs",
-            "web/package.json",
-            "web/package-lock.json",
-        ],
-        "the agent image's build context is not the six files a build can vendor from"
-    );
-    for &(path, embedded) in context {
-        let on_disk = std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| {
-            panic!("{path} is not readable under {}: {error}", root.display())
-        });
-        assert_eq!(
-            embedded,
-            on_disk.as_str(),
-            "{path} in the binary is not the file on disk, so an edit did not reach the image"
-        );
-    }
-    // The proxy and base images build no Rust, so their contexts have no second entry to send.
-    for kind in [Kind::Proxy, Kind::Base] {
-        assert!(
-            kind.context().is_empty(),
-            "the {kind:?} image's context carries entries its recipe cannot read"
         );
     }
 }
@@ -1193,9 +1283,9 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
 
     // The `COPY` shape: the instruction and the layer, and the child's own last line, which is the one that says
     // what was missing.
-    let copy = images::failure("agent-image:0.1.0", COPY_FAILURE);
+    let copy = images::failure("holosmith-proxy:0.1.0", COPY_FAILURE);
     for fact in [
-        "agent-image:0.1.0",
+        "holosmith-proxy:0.1.0",
         "COPY missing-file /x",
         "[2/2] COPY",
         "no new image was tagged",
@@ -1212,8 +1302,8 @@ fn the_failure_sentence_names_the_instruction_the_layer_and_what_the_child_said(
     );
 
     // Output with nothing recognisable in it still says something useful rather than starting with a colon.
-    let nothing = images::failure("agent-image:0.1.0", "");
-    assert!(nothing.contains("agent-image:0.1.0"), "{nothing}");
+    let nothing = images::failure("holosmith-proxy:0.1.0", "");
+    assert!(nothing.contains("holosmith-proxy:0.1.0"), "{nothing}");
     assert!(nothing.contains("printed nothing"), "{nothing}");
     assert!(nothing.contains("no new image was tagged"), "{nothing}");
 }
@@ -1237,9 +1327,9 @@ fn a_build_whose_pinned_fetch_did_not_answer_is_not_a_verdict_about_the_tree() {
             "{said} is not a fetch that did not answer"
         );
     }
-    let sentence = images::failure("agent-image:0.1.0", MUSL_FETCH_FAILURE);
+    let sentence = images::failure("holosmith-proxy:0.1.0", MUSL_FETCH_FAILURE);
     for fact in [
-        "agent-image:0.1.0",
+        "holosmith-proxy:0.1.0",
         "musl.cc",
         "did not answer",
         "not a recipe or a tree that is wrong",
@@ -1276,9 +1366,9 @@ fn a_build_whose_pinned_fetch_did_not_answer_is_not_a_verdict_about_the_tree() {
             "{said} reads as a fetch that did not answer"
         );
         assert!(
-            !images::failure("agent-image:0.1.0", log).contains("did not answer"),
+            !images::failure("holosmith-proxy:0.1.0", log).contains("did not answer"),
             "{said} is reported as a host that did not answer: {}",
-            images::failure("agent-image:0.1.0", log)
+            images::failure("holosmith-proxy:0.1.0", log)
         );
     }
 
@@ -1358,8 +1448,8 @@ impl images::Images for Labelled {
 
 #[test]
 fn the_read_answers_missing_no_labels_stale_current_and_unreadable() {
-    let expectation = expectation(Kind::Agent);
-    let image = images::agent_image();
+    let expectation = expectation(Kind::Base);
+    let image = images::base_image();
     let read = |answer| {
         let fake = Labelled::answering(answer);
         let status = images::read(&fake, &expectation);
@@ -1454,11 +1544,7 @@ fn the_architecture_guard_compares_two_vocabularies() {
             "the refusal does not name {fact}: {sentence}"
         );
     }
-    for fact in [
-        images::proxy_image(),
-        images::base_image(),
-        images::agent_image(),
-    ] {
+    for fact in [images::proxy_image(), images::base_image()] {
         assert!(
             sentence.contains(&fact),
             "the refusal does not name {fact}: {sentence}"
@@ -1600,7 +1686,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
 
     let context =
         images::archive(images::PROXY_DOCKERFILE, &[], &binary).expect("the context is written");
-    let arguments = images::build_arguments(TAG, &expectation);
+    let arguments = images::build_arguments(TAG, &expectation, false);
     let built = <Docker as images::Images>::build(
         &daemon,
         TAG,
@@ -1658,7 +1744,7 @@ fn a_built_proxy_image_runs_both_proxies_and_a_broken_build_leaves_no_tag() {
         .expect("the proxy Dockerfile starts from a pinned base");
     let broken = format!("{base}\nCOPY missing-file /x\n");
     let context = images::archive(&broken, &[], &binary).expect("the context is written");
-    let arguments = images::build_arguments(BROKEN, &expectation);
+    let arguments = images::build_arguments(BROKEN, &expectation, false);
     let failed = <Docker as images::Images>::build(
         &daemon,
         BROKEN,
@@ -1762,7 +1848,7 @@ fn promoted() -> VersionInfo {
 /// The images' label maps for `release`, keyed by tag, the way `docker image inspect` would answer them.
 fn labelled(release: &VersionInfo, digest: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut images_by_tag = BTreeMap::new();
-    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base] {
         let expectation = Expectation::of_release(kind, release, digest);
         images_by_tag.insert(expectation.tag(), labels_of(&expectation));
     }
@@ -1783,8 +1869,7 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
         fake.asked(),
         [
             format!("holosmith-proxy:{}", release.version),
-            format!("holosmith-base:{}", release.version),
-            format!("agent-image:{}", release.version)
+            format!("holosmith-base:{}", release.version)
         ],
         "the read asked about the wrong tags"
     );
@@ -1795,7 +1880,7 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     // there would leave a promotion serving an image built from the previous artifact.
     let fake = Tagged::answering(labelled(&release, "0".repeat(64).as_str()));
     let pending = images::outstanding(&fake, &release, &digest);
-    assert_eq!(pending.len(), 3, "{pending:?}");
+    assert_eq!(pending.len(), 2, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
             reason.contains("binary-sha256"),
@@ -1804,13 +1889,13 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     }
 
     // Arm three: the pin changed. **Every** recipe carries it (the proxy image labels the pin its Dockerfile was
-    // built against, because a proxy that reaches a provider is the thing a pin bump is usually about), so all three
-    // are stale — the acceptance's "or a pinned version changed", measured in its own direction.
+    // built against, because a proxy that reaches a provider is the thing a pin bump is usually about), so both are
+    // stale — the acceptance's "or a pinned version changed", measured in its own direction.
     let mut newer_pin = release.clone();
     newer_pin.pi_version = "0.0.0-not-the-pin".to_string();
     let fake = Tagged::answering(labelled(&release, &digest));
     let pending = images::outstanding(&fake, &newer_pin, &digest);
-    assert_eq!(pending.len(), 3, "{pending:?}");
+    assert_eq!(pending.len(), 2, "{pending:?}");
     for (kind, reason) in &pending {
         assert!(
             reason.contains("pi-version"),
@@ -1824,7 +1909,7 @@ fn a_promotion_builds_what_the_release_needs_and_nothing_else() {
     newer.version = "10.0.0".to_string();
     let fake = Tagged::answering(BTreeMap::new());
     let pending = images::outstanding(&fake, &newer, &digest);
-    assert_eq!(pending.len(), 3, "{pending:?}");
+    assert_eq!(pending.len(), 2, "{pending:?}");
     for (_, reason) in &pending {
         assert!(reason.contains("is not on this machine"), "{reason}");
     }

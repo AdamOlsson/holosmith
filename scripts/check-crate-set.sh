@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Is this tree's `Cargo.lock` the crate set the agent image vendored? The image replaces crates-io with
-# `/opt/cargo-vendor` and sets `[net] offline = true` (`crates/holosmith/images/agent.Dockerfile`), so a crate that
+# Is this tree's `Cargo.lock` the crate set this project image vendored? The image replaces crates-io with
+# `/opt/cargo-vendor` and sets `[net] offline = true` (`docker/Dockerfile`, this project's own recipe), so a crate that
 # directory does not hold fails as "the crate `rand` could not be found in registry index." — which reads as a broken
 # registry — and `cargo update` then exits 0 having changed nothing. So a session whose marker names another lock is
 # a stale image, and saying so in one line is the difference between an image rebuild and a hunt for a code bug.
@@ -36,6 +36,6 @@ if [ "$vendored" = "$current" ]; then
   exit 0
 fi
 
-printf "check-crate-set: %s names a different Cargo.lock (%s) than this tree's (%s), so a crate this tree needs is missing from the image and cargo reports it as not found in the registry index: rebuild agent-image on this host, because this is a stale image and not a code fix.\n" \
+printf "check-crate-set: %s names a different Cargo.lock (%s) than this tree's (%s), so a crate this tree needs is missing from the image and cargo reports it as not found in the registry index: rebuild this project image on this host (holosmith image build holosmith --force), because this is a stale image and not a code fix.\n" \
   "$marker" "$vendored" "$current" >&2
 exit 3

@@ -444,7 +444,7 @@ fn v1_holds_the_hardened_git_mounts_answer_the_way_spec_item_one_says() {
 #[test]
 fn a_commits_author_is_the_builds_and_a_plain_git_commit_works_in_the_container() {
     // The container has the repository and, until this story, no git author: `git var GIT_AUTHOR_IDENT` in
-    // `agent-image` answered `Author identity unknown`, so every `git commit` an agent made failed until it passed
+    // a session's image answered `Author identity unknown`, so every `git commit` an agent made failed until it passed
     // `-c user.name=… -c user.email=…` itself. The measurement is a commit with **no** `-c` and no
     // `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in the environment, and its author read back out of `git log` — the file's
     // text on its own would only prove that a file was written (ADR-0103).

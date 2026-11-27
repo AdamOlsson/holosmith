@@ -7,7 +7,7 @@ what it runs.
 The numbers below are wall-clock from one run on the development host (8 cores, warm `target/`, the product images
 already built) at commit `7d7bf08`, 2026-11-25, less the cost of a case the tree no longer runs. They are one machine's,
 so read the shape: which item is expensive, and why. A cold worktree with an empty `target/` adds the compile; a machine
-rebuilding `agent-image`, this repository's own image, adds the image build.
+rebuilding this repository's own project image, from `docker/Dockerfile`, adds the image build.
 
 ## Three tiers, one set of facts
 
@@ -16,8 +16,9 @@ rebuilding `agent-image`, this repository's own image, adds the image build.
 | worker | `scripts/gate-quick.sh <binary>...` | an agent's own turn | `fmt`, `clippy`, `cargo test --lib`, then only the integration binaries it was named |
 | proof | `scripts/verify.sh` | the parent, at the end | the whole thing below, including the artifact |
 
-`scripts/verify-in-container.sh` runs the *same* gate inside `agent-image`, the image this repository builds for itself,
-on the host's daemon; every argument and exit status is `verify.sh`'s. `verify.sh --no-build` skips the two artifact
+`scripts/verify-in-container.sh` runs the *same* gate inside this repository's **project** image — `hs-holosmith:<digest>`
+from `docker/Dockerfile`, the same image a session here runs (ADR-0126) — on the host's daemon; every argument and exit
+status is `verify.sh`'s. `verify.sh --no-build` skips the two artifact
 phases (the artifact must already be in `dist/`), `--keep` keeps the work dir of a green run.
 
 ## Before the first phase
@@ -45,7 +46,7 @@ Both run ahead of the phases, and neither is counted as one.
 
 A full green run on this host is therefore about **42 minutes**: 476 s of source-level phases, 240 s of artifact
 phases, and 1774 s of `serve` — **about three quarters of the gate is the serve phase**, and the serve phase is mostly
-container work: the three product images' build, and a full compile of this tree inside them (ADR-0115).
+container work: this repository's own project image and a full compile of this tree inside it (ADR-0115, ADR-0126).
 
 The build phase ends with a check that the artifact's `git_tag` is *this tree's*; on a tree with an uncommitted change
 it refuses (`git_tag e440b28 is not this tree (e440b28-dirty): re-run scripts/build.sh`). The gate is a fact about a
@@ -70,7 +71,7 @@ names the check behind every verdict.
 | docker backend | 8 | 37 s | the preflight, the hardened `.git` mounts on a real daemon, an agent launch, a resume, a turn, reconcile and its orphan sweep, the isolation selftest |
 | proxies | 7 | 14 s | key, MCP and egress proxies by their bytes (with a stand-in `openssl`), the Internet-access toggle on two real networks, the preview listener |
 | doctor and disk | 5 | 21 s | `--quick`, the tool-key finding, `--full`, the disk floor and the disk quota |
-| images and builds | 8 | 1406 s | the three product images, a project's own image built by the first session that needs it and not rebuilt by the next two, a recipe that does not build leaving its tail on the row and its whole log on disk, the base image rebuilt when a session finds it absent, the session's toolchain in a container, an offline build, the smoke run |
+| images and builds | 8 | 1406 s | the two product images and this repository's own project image, a project's own image built by the first session that needs it and not rebuilt by the next two, a recipe that does not build leaving its tail on the row and its whole log on disk, the base image rebuilt when a session finds it absent, the session's toolchain in a container, an offline build, the smoke run |
 | promotion and release | 3 of 4 (`upgrade` skipped here) | 53 s | `upgrade`'s arms, `rollback`'s four arms, a promotion from the app and the update it performs |
 | deploy, install, service | 9 of 10 (`server_service` failed here) | 38 s | `server deploy`, the three install renderings, the root refusal, the unit and the keys, `deploy --ssh`, `status`, `logs`, `uninstall` |
 
@@ -78,8 +79,8 @@ names the check behind every verdict.
 
 | Case | Cost | Why |
 | --- | --- | --- |
-| `case_agent_toolchain` | 552 s | the tracked tree copied into `agent-image`, the third product image, then `cargo build --locked`, `fmt --check`, `clippy`, `test` and `npm ci` inside it under `--network none` |
-| `case_server_images` | 474 s cold | removes all three product tags and rebuilds `holosmith-proxy`, `holosmith-base` (the generic session image) and `agent-image` (this repository's own); the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
+| `case_agent_toolchain` | 552 s | the tracked tree copied into this project's own image, then `cargo build --locked`, `fmt --check`, `clippy`, `test` and `npm ci` inside it under `--network none` |
+| `case_server_images` | 474 s cold | removes both product tags and this project's own tag, rebuilds `holosmith-proxy` and `holosmith-base` (the generic session image) through `server deploy`, and then builds the project image from `docker/Dockerfile`; the removal is not what costs this — a warm layer cache answers that build, and only an argument a `RUN` is in scope of busts it (ADR-0115) |
 | `case_agent_offline_build` | 370 s | the same offline build again, reading `file -b` on the musl artifact inside the container |
 | `case_idle_stop` | 66 s | `idle_stop_min` is whole minutes, so the sweeper is measured at its one-minute floor rather than behind a knob |
 | `case_web_update` | 30 s | a promotion started from the app, polled over its socket |
@@ -98,8 +99,9 @@ build, and they are expensive because nothing is fetched there: every crate and 
 image a session in this repository would run. That is the rule the arrangement rests on — a session runs what its
 image installed and cached when the image was built, and an allow-list entry is a host, not a compiler — so what a
 session can build with is a property of the image it was started from. `case_agent_toolchain` and
-`case_agent_offline_build` run inside `agent-image`, the image a machine whose projects are this tree names in
-`base_image`, and `case_server_images` is where that image is built, from the recipe embedded in the artifact.
+`case_agent_offline_build` run inside this project's own image, `hs-holosmith:<digest>` over `docker/Dockerfile`, and
+`case_server_images` is where that image is built — from the project's own recipe, by the same `docker build` a session's
+first start runs (ADR-0126).
 
 The three image cases after it are the **lazy** half (ADR-0124): `case_project_image` makes a project carry a
 `docker/Dockerfile` and lets its first session build `hs-<project>:<digest>`, `case_project_image_failure` gives one a
@@ -119,7 +121,7 @@ A `SKIP` with its reason is a fact about *this machine*, never a defect in the t
 | a Docker daemon | the container, isolation, image and build cases, the install cases in their container, and `case_docker_preflight` |
 | `$HOLOSMITH_TEST_IMAGE` (default `pi-agent:local`) | the mount and reconcile cases, and the two install cases |
 | python3 | the cases that read a database or speak a socket by hand, and `case_web_update` (it needs `free_port`) |
-| a network for one pinned base | the three product images: a host that cannot fetch is red here, not quiet |
+| a network for one pinned base | the two product images and the project image: a host that cannot fetch is red here, not quiet |
 | a path short enough for `AF_UNIX` | `case_upgrade` and `case_web_update`, which bind a socket under the checkout and print `SKIP … the socket path is <n> bytes and AF_UNIX caps one at 107` instead |
 
 ## Four traps this run hit, in the order they bite

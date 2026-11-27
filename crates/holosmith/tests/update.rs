@@ -320,6 +320,7 @@ fn wrapper(log: &Path, report: &Path, code: i32) -> String {
          printf 'argc %s\\n' \"$#\" > '{log}'\n\
          printf 'args %s\\n' \"$*\" >> '{log}'\n\
          printf 'image %s\\n' \"${{HOLOSMITH_VERIFY_IMAGE-<unset>}}\" >> '{log}'\n\
+         printf 'base %s\\n' \"${{HOLOSMITH_BASE_IMAGE-<unset>}}\" >> '{log}'\n\
          printf 'cwd %s\\n' \"$PWD\" >> '{log}'\n\
          printf 'case_thing: the gate says a line of its own\\n'\n\
          printf 'SKIP case_a: no Docker daemon answers\\n'\n\
@@ -438,8 +439,15 @@ fn the_gate_is_the_candidate_trees_own_script_in_the_running_releases_image() {
         "the gate was given arguments it does not take: {recorded}"
     );
     assert!(
-        recorded.contains(&format!("image {}\n", images::agent_image())),
-        "the gate did not run in the running release's image: {recorded}"
+        recorded.contains(&format!("image {}\n", images::base_image())),
+        "the gate did not run in the image a candidate with no recipe resolves to: {recorded}"
+    );
+    // The base the candidate tree's recipe is composed over, which is the value a wrapper that has to build the tag
+    // composes it from: a candidate that bumped `VERSION` has no base of its own, so a wrapper left to compose it from
+    // that tree's `VERSION` would name an image nobody built and refuse instead of running the gate.
+    assert!(
+        recorded.contains(&format!("base {}\n", images::base_image())),
+        "the gate was not told the base its candidate tree's recipe is composed over: {recorded}"
     );
     assert!(
         recorded.contains(&format!("cwd {}\n", world.source.display())),
@@ -576,14 +584,14 @@ fn every_gate_exit_code_keeps_the_meaning_its_wrappers_header_gives_it() {
     }
 
     // Exit 3 is a **host act** and not a broken registry: a candidate whose `Cargo.lock` moves the crate set cannot be
-    // verified in the running release's image, and the repair is to build and deploy that image from the candidate.
+    // verified in the image its gate runs in, and the repair is to fetch that lock on a host and rebuild that image.
     let host_act = world("update-exit-3-host-act", 3);
     let (_, report) = host_act.run(&Recorder::new("0.1.0"));
     let said = detail(&report);
     assert!(said.contains("host act"), "{said}");
     assert!(said.contains("cargo fetch --locked"), "{said}");
     assert!(
-        said.contains("build and deploy"),
+        said.contains("holosmith image build holosmith --force"),
         "the refusal does not name the repair: {said}"
     );
     assert!(
@@ -887,10 +895,8 @@ fn a_green_gate_promotes_the_artifact_its_build_phase_wrote() {
             "smoke".to_string(),
             format!("labels:holosmith-proxy:{}", info.version),
             format!("labels:holosmith-base:{}", info.version),
-            format!("labels:agent-image:{}", info.version),
             format!("build:holosmith-proxy:{}", info.version),
             format!("build:holosmith-base:{}", info.version),
-            format!("build:agent-image:{}", info.version),
             "drain".to_string(),
             "restart".to_string(),
             "health:0".to_string(),

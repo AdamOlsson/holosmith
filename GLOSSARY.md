@@ -1060,16 +1060,17 @@ rustfmt and clippy at the version `pins/rust.txt` holds, the musl target, and it
 package key and no toolchain label: everything a recipe installs is fixed, so no config key removes it and none moves
 its version. The analogue of the **pinned pi version** for rust is that pin file, whose one line is the base's whole
 reference — tag and digest — and which every recipe with a rust stage takes as `ARG HOLOSMITH_RUST_IMAGE`, so no
-recipe holds the digest and a bump is one edit (ADR-0118). A session can therefore run `cargo fmt`, `cargo clippy`,
-`cargo test`
+recipe holds the digest and a bump is one edit (ADR-0118). For this repository that recipe is a **project image**'s,
+`docker/Dockerfile`, which is what makes this tree the first project to bring a recipe of its own (ADR-0126). A session
+can therefore run `cargo fmt`, `cargo clippy`, `cargo test`
 and `npm test` (ADR-0105) out of the **Vendored crate set** it carries too; what it does not have is a Docker daemon,
 so `scripts/verify-in-container.sh` is what runs `scripts/verify.sh` in that image on the host's daemon (ADR-0109),
 where the container-shaped integration binaries measure instead of printing a `SKIP`.
 _Avoid_: Agent toolchain, build toolchain, dev container, rust image (there is no variant image)
 
 **Vendored crate set**:
-The crates this tree's `Cargo.lock` names, unpacked by `cargo vendor --locked` into `/opt/cargo-vendor` **inside the
-agent image**, with `/.cargo/config.toml` replacing crates-io with that directory and `net.offline = true`. It is what
+The crates this tree's `Cargo.lock` names, unpacked by `cargo vendor --locked` into `/opt/cargo-vendor` **inside this
+project's image**, with `/.cargo/config.toml` replacing crates-io with that directory and `net.offline = true`. It is what
 makes a session's `cargo build --locked` work with no flag and no network: it ships, nothing mounts it, and nothing is
 fetched. `/opt/cargo-vendor/.holosmith-cargo-lock` is the digest of the lock it came from, which is how an image's
 vendored crate set is compared with a tree's. It is the lock's set and nothing else, so a session cannot add a crate —
@@ -1083,7 +1084,7 @@ _Avoid_: Vendor directory (the path, not the idea), vendor set (the same idea un
 which is what this replaced), offline bundle
 
 **Npm cache**:
-`/opt/npm-cache` in the agent image: the tarballs a session's `npm ci` installs from, filled at image-build time out of
+`/opt/npm-cache` in this project's image: the tarballs a session's `npm ci` installs from, filled at image-build time out of
 `web/package-lock.json` and read with no flag because `npm_config_cache` and `npm_config_offline` name it. It is root's
 and read-only for a session, which is why `npm_config_logs_dir=/tmp/npm-logs` is set: npm's default is `<cache>/_logs`,
 and a cache a session cannot write is an npm that fails before it installs anything. It is the **Vendored crate set**'s
@@ -1098,7 +1099,7 @@ binary for the same tag is refused with both digests named. Safe, not trusted: t
 _Avoid_: Build script (that is the command, not its output), compile step
 
 **Version**:
-The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one. Kept in `VERSION` at the repository root and nowhere else: `build.rs` reads it into the binary, and both manifests hold `0.0.0` so that a bump never moves `Cargo.lock`, whose digest a promotion's crate-set check compares against the agent image's.
+The semantic version of the `holosmith` binary itself, such as `0.1.0`. It is not a Release and never a synonym for one. Kept in `VERSION` at the repository root and nowhere else: `build.rs` reads it into the binary, and both manifests hold `0.0.0` so that a bump never moves `Cargo.lock`, whose digest a promotion's crate-set check compares against this project's image's.
 _Avoid_: Release, build, build number
 
 **Git tag**:
@@ -1106,7 +1107,7 @@ The tag the binary was built from, or the short commit sha when no tag exists.
 _Avoid_: Commit, release version, build id
 
 **Pinned pi version**:
-The one pi version that the build, `doctor` and the agent image all read, kept in `pins/pi.txt` and nowhere else. Its machine name is `pi_version`, in the binary's output and in any later config key.
+The one pi version that the build, `doctor` and the base image all read, kept in `pins/pi.txt` and nowhere else. Its machine name is `pi_version`, in the binary's output and in any later config key.
 _Avoid_: Pi version, agent version, latest pi
 
 **Migration**:
@@ -1188,9 +1189,10 @@ _Avoid_: Deploy (that installs a machine), upgrade (the command), rollout, relea
 **Update**:
 `holosmith update [--report PATH] [--wait D] [--config PATH] [--root DIR]`: one **promotion**, with a pass of the
 **gate** standing where the **upgrade** verb's `--acknowledge-review` stands. The **candidate** is `[update] source`'s
-clean `master`; the gate is that tree's own `scripts/verify-in-container.sh`, run with
-`HOLOSMITH_VERIFY_IMAGE=agent-image:<the running release's version>` and without `--no-build`, so the artifact its
-`build` phase writes is the artifact promoted; then the pipeline runs on
+clean `master`; the gate is that tree's own `scripts/verify-in-container.sh`, run with `HOLOSMITH_VERIFY_IMAGE` set to
+that tree's **project image** — `hs-holosmith:<digest>` over its `docker/Dockerfile`, composed over the base image the
+running release deployed — and without `--no-build`, so the artifact its `build` phase writes is the artifact promoted;
+then the pipeline runs on
 `<source>/dist/<this machine's triple>/holosmith`. Ten gigabytes of free space on the candidate tree's filesystem are
 asked for before the gate starts, because that is what it writes. It takes no `--acknowledge-review` — the gate is the
 record — and `--report` writes one JSON object for **every** ending, because a job's caller reads that file and not a
@@ -1251,14 +1253,14 @@ real state" is those four settings **and** the five names the two prefixes compo
 _Avoid_: Test config, temporary config, sandbox config
 
 **Smoke image**:
-`holosmith-smoke:<version>`, which a **smoke run** builds from the candidate's own bytes: the **agent image**'s
+`holosmith-smoke:<version>`, which a **smoke run** builds from the candidate's own bytes: the **base image**'s
 digest-pinned node base, `COPY holosmith`, and `/usr/local/bin/pi` a wrapper onto `holosmith container fake-pi "$@"`
 (`crates/holosmith/images/smoke.Dockerfile`, embedded like the two product recipes). Nothing is installed on it — the
 **fake pi** replays records — and node stays because the boot's network self-test probes `base_image` as `node -e`.
 Labelled `org.holosmith.smoke-recipe-sha256` with the SHA-256 of (recipe ‖ candidate bytes), so a changed recipe or a
 different candidate rebuilds and the same candidate again does not. It is not one of the **image build**'s two: a
 promotion never ships it, and `server deploy` does not build it.
-_Avoid_: Test image, agent image (that is the product one), fake image, mock image
+_Avoid_: Test image, session image (that is the product one), fake image, mock image
 
 **Recorded turn**:
 `crates/holosmith/fixtures/smoke-turn.jsonl`: one header line (`{"type":"fixture","version":1,"schema":8,"recorded":
@@ -1299,20 +1301,19 @@ exact argv and verifies on the next run (ADR-0086, ADR-0088). Its machine names 
 _Avoid_: Install step, deploy phase, stage, deployment
 
 **Image build**:
-One `docker build` this program runs, of which there are two shapes. The three **product** images, which
+One `docker build` this program runs, of which there are two shapes. The two **product** images, which
 `server deploy`'s step 3 builds from the Dockerfiles embedded in the binary: `holosmith-proxy:<version>`, the artifact on
-`alpine` plus openssl, which the three proxies run; `holosmith-base:<version>`, pi at the pinned version, node, git, CA
-certificates, openssl and `procps` and nothing else, which is the session image for a project that carries no recipe of
-its own, the base a project's recipe extends, and the value `base_image` defaults to (ADR-0114, ADR-0117, ADR-0123); and
-`agent-image:<version>`, the same session plus the artifact, this repository's Rust toolchain, python3 and ripgrep, the
-crate set and the npm cache, which a machine whose projects are this tree points `base_image` at. Their context is an
-archive holding the Dockerfile, the running binary and — on the agent image — the crate set a build can vendor from
-(`images::Kind::context`), and it is a **build**, not a pull. The second shape is a **project image**'s: the project root
-as a directory context, run lazily by the container step of the first session that needs it and by `holosmith image
-build`, under a per-image lock and the machine's, with its whole log at `<data>/images/<repository>.log` (ADR-0124).
-Either way a build has the internet and the session it produces does not. Its machine names are `images::Kind`,
-`images::ensure`, `images::Input`, `images::proxy_image`/`images::base_image`/`images::agent_image` and
-`imagebuild::{ensure, ensure_base}`.
+`alpine` plus openssl, which the three proxies run; and `holosmith-base:<version>`, pi at the pinned version, node, git,
+CA certificates, openssl and `procps` and nothing else, which is the session image for a project that carries no recipe
+of its own, the base a project's recipe extends, and the value `base_image` defaults to (ADR-0114, ADR-0117,
+ADR-0123). Their context is an archive holding the Dockerfile and the running binary, and it is a **build**, not a pull.
+The second shape is a **project image**'s — `hs-<project>:<digest>`, which for this repository is `hs-holosmith` over
+`docker/Dockerfile`, so the toolchain this tree needs is a project's recipe and not a third product image (ADR-0126):
+the project root as a directory context, run lazily by the container step of the first session that needs it and by
+`holosmith image build`, under a per-image lock and the machine's, with its whole log at
+`<data>/images/<repository>.log` (ADR-0124). Either way a build has the internet and the session it produces does not.
+Its machine names are `images::Kind`, `images::ensure`, `images::Input`, `images::proxy_image`/`images::base_image`,
+`projectimage::{resolve, Build}` and `imagebuild::{ensure, ensure_base}`.
 _Avoid_: Container image, docker image, image pull, base image
 
 **Project image**:
@@ -1357,7 +1358,7 @@ _Avoid_: tag, label, session id
 **Doctor**:
 The preflight and self-test command that decides whether a machine may run sessions: `doctor --quick` is the
 list `serve` refuses on and the unit file's `ExecStartPre`, and `doctor --full` adds the network self-test,
-the three proxies and the agent image's pi version. Its exit code is non-zero iff a **finding** failed. Its
+the three proxies and the session image's pi version. Its exit code is non-zero iff a **finding** failed. Its
 machine names are `doctor::run`, `Depth`, `Tools`, `Machine` and `Report`; the network self-test keeps its own
 `selftest::Outcome`, which is the report's entry for that check and not a second vocabulary.
 _Avoid_: Healthcheck, verify

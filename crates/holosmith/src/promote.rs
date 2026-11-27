@@ -420,6 +420,7 @@ pub fn execute(
     // a line per step of its own as it goes (`<verb>: images: …`), so a build's two lines would be a second spelling
     // of one progress stream — `install` is the verb whose silence the sink exists for (ADR-0092).
     let pending = images::outstanding(steps.images(), &candidate.info, &candidate.digest);
+    // `false`: a promotion rebuilds what the candidate's labels say is not built, and nothing here is a `--force`.
     match images::ensure(
         steps.images(),
         &candidate.path,
@@ -428,6 +429,7 @@ pub fn execute(
         &pending,
         "images",
         None,
+        false,
         &mut progress::Silent,
     ) {
         Ok(sentence) => println!("{verb}: images: {sentence}"),

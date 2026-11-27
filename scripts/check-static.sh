@@ -303,7 +303,9 @@ for target in "${targets[@]}"; do
   # the artifact and nothing else. Each file's marker comment is the evidence: read from the source, for the
   # placeholder marker's reason — a reworded marker must fail here loudly rather than leave this grep looking for
   # a string no file carries any more.
-  for dockerfile in proxy base agent; do
+  # The proxy and the base, which are the two recipes embedded in the binary. A project's recipe is a file in the
+  # project's tree rather than a string in here (ADR-0126), so there is nothing for this loop to grep for it.
+  for dockerfile in proxy base; do
     marker="$(sed -n "s/.*# holosmith: embedded \\(.*\\) image.*/\\1/p" \
       "crates/holosmith/images/$dockerfile.Dockerfile")"
     [ "$marker" = "$dockerfile" ] ||

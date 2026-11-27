@@ -1,0 +1,30 @@
+# What the daemon does not send when `docker/Dockerfile` is built.
+#
+# The build context is this project's root, because the recipe copies the two manifests, the member's `lib.rs` and the
+# web pair out of it at their real paths. Everything else in the tree is either build output or a machine's own state,
+# and a context that carried it would be gigabytes on every session's first start rather than a source tree.
+#
+# `crates/holosmith/tests/fixtures` is deliberately **not** excluded: it is source, and a recipe that later wants a
+# fixture in its context must get it.
+
+# Build output and release trees: `target/` is the largest thing in a working tree by an order of magnitude, and
+# neither `dist/` nor a promotion's `releases/` is an input of any build.
+target
+dist
+releases
+reports
+toolchains
+
+# The web app's installed packages and its build: `npm ci` recreates both, and the image's `/opt/npm-cache` is what a
+# session's install reads.
+web/node_modules
+web/dist
+
+# Git's own history and every worktree pointer beside it: nothing the recipe copies is in there, and a linked
+# worktree's `.git` is a file pointing at a common dir this context could not carry anyway.
+.git
+
+# The agent's own scratch directory, which a session's pi writes under, and the editor and log noise that follows it.
+.pi
+*.log
+.DS_Store

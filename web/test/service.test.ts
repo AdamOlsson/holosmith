@@ -71,7 +71,7 @@ function running(since = 1_700_000_000, lines: string[] = []): Report {
 function gate(overrides: Partial<Report["gate"] & object> = {}) {
   return {
     command: "/home/operator/holosmith-src/scripts/verify-in-container.sh",
-    image: "agent-image:0.1.0",
+    image: "holosmith-base:0.1.0",
     exit_code: 1,
     ending: "refused",
     skips: 0,

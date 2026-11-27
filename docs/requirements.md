@@ -40,7 +40,7 @@ Nothing else is required: no Python or Node runtime, no database server, no reve
 - waits for `/api/health`, then prints the control URL and the one next step.
 
 Re-running changes nothing, and `holosmith install --dry-run` prints each step's plan and writes nothing. The first
-real run builds `holosmith-proxy` and `agent-image` from the embedded recipes, which takes minutes; every later run
+real run builds `holosmith-proxy` and `holosmith-base` from the embedded recipes, which takes minutes; every later run
 is a read. The run copies the binary it is running into the install tree's release directory and points the unit at
 that copy, so where the download landed stops mattering — when this binary's tag can name a release directory; the
 step's line says why, and names the file it ran instead, when it cannot.
@@ -80,7 +80,7 @@ network only when that session allows Internet access, so a tool's host is never
 Rust 1.100+ (edition 2024) on `PATH` — `pins/rust.txt` holds the version, and `scripts/build.sh` refuses a compiler that
 is not it — and Node.js and npm for `web/`. The one musl cross compiler the shipped target needs,
 `x86_64-linux-musl-gcc`, is the tree's rather than the machine's: the script takes it from `PATH` when it is there,
-then from this tree's `toolchains/`, and fetches the tarball `agent.Dockerfile` pins — checked against the recipe's
+then from this tree's `toolchains/`, and fetches the tarball `docker/Dockerfile` pins — checked against the recipe's
 SHA-256 before anything is extracted — into `toolchains/` when neither has one (ADR-0120). SQLite is compiled from
 source, so the C toolchain crosses too. `scripts/build.sh` builds the web app first and then the static artifact, which
 lands in `dist/<triple>/holosmith` with its digest beside it; `scripts/verify.sh` is the gate. Put the artifact in a

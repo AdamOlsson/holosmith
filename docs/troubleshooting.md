@@ -52,4 +52,6 @@ holosmith logs --session <id>
 docker image ls
 ```
 
-The images are `agent-image` and `holosmith-proxy`.
+The product images are `holosmith-proxy:<version>` and `holosmith-base:<version>`. This project's own image is a
+project's, so it is `hs-holosmith:<digest>` — the digest over `docker/Dockerfile` and the base image's tag — and
+`scripts/project-image.sh tag` prints it.

@@ -2,10 +2,9 @@
 #
 # The **generic** session image: pi at the pinned version, node under it, git, CA certificates, `openssl` and `procps`
 # — and nothing else. It is what a project that is not this repository runs a session in, and it is what the config's
-# `base_image` defaults to, so a machine that never touched the key runs its sessions in this image.
-# `agent.Dockerfile` is the same session with this tree's toolchain, crate set and npm cache in it, and a project
-# that needs a package of its own builds its own image `FROM` this one — a `docker/Dockerfile` of its own,
-# `docker build -t <name> …`, named in `base_image` — rather than configuring a list.
+# `base_image` defaults to, so a machine that never touched the key runs its sessions in this image. A project that
+# needs a package or a toolchain of its own gives itself a recipe `FROM` this one — `<project root>/docker/Dockerfile`,
+# which is the file this repository keeps for itself (ADR-0123, ADR-0126) — rather than configuring a list.
 #
 # Every entry below is a fact some code already relies on:
 #
@@ -20,13 +19,14 @@
 # - **ca-certificates**, for the egress proxy's allow-listed HTTPS.
 # - **openssl**, which a git-over-HTTPS path needs, and **procps**, which is `/bin/kill`: `smoke`'s liveness check and
 #   its stop spawn `kill -0` and `kill -TERM` as children (`src/smoke.rs`), and a shell builtin is not a program
-#   `Command::new` can find. That sentence is why `procps` is in the agent image's apt line too.
+#   `Command::new` can find. That sentence is why `procps` is in this repository's own project recipe too
+#   (`docker/Dockerfile`).
 #
 # **What is absent is as deliberate as what is present**, and it is measured rather than asserted: no
 # `build-essential`, no `file`, no rustc or cargo, no cross linker, no `/opt/cargo-vendor`, no `/opt/npm-cache` and no
-# `/.cargo/config.toml`. A tree that needs any of them runs in the agent image, which carries all of it. This image is
-# generic, and a second project's session must not inherit this repository's toolchain because this repository
-# happens to be written in Rust.
+# `/.cargo/config.toml`. A tree that needs any of them runs in its project's own image — this repository's is
+# `docker/Dockerfile`, which carries all of it. This image is generic, and a project's session must not inherit this
+# repository's toolchain because this repository happens to be written in Rust.
 #
 # **The binary is not copied in.** `images::BINARY_IN_IMAGE` is reached by three `--entrypoint` sites and all three are
 # the proxy containers, while `holosmith container snapshot`'s in-container entry point has no caller in the product
@@ -35,10 +35,11 @@
 # is what `server deploy`'s skip rule compares to see a rebuilt artifact, and it moves with the recipe because the
 # recipe is `include_str!`ed into that binary.
 #
-# **The base is `agent.Dockerfile`'s own base, by the same manifest-list digest**, so a session that moves between the
-# two images does not move to another distribution and the smoke image's `the_smoke_recipe_names_the_agent_images_base`
-# stays true through the second recipe. `tests/images.rs` reads this file's `FROM` line against the agent recipe's
-# last one, so the two cannot drift. The **digest** rather than the tag is the pin: a tag re-resolves on the next
+# **The base is the smoke image's, by the same manifest-list digest**, so a session that moves between the two does not
+# move to another distribution. `tests/images.rs` reads this file's `FROM` line against the smoke recipe's, so the two
+# cannot drift — and that comparison is now the whole of what pins the smoke image's base: this repository's own
+# session image is a project's recipe, `FROM ${HOLOSMITH_BASE_IMAGE}`, so it holds no node digest of its own
+# (ADR-0126 D5). The **digest** rather than the tag is the pin: a tag re-resolves on the next
 # pull, and one manifest list resolves to the daemon's own architecture.
 #
 # The identity rule is unchanged (ADR-0087): a session's container runs `--user <the data root's owner>:<gid>` with no
@@ -89,9 +90,10 @@ LABEL org.holosmith.version="${HOLOSMITH_VERSION}" \
       org.holosmith.pi-version="${HOLOSMITH_PI_VERSION}" \
       org.holosmith.binary-sha256="${HOLOSMITH_BINARY_SHA256}"
 
-# The base's own non-root user (ADR-0035), the same one the agent image keeps for the same reason. A session's
-# container is started with `--user` over it, so this is the spelling a plain `docker run` of this image gets rather
-# than the identity a session has; `case_server_images` measures the second one as a uid that is neither 0 nor this.
+# The base's own non-root user (ADR-0035), the same one this repository's project recipe keeps for the same reason.
+# A session's container is started with `--user` over it, so this is the spelling a plain `docker run` of this image
+# gets rather than the identity a session has; `case_server_images` measures the second one as a uid that is neither 0
+# nor this.
 USER node
 # The one path pi writes that must not be `$HOME`: a session's `HOME` is `/` and belongs to no writable place.
 ENV PI_CODING_AGENT_DIR=/tmp/pi-agent

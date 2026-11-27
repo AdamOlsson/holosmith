@@ -54,7 +54,7 @@ pub struct ProjectImage {
     pub build: Option<Build>,
 }
 
-/// A project's recipe, and the directory Docker is handed with it.
+/// A project's recipe, the directory Docker is handed with it, and the build arguments it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
     /// `<project root>/docker/Dockerfile`: the file the tag's digest is taken over.
@@ -62,6 +62,52 @@ pub struct Build {
     /// The project root. Docker filters it by the project's `.dockerignore` when it has one, and an absent one
     /// leaves the context exactly this directory.
     pub context: PathBuf,
+    /// The `--build-arg` pairs this recipe **declares**, and only those.
+    ///
+    /// A `FROM` cannot read a file, so a value a recipe's `FROM` line needs has to arrive as an argument: the base
+    /// image's tag and, for a recipe with a rust stage, the pinned rust base's reference. Both are values this binary
+    /// already holds — the first is the base a project was resolved against ([`resolve`]'s argument, which is what the
+    /// tag's digest covers too), the second is `pins/rust.txt`'s — so filling them here is what keeps a recipe from
+    /// carrying a second copy of either (ADR-0118, ADR-0126).
+    ///
+    /// **The recipe's own text decides which ones.** A `--build-arg` a recipe does not declare is a BuildKit warning
+    /// over nothing, and a recipe that declares `HOLOSMITH_RUST_IMAGE` without a rust stage would be a project taking a
+    /// value it never uses — so a build is handed exactly the arguments the file names.
+    pub arguments: Vec<(String, String)>,
+}
+
+/// The argument a project's recipe reads its base image from: the tag the project was resolved against.
+pub const BASE_IMAGE_ARG: &str = "HOLOSMITH_BASE_IMAGE";
+
+/// The arguments a project's recipe declares, in the order [`Build::arguments`] hands them over.
+///
+/// Read from the recipe's own text rather than from a list here, because the recipe is the project's file and this
+/// module's job is to fill what it asks for: a `docker/Dockerfile` with no `ARG` at all gets no arguments (an image
+/// built `FROM` a literal), one that names the base gets the base's tag, and one that names the rust base gets the
+/// pin (ADR-0126).
+fn declared_arguments(recipe: &[u8], base_image: &str) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(recipe);
+    let mut arguments = Vec::new();
+    for line in text.lines() {
+        let Some(declared) = line
+            .trim()
+            .strip_prefix("ARG ")
+            .and_then(|rest| rest.split_whitespace().next())
+        else {
+            continue;
+        };
+        // `ARG NAME=value` declares a default a build may override; the name is the first word either way.
+        let name = declared.split_once('=').map_or(declared, |(name, _)| name);
+        let value = match name {
+            BASE_IMAGE_ARG => base_image.to_string(),
+            crate::images::RUST_IMAGE_ARG => crate::pins::rust_image().to_string(),
+            _ => continue,
+        };
+        if !arguments.iter().any(|(have, _)| have == name) {
+            arguments.push((name.to_string(), value));
+        }
+    }
+    arguments
 }
 
 /// The image `project`'s sessions run, read from the tree at `project_root` for the base tag `base_image`.
@@ -124,6 +170,7 @@ pub fn resolve(
         build: Some(Build {
             recipe,
             context: project_root.to_path_buf(),
+            arguments: declared_arguments(&bytes, base_image),
         }),
     })
 }
@@ -414,6 +461,82 @@ mod tests {
             .expect("a recipe has a build");
         assert_eq!(with.context, one, "a `.dockerignore` moved the context");
         assert_eq!(without.recipe, with.recipe);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_recipe_that_declares_no_argument_is_handed_none() {
+        // The rule is the recipe's own text: a project whose `FROM` is a literal gets no `--build-arg` at all, because an
+        // argument a recipe does not declare is a BuildKit warning over nothing (ADR-0126).
+        let root = scratch("no-arguments");
+        let one = project(
+            &root,
+            "one",
+            b"FROM holosmith-base:0.1.0\nRUN apt-get install -y make\n",
+        );
+        let resolved =
+            resolve(&one, "one", "holosmith-base:0.1.0").expect("a written recipe resolves");
+        let build = resolved.build.expect("a recipe has a build");
+        assert_eq!(build.arguments, Vec::<(String, String)>::new());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_recipe_that_declares_the_two_arguments_is_handed_exactly_those() {
+        // Both values are this binary's, and neither may be a recipe's own copy: the base tag is the one the project was
+        // resolved against — so the tag's digest and the `FROM` agree — and the rust reference is `pins/rust.txt`'s
+        // (ADR-0118). A recipe declaring one of them gets that one and nothing else.
+        let root = scratch("arguments");
+        let recipe = b"ARG HOLOSMITH_BASE_IMAGE=holosmith-base:latest\nARG HOLOSMITH_RUST_IMAGE\nFROM rust:${HOLOSMITH_RUST_IMAGE} AS rust\nFROM ${HOLOSMITH_BASE_IMAGE}\n";
+        let both = project(&root, "both", recipe);
+        let resolved =
+            resolve(&both, "both", "holosmith-base:0.7.0").expect("a written recipe resolves");
+        assert_eq!(
+            resolved.build.expect("a recipe has a build").arguments,
+            [
+                (
+                    BASE_IMAGE_ARG.to_string(),
+                    "holosmith-base:0.7.0".to_string()
+                ),
+                (
+                    crate::images::RUST_IMAGE_ARG.to_string(),
+                    crate::pins::rust_image().to_string()
+                ),
+            ],
+            "the arguments a build is handed are not the recipe's own, filled with this binary's values"
+        );
+        // One of them, and only it: a recipe with no rust stage is not handed the rust reference.
+        let base_only = project(
+            &root,
+            "base-only",
+            b"ARG HOLOSMITH_BASE_IMAGE\nFROM ${HOLOSMITH_BASE_IMAGE}\n",
+        );
+        let resolved = resolve(&base_only, "base-only", "holosmith-base:0.7.0")
+            .expect("a written recipe resolves");
+        assert_eq!(
+            resolved.build.expect("a recipe has a build").arguments,
+            [(
+                BASE_IMAGE_ARG.to_string(),
+                "holosmith-base:0.7.0".to_string()
+            )]
+        );
+        // And a declared default is not a second source: `ARG NAME=value` is read for its name, and the value a build is
+        // handed is the one the resolver holds.
+        let defaulted = project(
+            &root,
+            "defaulted",
+            b"ARG HOLOSMITH_BASE_IMAGE=holosmith-base:latest\nFROM ${HOLOSMITH_BASE_IMAGE}\n",
+        );
+        let resolved = resolve(&defaulted, "defaulted", "holosmith-base:0.7.0")
+            .expect("a written recipe resolves");
+        assert_eq!(
+            resolved.build.expect("a recipe has a build").arguments,
+            [(
+                BASE_IMAGE_ARG.to_string(),
+                "holosmith-base:0.7.0".to_string()
+            )],
+            "a recipe's declared default displaced the tag the project was resolved against"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

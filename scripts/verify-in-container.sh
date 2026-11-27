@@ -5,13 +5,17 @@
 #
 # Every argument and every status is the gate's own: `--keep`, `--no-build`, `--help` and an unknown flag all reach
 # `scripts/verify.sh` verbatim, so `--help` prints the gate's usage and this script parses nothing. Exit 0 is a green
-# gate, 1 a red one, and 2 is a misuse: this script refusing to start (root, no `docker` CLI, no daemon, no image, no
-# `VERSION` file, a tree the daemon cannot see), or `scripts/verify.sh`'s own unknown argument. No operator may read
-# a 2 as a red tree — and 3 is `scripts/check-crate-set.sh`'s answer, reached through `scripts/verify.sh`'s preflight
-# before its first phase and passed through this script unchanged: the image vendored another `Cargo.lock`, so a crate
-# this tree needs is missing from it and the repair is a rebuilt `agent-image`, which is no verdict about the tree
-# either — and 4 is a build that could not fetch a source it pins (`scripts/verify.sh`'s `UNREACHABLE` line, passed
-# through unchanged), which is a host that did not answer rather than a tree nobody passed — and 125, 126, 127 and 137
+# gate, 1 a red one, and 2 is a misuse: this script refusing to start (root, no `docker` CLI, no daemon, a project image
+# that could not be built, an image a caller named and the daemon does not have, a tree the daemon cannot see), or
+# `scripts/verify.sh`'s own unknown argument. No operator may read a 2 as a red tree, and **a recipe no daemon could
+# build is that same 2**, deliberately: this script's job is to say it could not run the gate, not to judge the tree,
+# and a `docker/Dockerfile` that does not build leaves nothing to run the gate in — `holosmith update` reads that 2 as
+# `could not verify` rather than as a refusal of the tree. And 3 is `scripts/check-crate-set.sh`'s answer, reached
+# through `scripts/verify.sh`'s preflight before its first phase and passed through this script unchanged: the image
+# vendored another `Cargo.lock`, so a crate this tree needs is missing from it and the repair is a rebuilt project
+# image, which is no verdict about the tree either — and 4 is a build that could not fetch a source it pins
+# (`scripts/verify.sh`'s `UNREACHABLE` line, passed through unchanged), which is a host that did not answer rather than
+# a tree nobody passed — and 125, 126, 127 and 137
 # are `docker run`'s own codes, for docker failing, a container command that is not executable, one that is not there,
 # and a container the kernel killed, so none of those is the gate's verdict either.
 #
@@ -67,8 +71,15 @@
 # `HOLOSMITH_GIT_TAG`, `HOLOSMITH_CRATE_SET`, `HOLOSMITH_LOG`, …) and is left for the scripts to set, so no marker, tag
 # or flag from outside changes what the gate in there decides.
 #
-# Two knobs are this script's own: `HOLOSMITH_VERIFY_IMAGE` names the image to run in, defaulting to
-# `agent-image:<the version in VERSION>` — the tag `server deploy` builds — and `DOCKER_HOST` is the one way the
+# **The image this runs the gate in is this tree's own project image** — `hs-holosmith:<digest>` over
+# `docker/Dockerfile`, which is the same image a session in this project runs (ADR-0126). Two knobs are this script's
+# own: `HOLOSMITH_VERIFY_IMAGE` names the image, defaulting to `scripts/project-image.sh tag`'s answer, and
+# `HOLOSMITH_BASE_IMAGE` names the base that tag is composed over, which is how `holosmith update` hands a candidate
+# tree the base its own release deployed. **A named image is taken as it is**: `holosmith update` hands the candidate's
+# *resolved* image, and a candidate tree with no recipe resolves to the base image (ADR-0126 D2), so composing this
+# tree's tag first would refuse a tree the resolver had already answered for. The default tag is built by
+# `scripts/project-image.sh ensure` when it is absent — one `docker build`, because the gate cannot run before its
+# image exists and the tag is a fresh digest on every recipe edit. And `DOCKER_HOST` is the one way the
 # daemon is named, defaulting to `unix:///var/run/docker.sock`. `DOCKER_CONTEXT` is refused rather than resolved: it
 # names a daemon by context, and this script has no socket to mount for one, so the container would measure the default
 # socket while the checks here measured the context's — the silent wrong answer the paragraph above exists to prevent.
@@ -106,15 +117,35 @@ docker_host="${DOCKER_HOST:-unix:///var/run/docker.sock}"
 docker info >/dev/null 2>&1 ||
   refuse "no Docker daemon answers at $docker_host: start it, or point DOCKER_HOST at the one the gate should measure against"
 
-# The image's tag is the version, because that is what `server deploy` builds (`images::agent_image`,
-# `agent-image:<version>`) — read from `VERSION` rather than from the artifact, which need not exist yet, and not from
-# `Cargo.toml`, whose version is the `0.0.0` placeholder that file carries so that a bump never moves `Cargo.lock`.
-version="$(head -n 1 VERSION 2>/dev/null | tr -d '[:space:]')"
-[ -n "$version" ] ||
-  refuse "VERSION names no version, so there is no agent-image tag to default to: set HOLOSMITH_VERIFY_IMAGE to the image the gate should run in"
-image="${HOLOSMITH_VERIFY_IMAGE:-agent-image:$version}"
-docker image inspect "$image" >/dev/null 2>&1 ||
-  refuse "the image $image is not on this daemon: run 'holosmith server deploy' to build it, or set HOLOSMITH_VERIFY_IMAGE to the one the gate should run in"
+# The image is this tree's own project image, and its tag comes from the one place that composes it
+# (`scripts/project-image.sh tag`, which `crates/holosmith/tests/images.rs` holds to `projectimage::resolve`). It needs
+# no artifact, no daemon and no `holosmith`, which is why it is the default rather than a name read from one. `VERSION`
+# is still the base tag's source, and `pins/rust.txt` the rust stage's; both live in that script.
+#
+# **The tag is composed only when no image was named.** `HOLOSMITH_VERIFY_IMAGE` is `holosmith update`'s, and what it
+# hands is the candidate tree's *resolved* image: a candidate with no `docker/Dockerfile` of its own resolves to the
+# base image (ADR-0126 D2), which `scripts/project-image.sh tag` refuses for a reason that has nothing to do with this
+# run — so composing first would refuse a tree the resolver had already answered for.
+#
+# **An absent default image is built rather than refused**, because this script cannot run the gate without it and the
+# tag is a fresh digest on every recipe edit: a refusal would make this script and `holosmith update` ask an operator
+# for a build they have no separate verb for. The ensure is one `docker build` under the same refusals as everything
+# below (no CLI, no daemon, a tree the daemon cannot see), and its own sentence when it fails.
+project_tag=""
+if [ -z "${HOLOSMITH_VERIFY_IMAGE:-}" ]; then
+  project_tag="$(bash scripts/project-image.sh tag)" ||
+    refuse "this tree's project image tag could not be composed, and the sentence above says why: fix that file, and the gate runs in the image it names"
+fi
+image="${HOLOSMITH_VERIFY_IMAGE:-$project_tag}"
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  # A named image is the caller's to provide: it can be the base image, or one built by hand, and this script has no
+  # verb that would rebuild it.
+  [ -n "$project_tag" ] ||
+    refuse "the image $image is not on this daemon, and a run that names its image is not one this script builds: run 'holosmith image build holosmith --force' for this tree's own project image, or 'holosmith image build --base --force' for the base a candidate with no recipe resolves to, or unset HOLOSMITH_VERIFY_IMAGE"
+  printf 'verify-in-container: building %s, which this tree has no image for yet\n' "$image" >&2
+  bash scripts/project-image.sh ensure >/dev/null ||
+    refuse "this tree's project image $image could not be built, and the build's own sentence above says why: the gate cannot run without an image to run in"
+fi
 
 # A tree the daemon cannot see, which is the ticket's own failure: a bind source the daemon resolves to nothing is an
 # empty directory rather than an error (ADR-0035), so every case in there would then read a tree that is not the one

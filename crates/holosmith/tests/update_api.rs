@@ -837,13 +837,14 @@ async fn the_report_a_job_writes_is_what_the_get_answers_before_and_after_the_re
     );
     assert_eq!(code, ExitCode::FAILURE, "exit 3 is never a live candidate");
 
-    // The gate the job ran is the candidate tree's own script, in the image the **running release** deployed — the one
-    // fact a real run would take three quarters of an hour to show.
+    // The gate the job ran is the candidate tree's own script, in the **candidate tree's** own project image — the one
+    // fact a real run would take three quarters of an hour to show. The fixture tree carries no `docker/Dockerfile`, so
+    // what it resolves to is the base image of the release running the promotion (ADR-0126).
     let gates = world.gates();
     assert!(
-        gates.contains(&format!("image {}\n", images::agent_image())),
-        "the gate did not run in the running release's image ({}): {gates}",
-        images::agent_image()
+        gates.contains(&format!("image {}\n", images::base_image())),
+        "the gate did not run in the image a candidate with no recipe resolves to ({}): {gates}",
+        images::base_image()
     );
     assert!(
         gates.contains(&format!("cwd {}\n", world.source.display())),
@@ -873,7 +874,11 @@ async fn the_report_a_job_writes_is_what_the_get_answers_before_and_after_the_re
         "the report's steps do not say where the run stopped: {body}"
     );
     let said = detail(&body);
-    for fact in ["host act", "cargo fetch --locked", "build and deploy"] {
+    for fact in [
+        "host act",
+        "cargo fetch --locked",
+        "holosmith image build holosmith --force",
+    ] {
         assert!(
             said.contains(fact),
             "the refusal is exit 3's and has to name `{fact}`: {said}"
@@ -896,7 +901,7 @@ async fn the_report_a_job_writes_is_what_the_get_answers_before_and_after_the_re
         body["gate"]["command"],
         world.script().display().to_string()
     );
-    assert_eq!(body["gate"]["image"], images::agent_image());
+    assert_eq!(body["gate"]["image"], images::base_image());
     assert_eq!(body["gate"]["exit_code"], 3);
     assert_eq!(body["gate"]["ending"], "stale crate set");
     assert_eq!(

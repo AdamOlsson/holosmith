@@ -109,13 +109,13 @@ fn write_placeholder() -> PathBuf {
 /// The version this build reports, read out of `VERSION` at the repository root — the one copy of it.
 ///
 /// `Cargo.toml` carries `0.0.0` as a placeholder instead, and that is load-bearing rather than tidy: a real version
-/// there lands in `Cargo.lock`, whose digest `scripts/check-crate-set.sh` compares with the crate set the agent image
-/// vendors — so a bump would read as a stale image and become the one edit this tree cannot promote. A file of its
-/// own is in nobody's digest.
+/// there lands in `Cargo.lock`, whose digest `scripts/check-crate-set.sh` compares with the crate set this project's
+/// image vendors — so a bump would read as a stale image and become the one edit this tree cannot promote. A file of
+/// its own is in nobody's digest.
 ///
 /// The two refusals are the two ways a value here would reach a tag that cannot exist: no file at all (a source copy
-/// that dropped it), and a file holding anything but one token (a newline would reach `version --json` and
-/// `agent-image:<version>`). Both stop the build, because the alternative is a binary that reports a version nothing
+/// that dropped it), and a file holding anything but one token (a newline would reach `version --json` and the
+/// product images' tags). Both stop the build, because the alternative is a binary that reports a version nothing
 /// agrees with.
 fn version() -> String {
     let path = PathBuf::from(
