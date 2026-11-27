@@ -772,8 +772,9 @@ pub struct Tools {
     /// it — the unit is the operator's own, so the restart needs no privilege and `--user` is the whole of what picks
     /// the manager (ADR-0088 D2) — and the same manager is asked `systemctl --user is-active --quiet <unit>` about a
     /// promotion already in flight ([`crate::update::start`]), the question that turns a refused start into
-    /// [`crate::update::Answer::AlreadyRunning`] or into a failure. The field lives here so that a test points it at
-    /// its recorder beside the others.
+    /// [`crate::update::Answer::AlreadyRunning`] or into a failure, and its `--version` is the version a promotion's
+    /// job needs ([`crate::update::below_floor`], asked at the press rather than at boot). The field lives here so that
+    /// a test points it at its recorder beside the others.
     pub systemctl: PathBuf,
     /// `systemd-run`: **not called by this module either.** [`crate::update::start`] runs
     /// `systemd-run --user --unit=holosmith-update …` through it, so that a promotion started from a request is a unit

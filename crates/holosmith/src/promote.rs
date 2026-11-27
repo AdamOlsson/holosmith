@@ -24,6 +24,15 @@
 //!    answer, the previous link target goes back, the service is restarted again and the poll runs again — and the
 //!    database is not restored, because expand/contract is what makes the switch back safe (ADR-0047).
 //!
+//! # The floor before the first step
+//!
+//! A promotion's job is a transient unit whose two output properties are `StandardOutput=append:` and
+//! `StandardError=append:`, which systemd spells from [`update::FLOOR`] (240). So [`execute`] begins with the machine's
+//! own version, asked of one `systemctl --version` child: a machine under the floor is refused there, with the version
+//! it reports, rather than at the launcher with `systemd-run` refusing the properties (ADR-0125). A machine that does
+//! everything else — install, boot, serve sessions — gets the sentence about the one thing it cannot do, and nothing
+//! is drained, backed up or switched.
+//!
 //! # Why the steps are a trait
 //!
 //! [`Steps`] is the seam `tests/upgrade.rs` drives, exactly as `deploy`'s seven steps are driven over shims: the
@@ -58,6 +67,7 @@ use crate::progress;
 use crate::release::{self, Release};
 use crate::schema;
 use crate::smoke;
+use crate::update;
 use crate::version::VersionInfo;
 
 /// How long the new version has to answer `/api/health` after a restart (spec item 10 step 5).
@@ -334,8 +344,14 @@ pub fn execute(
     steps: &dyn Steps,
     tools: &deploy::Tools,
 ) -> Result<(), String> {
-    // 0. The candidate, and the two facts that can refuse a promotion before anything is asked of the machine: it is
-    //    not this machine's build, or its schema is older than the database's.
+    // 0. The three facts that can refuse a promotion before a smoke run, a drain or a write is asked of the machine:
+    //    this machine's systemd meets the floor the job's two `append:` properties need, the candidate is this
+    //    machine's build, and its schema is not older than the database's. The version comes first because it is the
+    //    cheapest — one `systemctl --version` — and because a machine under the floor cannot promote any candidate at
+    //    all, so it is told the version rather than `systemd-run`'s refusal of the properties later ([`update::FLOOR`]).
+    if let Some(said) = update::below_floor(tools) {
+        return Err(said);
+    }
     let candidate = read_candidate(&options.candidate)?;
     let verb = options.verb;
     println!(

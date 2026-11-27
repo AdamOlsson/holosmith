@@ -35,13 +35,17 @@
 //!    browser, rather than the opt-in it used to be;
 //! 4. **the release tree** — a machine that never deployed has nothing to switch and no release the unit runs:
 //!    `409 not_deployed`;
-//! 5. **the candidate** — [`crate::candidate::resolve`]'s five `git` reads, off the request's task: no candidate at
+//! 5. **the systemd floor** — the version a promotion's job needs ([`update::FLOOR`], 240), asked with one
+//!    `systemctl --version` child: `409 systemd_too_old` with the version this machine reports. It is after the release
+//!    tree and **before** the candidate's five `git` children, because a machine under the floor cannot promote any
+//!    tree, and a version that could not be measured refuses nothing ([`update::below_floor`]);
+//! 6. **the candidate** — [`crate::candidate::resolve`]'s five `git` reads, off the request's task: no candidate at
 //!    all is `404 no_candidate`, one sentence per shape, each naming the command that repairs it;
-//! 6. **the token** — the request's `commit` against `master`'s now: `422 stale_candidate` naming both commits.
+//! 7. **the token** — the request's `commit` against `master`'s now: `422 stale_candidate` naming both commits.
 //!
-//! `GET /api/update/candidate` asks 2, 3 and 5, in that order and with those answers, because a page told "here is
+//! `GET /api/update/candidate` asks 2, 3 and 6, in that order and with those answers, because a page told "here is
 //! what a press would do" by a machine that would refuse the press would be drawing a button for a `403`.
-//! [`promotable`] is the one spelling of 2 and 3 and [`resolve_candidate`] of 5, so the two routes cannot drift.
+//! [`promotable`] is the one spelling of 2 and 3 and [`resolve_candidate`] of 6, so the two routes cannot drift.
 //!
 //! Then, and only then, the unit starts. **No digest is echoed and no acknowledgement is taken**: the gate is the
 //! acknowledgement (ADR-0110 D2), so a request carrying a digest would be a client vouching for bytes this machine
@@ -94,6 +98,12 @@
 //! candidate whose `Cargo.lock` the running release's image cannot build: today the gate answers `3` and
 //! [`crate::pass::Verdict::StaleCrateSet`] turns it into the host act's sentence, and nothing refuses it before the
 //! unit is spawned.
+//!
+//! **The page's knowledge of the floor.** `GET /api/update/candidate` asks 2, 3 and 6 and not the floor, so a page on a
+//! machine whose systemd is below [`update::FLOOR`] still draws a button for a press; the press is what answers, with a
+//! `409 systemd_too_old` whose sentence is the version. Adding the question to that `GET` would make it a second child
+//! per page load for a fact the press answers — and the page renders an unknown code as `code: sentence`, which is
+//! enough for a machine that cannot promote at all until its distribution upgrades.
 
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
@@ -177,6 +187,19 @@ impl Promotion {
         (!releases.is_dir()).then(|| ApiError::not_deployed(&releases))
     }
 
+    /// The systemd floor, asked off the request's task: [`update::below_floor`] runs one `systemctl --version` child.
+    ///
+    /// `None` is a machine that meets the floor **and** a machine whose version could not be measured: unmeasurable is
+    /// not below (ADR-0044), so the press goes on and [`update::start`]'s own sentence is what a machine with no
+    /// manager gets.
+    async fn below_floor(&self) -> Option<ApiError> {
+        let tools = self.tools.clone();
+        match tokio::task::spawn_blocking(move || update::below_floor(&tools)).await {
+            Ok(refusal) => refusal.map(ApiError::systemd_too_old),
+            Err(error) => Some(internal("update systemd version", error)),
+        }
+    }
+
     /// Start one pass as the transient user unit, and say what became of the start.
     ///
     /// [`update::start`] blocks on two children, so its caller runs it on the blocking pool; this is the argument
@@ -255,7 +278,7 @@ impl Promotion {
     }
 }
 
-/// Answer `POST /api/update`: `202 {job, since}`, or one of the six refusals the module's header lists.
+/// Answer `POST /api/update`: `202 {job, since}`, or one of the seven refusals the module's header lists.
 pub(crate) async fn start(state: &AppState, body: Result<Bytes, BytesRejection>) -> Response {
     let body = match body {
         Ok(body) => body,
@@ -275,6 +298,12 @@ pub(crate) async fn start(state: &AppState, body: Result<Bytes, BytesRejection>)
     }
     let promotion = state.updater();
     if let Some(refusal) = promotion.not_deployed() {
+        return refusal.into_response();
+    }
+    // The floor the job's two `append:` properties need, before the candidate's five `git` children: a machine under it
+    // cannot promote whatever the tree says, and this is the refusal that names the version rather than letting
+    // `systemd-run` refuse the properties later ([`update::FLOOR`]).
+    if let Some(refusal) = promotion.below_floor().await {
         return refusal.into_response();
     }
     let candidate = match resolve_candidate(&state.config).await {
@@ -506,6 +535,7 @@ fn words(command: &[OsString]) -> Vec<String> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
 
     /// A promotion over a scratch root and data root, with the programs at a name no machine has: every test here
     /// reads or builds, and none of them starts a process.
@@ -513,6 +543,28 @@ mod tests {
         let directory = crate::sql::guard::TempDir::new(label);
         let root = Root::resolve(Some(directory.path().to_path_buf()), None);
         let promotion = Promotion::new(root, directory.path().join("data"), Tools::default());
+        std::fs::create_dir_all(promotion.data_root.clone()).expect("a data root");
+        (directory, promotion)
+    }
+
+    /// The same promotion with its manager a stand-in: a `systemctl` that prints `said` and exits 0, which is one
+    /// child whose whole answer is what `systemctl --version`'s first line says.
+    fn promotion_with_manager(label: &str, said: &str) -> (crate::sql::guard::TempDir, Promotion) {
+        let directory = crate::sql::guard::TempDir::new(label);
+        let manager = directory.path().join("systemctl");
+        std::fs::write(&manager, format!("#!/bin/sh\nprintf '%s\\n' \"{said}\"\n"))
+            .expect("the stand-in is writable");
+        std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is executable");
+        let root = Root::resolve(Some(directory.path().to_path_buf()), None);
+        let promotion = Promotion::new(
+            root,
+            directory.path().join("data"),
+            Tools {
+                systemctl: manager,
+                ..Tools::default()
+            },
+        );
         std::fs::create_dir_all(promotion.data_root.clone()).expect("a data root");
         (directory, promotion)
     }
@@ -586,6 +638,40 @@ mod tests {
 
         std::fs::create_dir_all(promotion.root.releases()).expect("a release tree");
         assert!(promotion.not_deployed().is_none());
+    }
+
+    /// The floor is the route's own refusal: a manager below it is `409 systemd_too_old` carrying
+    /// [`crate::update::below_floor`]'s sentence unchanged, one at or above it refuses nothing, and one that answered
+    /// nothing refuses nothing either — the press goes on to what the next step says.
+    #[tokio::test]
+    async fn a_manager_below_the_floor_is_the_routes_own_refusal() {
+        use crate::http::error::SYSTEMD_TOO_OLD;
+        let (_below, promotion) =
+            promotion_with_manager("update-floor-below", "systemd 239 (239-1)");
+        let refusal = promotion
+            .below_floor()
+            .await
+            .expect("a 239 cannot promote and the route must say so");
+        assert_eq!(refusal.status, StatusCode::CONFLICT);
+        assert_eq!(refusal.body.code, SYSTEMD_TOO_OLD);
+        assert!(
+            refusal.body.message.contains("version 239"),
+            "the refusal does not name the version it found: {}",
+            refusal.body.message
+        );
+        assert_eq!(
+            refusal.body.message,
+            crate::update::below_floor(&promotion.tools).expect("239 is below the floor"),
+            "the route worded the sentence itself"
+        );
+
+        let (_meets, promotion) =
+            promotion_with_manager("update-floor-meets", "systemd 255 (255.4-1ubuntu8.18)");
+        assert!(promotion.below_floor().await.is_none());
+
+        // Nothing on stdout is nothing measured: a manager that could not answer refuses no press (ADR-0044).
+        let (_empty, promotion) = promotion_with_manager("update-floor-unmeasured", "");
+        assert!(promotion.below_floor().await.is_none());
     }
 
     /// The `GET` relays the report's own object and adds the log's lines: the report's state and `since` are what a
@@ -711,7 +797,7 @@ mod tests {
     fn every_refusal_is_the_status_and_the_code_its_sentence_names() {
         use crate::http::error::{
             BAD_BODY, INTERNAL, NO_CANDIDATE, NOT_DEPLOYED, NOT_FOUND, STALE_CANDIDATE,
-            UPDATE_DISABLED, UPDATE_RUNNING,
+            SYSTEMD_TOO_OLD, UPDATE_DISABLED, UPDATE_RUNNING,
         };
         let cases = [
             (
@@ -733,6 +819,11 @@ mod tests {
                 ApiError::not_deployed(Path::new("/root/releases")),
                 StatusCode::CONFLICT,
                 NOT_DEPLOYED,
+            ),
+            (
+                ApiError::systemd_too_old("systemd 239"),
+                StatusCode::CONFLICT,
+                SYSTEMD_TOO_OLD,
             ),
             (
                 ApiError::no_candidate("no candidate"),

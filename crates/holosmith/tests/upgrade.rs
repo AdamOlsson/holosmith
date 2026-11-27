@@ -238,8 +238,32 @@ fn execute(world: &World, options: &Options, steps: &Recorder) -> Result<(), Str
         &world.root,
         options,
         steps,
-        &holosmith::deploy::Tools::default(),
+        &tools(&world.dir, "255"),
     )
+}
+
+/// The programs a promotion asks the machine for, with the manager a stand-in that answers `--version` with
+/// `systemd <version>`.
+///
+/// `Tools::default`'s `systemctl` is the **host's**, and the floor is a fact about it: a test that read the host's
+/// systemd would pass on one machine and refuse on another, and a host with none at all would measure nothing. The
+/// stand-in makes the version the test's, exactly as `tests/update_api.rs` makes the launcher's programs its own.
+fn tools(dir: &TempDir, version: &str) -> holosmith::deploy::Tools {
+    let program = dir.file("systemctl");
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\nprintf 'systemd {version} ({version}-1)\\n'\n"),
+    )
+    .expect("the stand-in is writable");
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("the stand-in is executable");
+    holosmith::deploy::Tools {
+        systemctl: program,
+        ..holosmith::deploy::Tools::default()
+    }
 }
 
 /// Every `app-*.db` the data root's backups directory holds.
@@ -467,6 +491,50 @@ fn a_promotion_that_skipped_the_review_is_refused_before_anything_is_asked() {
         Release::of(&world.root).link(),
         Some(Path::new("releases/old").to_path_buf()),
         "a refused promotion switched `current`"
+    );
+}
+
+#[test]
+fn a_machine_below_the_systemd_floor_is_refused_before_the_smoke_test() {
+    // The floor is the launcher's and it is asked at step 0, before the candidate's bytes are even read — so this is a
+    // fact about a **machine** and not about a tree, and it is measured on a tree with no artifact and no candidate.
+    // A 239 installs, boots and serves sessions; the one thing it cannot do is run a promotion's job, and it is told
+    // the version the machine reports rather than left to `systemd-run` refusing the two `append:` properties.
+    let dir = TempDir::new("upgrade-floor");
+    let config = Config {
+        data_root: dir.file("data"),
+        projects_root: dir.file("projects"),
+        ..Config::default()
+    };
+    std::fs::create_dir_all(&config.data_root).expect("the data root is creatable");
+    let root = Root::resolve(Some(dir.file("root")), Some(dir.file("holosmith.toml")));
+    let steps = Recorder::new("0.0.0");
+    let options = Options {
+        candidate: dir.file("no-candidate-here"),
+        review: Some(promote::Review::Acknowledged),
+        verb: "upgrade",
+        wait: Duration::from_millis(1),
+        window: WINDOW,
+    };
+    let said = promote::execute(&config, &root, &options, &steps, &tools(&dir, "239"))
+        .expect_err("a 239 cannot run a promotion's job");
+    assert!(said.contains("version 239"), "{said}");
+    assert!(
+        said.contains(&holosmith::update::FLOOR.to_string()),
+        "the refusal does not name the floor: {said}"
+    );
+    assert!(
+        steps.trace().is_empty(),
+        "a promotion refused at the floor asked the machine something later: {:?}",
+        steps.trace()
+    );
+    assert!(
+        !config.data_root.join(holosmith::backup::BACKUPS).exists(),
+        "a promotion refused at the floor wrote a backup"
+    );
+    assert!(
+        root.releases().read_dir().is_err(),
+        "a promotion refused at the floor touched the release tree"
     );
 }
 

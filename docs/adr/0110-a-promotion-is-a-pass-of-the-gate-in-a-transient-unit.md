@@ -518,13 +518,16 @@ promotion: a 239 installs, boots and serves sessions like any other, and only a 
 `append:` properties. That half is quoted from `NEWS` rather than measured, because what a 239 answers for `append:` is
 something only a 239 can show — and this machine is not one.
 
-**Nothing in the tree reports a systemd version**, so the floor is met at the first press rather than before it.
+**Nothing in the tree reported a systemd version** when this ADR was written, so the floor was met at the first press
+rather than before it.
 `doctor` reports no program for `systemd` — what it reads is the unit **directory**, not a manager's, which `update.rs`'s
 header states — so a 239 passes `doctor`, installs and serves sessions, and meets the floor when `systemd-run` refuses
-the two `append:` properties. What that press gets is `update::start`'s sentence for a start that did not take, naming
+the two `append:` properties. What that press got is `update::start`'s sentence for a start that did not take, naming
 `systemd-run`'s own status and first stderr line and ending "this one did not start": it says what happened rather than
-that the machine is older than the floor. A check that read a version and refused below 240 is the later change's; this
-ADR does not add one.
+that the machine is older than the floor. That check arrived later and is ADR-0125's: `update::below_floor` asks
+`systemctl --version` once, the route and both verbs refuse a machine under the floor with the version it reports, and
+an unmeasurable version refuses nothing — so the version is named before a unit is spawned, and the sentence above is
+no longer what a machine under the floor hears.
 
 **Fact 3 — the job outlives the restart it performs, and the name is reusable afterwards.** The restart killed the
 service instance that started the job and left the job alone: pid 2381763 was gone, pid 2381768 was alive and wrote

@@ -12963,11 +12963,12 @@ SHIM
 # `holosmith upgrade <binary>`, the promotion pipeline (spec item 10, ADR-0082).
 #
 # Four arms. Two need nothing but the artifact — the review gate is a refusal, and a candidate compared against a
-# database one schema newer is a refusal, both **before** anything is asked of the machine. Two need the daemon and a
-# serving machine: the real pipeline (a `systemctl` stand-in that starts the release `current` names, a `docker`
-# stand-in that fakes **only** the two product images so the real smoke run still measures the candidate, and a real
-# drain over a real socket), and the rollback — the same promotion with a stand-in whose first restart starts nothing
-# that can serve, so the 20-second poll fails and the symlink goes back by itself.
+# database one schema newer is a refusal, both **before** anything of the pipeline is asked of the machine (the floor's
+# own `systemctl --version` is the one child they run). Two need the daemon and a serving machine: the real pipeline
+# (a `systemctl` stand-in that starts the release `current` names, a `docker` stand-in that fakes **only** the two
+# product images so the real smoke run still measures the candidate, and a real drain over a real socket), and the
+# rollback — the same promotion with a stand-in whose first restart starts nothing that can serve, so the 20-second
+# poll fails and the symlink goes back by itself.
 #
 # What the order is measured by: the printed step lines (each is printed by the step that does the work), the
 # **recorded children** (the two `docker build`s, then the `systemctl --user restart`), and the effects — a session the drain
@@ -13005,8 +13006,20 @@ case_upgrade() {
     "$owner" "$projects" "$data" >"$config"
 
   # ---- 1. the review gate is a refusal, and it happens before anything is asked ---------------------
+  # These two arms run a promotion's own checks, and the first of those is the systemd floor: one `systemctl --version`
+  # child, asked before the review gate and before the schema. The manager a host has is not this arm's subject — a
+  # host under the floor would refuse here and this case would lose both of the sentences it measures — so the two arms
+  # are given a stand-in of their own, answering a version at the floor and nothing else. The stand-in the daemon arms
+  # below write replaces this file, so this is only the manager arms 1 and 2 reach.
+  cat >"$bin/systemctl" <<'SHIM'
+#!/bin/sh
+[ "$1" = "--version" ] && printf 'systemd 255 (255.4-1ubuntu8.18)\n'
+exit 0
+SHIM
+  chmod 0755 "$bin/systemctl"
+
   status=0
-  answer="$("$artifact" --config "$config" upgrade "$candidate" --root "$root" 2>&1)" || status=$?
+  answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" upgrade "$candidate" --root "$root" 2>&1)" || status=$?
   check "$name/review/exit" 1 "$status"
   case "$answer" in
     *"review gate"*) assertions=$((assertions + 1)) ;;
@@ -13037,7 +13050,7 @@ for version in range(1, newer + 1):
 connection.commit()
 PY
     status=0
-    answer="$("$artifact" --config "$config" upgrade "$candidate" --acknowledge-review --root "$root" 2>&1)" ||
+    answer="$(PATH="$bin:$PATH" "$artifact" --config "$config" upgrade "$candidate" --acknowledge-review --root "$root" 2>&1)" ||
       status=$?
     check "$name/schema/exit" 1 "$status"
     case "$answer" in

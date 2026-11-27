@@ -3,20 +3,23 @@
 //! Every promotion today is `holosmith upgrade <binary> --acknowledge-review`, and a job started from a route needs
 //! one command whose outcome a file carries rather than a terminal. A pipeline spelled in a handler would be a second
 //! entry point to the one pipeline ADR-0082 insists is one command, so the composition is here, in the binary, and
-//! it is four steps:
+//! it is five steps:
 //!
 //! 1. **the candidate** — [`crate::candidate::resolve`]'s value: the `master` of the clean checkout `[update] source`
 //!    names, and the tag it describes itself with. Nothing here reads git a second way.
-//! 2. **the gate** — the candidate's own `<source>/scripts/verify-in-container.sh`, with
+//! 2. **the floor** — the machine's systemd against the version a promotion's job needs ([`crate::update::FLOOR`],
+//!    240), asked before the room check and the gate: a machine under it cannot promote whatever the tree proves, so it
+//!    is not asked to spend three quarters of an hour proving it, and the refusal names the version it found.
+//! 3. **the gate** — the candidate's own `<source>/scripts/verify-in-container.sh`, with
 //!    `HOLOSMITH_VERIFY_IMAGE=agent-image:<this binary's version>`, full and **not** `--no-build`. It runs the whole
 //!    proof in the image the running release deployed, and inside it the gate's `build` phase produces
 //!    `dist/<triple>/holosmith` while `case_server_images` builds the *candidate's* product images from the
 //!    candidate's own recipes (ADR-0110 D5). **Exit 0 is the acknowledgement**: this command has no
 //!    `--acknowledge-review`, because the gate is the record where an operator's flag would be.
-//! 3. **the promotion** — [`crate::promote`] on `<source>/dist/<this machine's triple>/holosmith`, exactly as
+//! 4. **the promotion** — [`crate::promote`] on `<source>/dist/<this machine's triple>/holosmith`, exactly as
 //!    `upgrade` calls it: smoke, images, drain, backup, release, `current`, restart, the twenty-second poll and the
 //!    switch back.
-//! 4. **the report** — one JSON object at `--report`, written for **every** ending: a caller that cannot watch a
+//! 5. **the report** — one JSON object at `--report`, written for **every** ending: a caller that cannot watch a
 //!    terminal reads that file and nothing else.
 //!
 //! The gate's exit codes keep the meanings `scripts/verify-in-container.sh`'s header gives them, and [`verdict`] is
@@ -45,7 +48,9 @@
 //! job it did not start. The page that reads both is the app's (`web/src/service.ts`).
 //!
 //! **The launcher.** [`crate::update`] starts a command line as a transient user unit and has no opinion about what
-//! runs behind it; a route passes this command's argv there. Nothing here asks systemd anything.
+//! runs behind it; a route passes this command's argv there. The one question this command asks systemd itself is the
+//! launcher's floor — `systemctl --version` against [`crate::update::FLOOR`] — because a machine under it would spend
+//! the gate's three quarters of an hour on a promotion the launcher then refuses.
 //!
 //! **A second verification.** The gate is the candidate tree's own script, read from `<source>/scripts/`, so this
 //! command cannot verify a tree that does not carry one and never falls back to a gate it happens to be beside: the
@@ -70,6 +75,7 @@ use crate::disk;
 use crate::images;
 use crate::promote::{self, Steps};
 use crate::remote;
+use crate::update;
 
 /// The verb, and the prefix every line this command prints carries.
 ///
@@ -109,7 +115,7 @@ pub struct Options {
     pub wait: Duration,
 }
 
-/// The whole pass: its four steps, the report, and the exit code its endings carry.
+/// The whole pass: its five steps, the report, and the exit code its endings carry.
 ///
 /// Exit 0 only for a candidate that is **live**; 1 for every other ending, because a job's caller reads *which* one
 /// from the report and not from a status every shell flattens.
@@ -154,7 +160,7 @@ pub fn run(
     code
 }
 
-/// The four steps, in the order the acceptance names them, appending what each one ended as to `report`.
+/// The five steps, in the order the acceptance names them, appending what each one ended as to `report`.
 fn pass(
     config: &Config,
     root: &Root,
@@ -177,7 +183,16 @@ fn pass(
     report.candidate = Some(candidate.clone());
     report.steps.push(StepReport::new("candidate", "resolved"));
 
-    // 2. Room to work in, before the gate writes ten gigabytes into that tree (ADR-0107, [`NEEDED_GB`]).
+    // 2. The floor a promotion's job needs, asked before the room check and before the gate: a machine under it cannot
+    //    promote whatever the tree proves, so it is not asked to spend three quarters of an hour proving it — and it is
+    //    told the version rather than left to `systemd-run`'s refusal of the job's two `append:` properties
+    //    ([`update::FLOOR`]).
+    if let Some(said) = update::below_floor(tools) {
+        return refused(report, "systemd", said);
+    }
+
+    // Room to work in before the gate writes ten gigabytes into that tree (ADR-0107, [`NEEDED_GB`]): a check before the
+    // step and not a step of its own, because the pipeline's five are the acceptance's.
     let available = match disk::measure(Path::new(disk::DF), &candidate.source) {
         Ok(available) => available,
         Err(error) => return refused(report, "candidate", unmeasured(&candidate.source, &error)),
@@ -227,8 +242,8 @@ fn pass(
         }
     }
 
-    // 4. The artifact the gate's build phase wrote — and a green gate that left none is a refusal, not a promotion
-    //    attempt on whatever file happens to be there.
+    // The artifact the gate's build phase wrote — the promotion's input, and not a step of its own: a green gate that
+    // left none is a refusal, not a promotion attempt on whatever file happens to be there.
     let artifact = match built(&candidate.source) {
         Ok(artifact) => artifact,
         Err(said) => return refused(report, "artifact", said),
@@ -238,6 +253,7 @@ fn pass(
         artifact.path.display(),
         abbreviated(&artifact.digest)
     );
+    // 4. The promotion: `promote::execute` on that artifact, with this pass's green gate as the review it records.
     let promotion = promote::Options {
         candidate: artifact.path.clone(),
         review: Some(promote::Review::Verified),
