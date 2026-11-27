@@ -51,6 +51,14 @@ calls, with a per-session dummy key — always joined, because a model call work
 is enabled, the egress proxy (CONNECT/443, allow-list) and the MCP proxy (a tool's stored key, for the hosts
 `key::TOOLS` names). Previews run on a separate listener and origin.
 
+**A session's image is where its toolchain comes from.** A session's network is an `--internal` one whose only routes are
+the proxies above, so a compiler, a linker or a package manager is either in the image or nowhere: an image build is the
+step with internet, and what a session can build with is what that build installed and cached. An allow-list entry or the
+Internet-access toggle changes which hosts a session reaches, never what it compiles with ([egress](egress.md)). The
+image a session's container runs is `base_image` — the generic `holosmith-base:<version>` by default, which carries pi,
+git, node and certificates and no compiler — so a project that needs a toolchain gets it there, in an image it builds
+and names in that key ([configuration](config.md)).
+
 **Release and self-development.** The binary embeds the web app, migrations and the Docker build recipes. A release
 artifact is built by the tree's own `scripts/build.sh`, which leaves `dist/<triple>/holosmith` and its digest beside it;
 `smoke` proves a candidate against the real daemon with a

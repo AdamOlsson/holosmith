@@ -10,7 +10,7 @@ Requirements: Linux with systemd (240 or newer for a promotion's job), Docker, g
 ## Quick start
 
 ```bash
-holosmith install                # the tree, the two images, the unit; waits for /api/health
+holosmith install                # the tree, the three images, the unit; waits for /api/health
 holosmith key set opencode-go    # paste the key, then Enter
 holosmith project add https://github.com/you/project
 ```
@@ -30,8 +30,10 @@ No `sudo` is needed for the install itself: it belongs to your own account, and 
 
 ## Next steps
 
-- [The agent cannot reach the Internet](docs/egress.md) — off by default, though the toolchain, this tree's crates and
-  the web app's packages are in the image; a new dependency is what an allow-list entry is for.
+- [The agent cannot reach the Internet](docs/egress.md) — off by default, and that is not a gap: **a session has no
+  network, so what it needs is installed and cached when its image is built**, not while the agent runs — a toolchain
+  above all, since a session builds with what its image holds. The narrower question, which hosts a session given
+  Internet access may reach, is that page's subject.
 - [Use it from your phone](docs/remote-access.md) — the LAN, the tailnet, and where TLS comes from.
 - [Drive several machines from one page](docs/hub.md) — a hub and its host registry.
 - [Rotate a tool key](docs/keys.md) — store a new one and prove the host accepts it.
