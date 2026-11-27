@@ -1328,7 +1328,10 @@ with `--force` as the only way to rebuild a tag the digest says is current (ADR-
 `projectimage::resolve`, `projectimage::ProjectImage`, `projectimage::Build` and `imagebuild::ensure`; nothing else may
 compose the tag, and a recipe that cannot become one is a **refused project** (ADR-0123). What the digest does not cover
 is the files the recipe copies: a `COPY Cargo.lock …` over a moved lock is invisible to it, and `--force` is the repair.
-_Avoid_: Agent image (that is the product one), base image, custom image, per-project build
+**The detection is the project's own check**, because Holosmith reads no project's vendored content and names no stale
+image but its own: this repository's is `scripts/check-crate-set.sh` over the digest its recipe writes beside the crates
+(ADR-0127), and a project that vendors content copies those two halves.
+_Avoid_: Agent image (the product image ADR-0126 deleted), base image, custom image, per-project build
 
 **Image label**:
 One of the four `org.holosmith.*` values a built image carries — version, git tag, pinned pi and the SHA-256 of the

@@ -6,7 +6,7 @@
 /// **`VERSION` at the repository root is the only copy of it.** `build.rs` reads that file and puts it here, so a
 /// bump is one line and one commit — and, because the value is in no manifest, it is in no `Cargo.lock` either:
 /// `scripts/check-crate-set.sh` digests that lock, and a version living in it would make every bump read as a stale
-/// agent image. Nothing in this crate may read Cargo's `CARGO_PKG_VERSION`, which answers the placeholder that
+/// project image. Nothing in this crate may read Cargo's `CARGO_PKG_VERSION`, which answers the placeholder that
 /// `Cargo.toml`'s `[workspace.package]` carries; `tests/version_single_source.rs` is what says so.
 pub const VERSION: &str = env!("HOLOSMITH_VERSION");
 

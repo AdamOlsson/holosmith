@@ -6,7 +6,7 @@
 //! that **a bump edits one file** — and, more than tidiness, so that a bump stays out of `Cargo.lock`.
 //!
 //! That last part is the load-bearing half. `scripts/check-crate-set.sh` digests `Cargo.lock` and compares it with
-//! the crate set the agent image vendored, and a version living in the lock moves that digest while the crate set
+//! the crate set this project's image vendored, and a version living in the lock moves that digest while the crate set
 //! stands still: the gate then answers 3, a promotion refuses, and the tree's only real change was a number. So the
 //! placeholder is a promotion's precondition, and this file is what keeps it a placeholder.
 //!
@@ -65,7 +65,7 @@ fn both_manifests_hold_the_placeholder_and_not_the_version() {
         declared, PLACEHOLDER,
         "Cargo.toml's [workspace.package] version is {declared}, and it must stay the {PLACEHOLDER} placeholder: the \
          version is VERSION's, and a real one here would land in Cargo.lock and make every bump read as a stale \
-         agent image"
+         project image"
     );
     assert_ne!(
         holosmith::VERSION,

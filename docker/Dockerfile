@@ -43,7 +43,9 @@
 # What a session still **cannot** do is add a crate. The vendored crate set is the lock's and nothing else, and there is
 # no network to fetch a crate that is not in it. A new dependency is a lock edit and a rebuild of this image — a host's
 # `cargo fetch`, not something a session can decide offline — and `scripts/check-crate-set.sh` is what says so in one
-# sentence instead of leaving cargo to report a registry that is not there.
+# sentence instead of leaving cargo to report a registry that is not there. **That script is this repository's, beside a
+# recipe that is this project's**: it and the `sha256sum` clause below are the whole pattern a project that vendors
+# content copies, and Holosmith reads neither (ADR-0127).
 #
 # **The binary is not here.** A session's image runs no `holosmith`: the three `--entrypoint` sites are the proxy
 # containers, and the in-container `container snapshot` entry point has no caller in the product path. An image that
@@ -171,10 +173,11 @@ COPY web/package.json web/package-lock.json /tmp/web/
 # the layer keeps the 108 MB of unpacked crates and not a second copy of the same bytes as `.crate` archives. The
 # session's `CARGO_HOME` stays `/tmp/cargo`, empty of crates: it is where cargo writes, not where it reads.
 #
-# The lock's own digest is written beside the crates. It is the one value that says whether a vendor directory is
-# *this* tree's crate set, and `scripts/verify.sh`'s `case_agent_toolchain` compares it with the tree's `Cargo.lock`
-# rather than trusting that two versions of a file agree. `a+rX` because a session runs as the data root's owner, which
-# is neither root nor the image's `node` (ADR-0087), and reading these files is all it may do with them.
+# The lock's own digest is written beside the crates, in the instruction that vendored them, so it is derived and cannot
+# disagree with them: it is the one value that says whether a vendor directory is *this* tree's crate set, and
+# `scripts/verify.sh`'s `case_agent_toolchain` compares it with the tree's `Cargo.lock` rather than trusting that two
+# versions of a file agree. `a+rX` because a session runs as the data root's owner, which is neither root nor the
+# image's `node` (ADR-0087), and reading these files is all it may do with them.
 RUN cd /tmp/vendor-src \
  && CARGO_HOME=/tmp/cargo-vendor-home cargo vendor --locked /opt/cargo-vendor \
  && sha256sum Cargo.lock | cut -d' ' -f1 > /opt/cargo-vendor/.holosmith-cargo-lock \
