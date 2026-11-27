@@ -60,9 +60,10 @@ Then, in this order:
    line names the failure, and the `work dir kept:` line under it names the tree holding that case's evidence).
    Check the log's mtime against the run you started before trusting the sentinel. **Spend ten seconds on the
    preconditions first** — the ones AGENTS.md's prerequisite list names, and each cheaper than the run it saves:
-   a daemon that answers, and free disk (a run is about ten gigabytes of `target/`, and the three product images'
-   build cache is what keeps the rebuild near six minutes). An existing `agent-image:<version>` saves nothing:
-   `case_server_images` untags both product images and asserts they are gone before it rebuilds them. If the diff
+   a daemon that answers, and free disk (a run is about ten gigabytes of `target/`, and the product images'
+   build cache is what keeps the rebuild near six minutes). An existing `holosmith-base:<version>` saves nothing:
+   `case_server_images` untags both product images and this project's own image, and asserts they are gone before it
+   rebuilds them. If the diff
    touches `web/`, also run its own gate:
    `cd web && npm ci && npm test && npm run build`. A red gate goes back to the worker with the failing case or
    assertion named — not to the reviewer.

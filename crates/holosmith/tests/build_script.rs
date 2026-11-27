@@ -94,11 +94,13 @@ struct Tree {
 }
 
 impl Tree {
+    // This project's own recipe, at the path `projectimage::RECIPE` names: the script reads its pinned musl.cc URL and
+    // digest out of it, so it is one of the three files a run needs before it compiles anything.
     const FILES: [&str; 4] = [
         "scripts/build.sh",
         "scripts/build-web.sh",
         "pins/rust.txt",
-        "crates/holosmith/images/agent.Dockerfile",
+        "docker/Dockerfile",
     ];
 
     fn new(label: &str) -> Self {
@@ -523,8 +525,8 @@ fn the_pinned_tarball_and_its_digest_live_in_the_recipe_only() {
         literals.is_empty(),
         "scripts/build.sh holds a 64-character hex digest, which belongs in the recipe: {literals:?}"
     );
-    let recipe = fs::read_to_string(repo_root().join("crates/holosmith/images/agent.Dockerfile"))
-        .expect("agent.Dockerfile is readable");
+    let recipe = fs::read_to_string(repo_root().join("docker/Dockerfile"))
+        .expect("docker/Dockerfile is readable");
     assert!(
         recipe.contains("https://musl.cc/x86_64-linux-musl-cross.tgz"),
         "the recipe no longer fetches the tarball the build fetches"
@@ -581,8 +583,8 @@ fn no_tracked_file_outside_the_decisions_names_the_emulator() {
 
 #[test]
 fn nothing_that_builds_the_artifact_names_the_second_triple() {
-    // `scripts/build.sh`, `scripts/check-static.sh`, the cargo config, the agent recipe and the prose a reader starts
-    // from all speak of one release target now. `scripts/verify.sh` is not in the set because it drives the artifact
+    // `scripts/build.sh`, `scripts/check-static.sh`, the cargo config, this project's recipe and the prose a reader
+    // starts from all speak of one release target now. `scripts/verify.sh` is not in the set because it drives the artifact
     // in shapes this rule is not about, and a hand-built aarch64 artifact is still something a deploy can be handed.
     let root = repo_root();
     let files = tracked_or_walked(&root);
@@ -745,7 +747,7 @@ fn names_the_second_target(file: &str) -> bool {
         || file == "AGENTS.md"
         || file == "README.md"
         || file == ".cargo/config.toml"
-        || file == "crates/holosmith/images/agent.Dockerfile"
+        || file == "docker/Dockerfile"
 }
 
 /// The runs of hex characters of exactly `width` in `text`.

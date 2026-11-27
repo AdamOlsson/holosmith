@@ -118,7 +118,7 @@ impl Outcome {
     }
 }
 
-/// The smoke image's tag: this binary's version, like `agent-image:<version>`.
+/// The smoke image's tag: this binary's version, like the two product images'.
 pub fn image() -> String {
     images::smoke_image()
 }
@@ -578,7 +578,7 @@ fn ensure_image(docker: &Docker, binary: &[u8], image: &str) -> Result<(), Strin
 /// Its own function rather than a call to [`images::archive`] because that one reads the path it is given, and this
 /// run already holds the bytes it hashed and judged — a second read could be a second file.
 ///
-/// An empty context because this image is the candidate on the agent image's base with nothing installed: its recipe
+/// An empty context because this image is the candidate on the base image's base with nothing installed: its recipe
 /// runs no Rust, so a crate set would be bytes every build sent and no instruction read.
 fn archive_with(binary: &[u8]) -> Vec<u8> {
     images::archive_bytes(images::SMOKE_DOCKERFILE, &[], binary)
@@ -1317,15 +1317,17 @@ mod tests {
         assert_ne!(one, recipe("FROM other\n", b"binary one"));
     }
 
-    /// The smoke recipe runs the **agent image's** base, by the same digest — three recipes, one pinned node.
+    /// The smoke recipe runs the **base image's** base, by the same digest — two recipes, one pinned node.
     ///
     /// A drift here is the defect the P1 and ADR-0080's `COPY --from` both were: an image built from a base
     /// nobody pinned, which nothing in a green gate would notice.
     ///
-    /// The agent recipe's **final** `FROM` is the image; its first is the rust stage whose toolchain it copies. So
-    /// the comparison reads the last `FROM` line, not the first — with one stage each, that is the only stage.
+    /// The comparison is against the base recipe's own `FROM`, and that is now the whole of what pins the smoke image's
+    /// base: this repository's session image is a *project's* recipe, `FROM ${HOLOSMITH_BASE_IMAGE}`, so it carries no
+    /// node digest of its own to compare with (ADR-0126). The base recipe's `FROM` is the pin, and this test says the
+    /// smoke recipe copies it.
     #[test]
-    fn the_smoke_recipe_names_the_agent_images_base() {
+    fn the_smoke_recipe_names_the_base_images_base() {
         let last_base = |recipe: &str| -> String {
             recipe
                 .lines()
@@ -1335,8 +1337,8 @@ mod tests {
         };
         assert_eq!(
             last_base(images::SMOKE_DOCKERFILE),
-            last_base(images::AGENT_DOCKERFILE),
-            "the smoke image's base is not the agent image's"
+            last_base(images::BASE_DOCKERFILE),
+            "the smoke image's base is not the base image's"
         );
         // And it installs nothing on it: the fake replays records and needs no git, no CA bundle and no openssl.
         assert!(

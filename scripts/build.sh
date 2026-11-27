@@ -10,7 +10,7 @@
 #   --require-clean-tree   refuse a build whose git tag would end in -dirty
 #
 # The musl cross linker a target needs comes from PATH first, then from this tree's toolchains/, and is fetched
-# from the URL crates/holosmith/images/agent.Dockerfile pins when neither holds it.
+# from the URL docker/Dockerfile pins when neither holds it.
 
 set -euo pipefail
 
@@ -171,7 +171,7 @@ for program in cargo rustc; do
     printf 'build.sh: %s is not on PATH, so there is no toolchain to compile an artifact with.\n' "$program" >&2
     printf 'pins/rust.txt holds the rustc %s the artifact has to be built by.\n' "${pinned_rust:-unknown}" >&2
   fi
-  printf 'An artifact compiled by another rustc is not the one the agent image runs, so it is not built here.\n' >&2
+  printf 'An artifact compiled by another rustc is not the one this project image runs, so it is not built here.\n' >&2
   printf 'Put the rustc pins/rust.txt holds first on PATH, then run this again:\n' >&2
   printf '  rustup toolchain install %s && rustup default %s\n' "$pinned_rust" "$pinned_rust" >&2
   printf 'That fixes a shadowed program and makes the version of the pin the version of the host, which is the only\n' >&2
@@ -190,11 +190,11 @@ linker_for() {
 }
 
 # The pinned tarball for one architecture, into `toolchains/`. The URL and the digest are read out of the recipe
-# that fetches the same bytes at image-build time, so the digest has one copy in the tree and a bump of it is one
-# edit both readers follow (ADR-0120).
+# that fetches the same bytes at image-build time — this project's own `docker/Dockerfile` — so the digest has one copy
+# in the tree and a bump of it is one edit both readers follow (ADR-0120).
 fetch_toolchain() {
   local arch="$1" url digest tarball recipe
-  recipe="$repo_root/crates/holosmith/images/agent.Dockerfile"
+  recipe="$repo_root/docker/Dockerfile"
   url="https://musl.cc/$arch-linux-musl-cross.tgz"
   # The range is the `RUN` that fetches this architecture's tarball, and the value is the `echo "…" | sha256sum -c
   # -` line inside it: a recipe whose fetch changes shape leaves this empty, which is the refusal below rather

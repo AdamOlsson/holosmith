@@ -62,26 +62,30 @@ fn no_other_tracked_file_contains_the_pin() {
 /// The recipes that declare a rust stage, listed so that the rule below is about *each of them* rather than
 /// about "the one".
 ///
-/// A recipe leaving or joining this list is one line, and the test that the list is complete against the directory is
-/// what stops a forgotten entry from making the rules measure nothing.
-const RUST_RECIPES: &[&str] = &["crates/holosmith/images/agent.Dockerfile"];
+/// A recipe leaving or joining this list is one line, and the test that the list is complete against the tree is what
+/// stops a forgotten entry from making the rules measure nothing. This project's own recipe is the one with a rust
+/// stage now: the two embedded product recipes install no toolchain, and a project's recipe is the file a session's
+/// image is built from (ADR-0126).
+const RUST_RECIPES: &[&str] = &["docker/Dockerfile"];
 
 /// The rust base's reference, as `pins/rust.txt` holds it: the tag and the digest, one value.
 fn rust_pin() -> &'static str {
     holosmith::pins::rust_image()
 }
 
-/// The recipes `crates/holosmith/images/` holds that declare a rust stage, by their file name.
+/// The recipes this tree holds that declare a rust stage, by their path from the root.
+///
+/// Two places hold a recipe and both are scanned: the product recipes the binary embeds, under
+/// `crates/holosmith/images/`, and a project's, at `projectimage::RECIPE` from the root — which for this repository is
+/// `docker/Dockerfile`. A recipe in either place that grew a rust stage and was not in the list above would be pinned by
+/// a literal the digest scan then has to allow.
 fn recipes_with_a_rust_stage(root: &Path) -> Vec<String> {
     let directory = root.join("crates/holosmith/images");
     let mut found: Vec<String> = std::fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("{} is not readable: {error}", directory.display()))
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".Dockerfile"))
-        .filter(|entry| {
-            std::fs::read_to_string(entry.path())
-                .is_ok_and(|text| text.lines().any(|line| line.starts_with("FROM rust:")))
-        })
+        .filter(|entry| declares_a_rust_stage(&entry.path()))
         .map(|entry| {
             format!(
                 "crates/holosmith/images/{}",
@@ -89,8 +93,18 @@ fn recipes_with_a_rust_stage(root: &Path) -> Vec<String> {
             )
         })
         .collect();
+    let project = root.join(holosmith::projectimage::RECIPE);
+    if project.is_file() && declares_a_rust_stage(&project) {
+        found.push(holosmith::projectimage::RECIPE.to_string());
+    }
     found.sort();
     found
+}
+
+/// Whether the recipe at `path` has a `FROM rust:` line, which is what makes it a recipe the rust pin reaches.
+fn declares_a_rust_stage(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|text| text.lines().any(|line| line.starts_with("FROM rust:")))
 }
 
 #[test]

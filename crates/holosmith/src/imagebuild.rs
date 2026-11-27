@@ -85,6 +85,13 @@ const LOCK_GRACE: Duration = Duration::from_secs(5);
 /// A session's start wants [`Self::Missing`]: that is what makes a second session free and what the gate measures by
 /// the image's `Created`. [`Self::Forced`] is `image build --force`'s, and it is the only way to rebuild a tag the
 /// digest says is current — a recipe whose `COPY`'d file moved is stale with the same tag, and nothing reads that.
+///
+/// **`Forced` passes `--no-cache`, and a flag without it would be a no-op on the one thing it exists to change.**
+/// Skipping the existence check is not rebuilding: a build whose inputs are unchanged is answered entirely from the
+/// layer cache, so every step reports `CACHED`, the same config is re-exported, and the tag is left exactly as it was —
+/// same image id, same `Created`. `--no-cache` re-runs the recipe's steps, which is what produces a new config and a
+/// moved `Created`; `case_project_image`'s `force` arm compares exactly those two values, and it is the case that found
+/// this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Currency {
     Missing,
@@ -155,9 +162,10 @@ pub fn ensure(
         Some(&mut *progress),
     )?;
     let mut built = Vec::new();
-    // The base only when this machine's sessions actually run it: a `base_image` naming another image — this
-    // repository's `agent-image`, or a hand-built one — is not a recipe Holosmith has read, so a build here would be
-    // this program guessing what an image it has never seen should be. `server deploy`'s step 3 builds those.
+    // The base only when this machine's sessions actually run it: a `base_image` naming another image — a hand-built
+    // one, or a project's own tag an operator pointed the key at — is not the recipe Holosmith embedded, so a build here
+    // would be this program guessing what an image it has never seen should be. `server deploy`'s step 3 builds the
+    // two it owns.
     if settings.image == images::base_image() {
         // `Currency::Missing` and not the caller's: `--force` names the subject it was given, and the base is this
         // build's dependency rather than its subject — a project's `--force` that also rebuilt the base would be
@@ -260,6 +268,10 @@ fn base(
         Kind::Base,
         format!("{tag} is not on this machine, so this session's container has no base to run"),
     )];
+    // `--base --force`'s arm: the base is the one product image `holosmith image build` can be asked to rebuild, so it
+    // is the one whose build carries `--no-cache`. A session's start and a deploy pass `Currency::Missing` and are
+    // answered from the cache, which is what makes the second start free.
+    let no_cache = currency == Currency::Forced;
     images::ensure(
         docker,
         &binary,
@@ -268,6 +280,7 @@ fn base(
         &pending,
         LABEL,
         Some(&log),
+        no_cache,
         progress,
     )?;
     Ok(vec![tag])
@@ -277,8 +290,9 @@ fn base(
 ///
 /// The context is the project root and the recipe is `docker/Dockerfile` inside it — named with `-f`, because Docker
 /// reads `Dockerfile` from the context's own root — which is what makes a `COPY Cargo.lock …` work and what Docker
-/// filters by the project's own `.dockerignore` (ADR-0123). No `--build-arg` is passed: a project's image carries no
-/// Holosmith label, and an argument a recipe does not declare is a BuildKit warning over nothing.
+/// filters by the project's own `.dockerignore` (ADR-0123). The `--build-arg` pairs are the ones the recipe **declares**
+/// ([`crate::projectimage::Build::arguments`]): a project's image carries no Holosmith label, so no label argument is
+/// sent, and what is sent is the base tag and the rust pin a `FROM` line cannot read out of a file.
 fn project_image(
     docker: &Docker,
     settings: &ContainerSettings,
@@ -299,7 +313,18 @@ fn project_image(
     }
     let log = log_path(&settings.data_root, tag);
     progress.note(LABEL, &format!("building {tag}"));
-    let arguments = images::build_head(tag);
+    let mut arguments = images::build_head(tag);
+    // `--force` has to **rebuild**, and a build whose inputs are unchanged is otherwise answered from the layer cache:
+    // every step `CACHED`, the same config re-exported, the tag's `Created` exactly as it was. `--no-cache` is what
+    // makes the flag do what [`Currency::Forced`] documents, and only a project's build has a `--force` to honour —
+    // the product images are a deploy's, and a deploy's question is "are the labels current", not "rebuild this".
+    if currency == Currency::Forced {
+        arguments.push(images::NO_CACHE.to_string());
+    }
+    for (name, value) in &recipe.arguments {
+        arguments.push("--build-arg".to_string());
+        arguments.push(format!("{name}={value}"));
+    }
     let built = images::Images::build(
         docker,
         tag,

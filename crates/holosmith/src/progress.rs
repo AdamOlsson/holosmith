@@ -45,7 +45,7 @@ impl Progress for Silent {}
 /// The prefix every progress line carries, and the reason it is one word: the verb whose silence this is.
 const VERB: &str = "install";
 
-/// The sink that prints: `install: [3/6 images] building the three images — …`, on **stderr**, one flushed line per
+/// The sink that prints: `install: [3/6 images] building the two images — …`, on **stderr**, one flushed line per
 /// fact.
 ///
 /// The prefix's verb is `install`'s and not a parameter, because it is the one verb that announces: `server deploy`

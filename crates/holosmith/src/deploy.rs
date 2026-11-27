@@ -199,8 +199,9 @@ impl Kind {
     pub fn skip(self, step: DeployStep) -> Option<&'static str> {
         match (self, step) {
             (Self::Hub, DeployStep::Images) => Some(
-                "a hub builds no images: `holosmith-proxy` and `agent-image` are what a session's container and the \
-                 machine's three proxies run, and a hub runs no containers (spec item 10 §6)",
+                "a hub builds no images: `holosmith-proxy` is what the machine's three proxies run and \
+                 `holosmith-base` is what a project without a recipe runs a session in, and a hub runs no \
+                 containers (spec item 10 §6)",
             ),
             (Self::Hub, DeployStep::Proxies) => Some(
                 "a hub starts no proxies: `hs_egress` is a session's only route out, `hs_key` is the only thing \
@@ -256,7 +257,7 @@ pub enum DeployStep {
     /// 2. The install tree under the root: the config file, the data root, the secrets (with the provider and the
     ///    VAPID keys), and the read of whether the account running this deploy may open the daemon's socket.
     Files,
-    /// 3. The three images embedded in the binary.
+    /// 3. The two images embedded in the binary: the proxy and the base.
     Images,
     /// 4. The `egress` network and the machine's three proxies.
     Proxies,
@@ -311,7 +312,7 @@ impl DeployStep {
 
     /// What the step is about to do, present tense, for the begin line [`Progress::begin`] carries.
     ///
-    /// The phrase exists for the one silence a report cannot break: step 3 builds three images and the first build
+    /// The phrase exists for the one silence a report cannot break: step 3 builds two images and the first build
     /// downloads pi, so a first install is minutes of nothing. A phrase is a **duration expectation** as much as a
     /// description — "a first install downloads pi, so this takes minutes" is what tells a reader that the silence is
     /// work rather than a hang — which is why it lives here, beside [`Self::word`], and not in a caller's formatting.
@@ -322,7 +323,7 @@ impl DeployStep {
             Self::Preflight => "asking `doctor --quick` about this machine",
             Self::Files => "reading and writing the install tree, the config and the secrets",
             Self::Images => {
-                "building the three images — a first install downloads pi, so this takes minutes"
+                "building the two images — a first install downloads pi, so this takes minutes"
             }
             Self::Proxies => "starting the `egress` network and the machine's three proxies",
             Self::Service => "writing the systemd unit",
@@ -486,7 +487,7 @@ impl Report {
     /// ```text
     /// 1. preflight ✓
     /// 2. files ✓ (3 actions)
-    /// 3. images ✓ (built 2 images: holosmith-proxy:0.1.0, agent-image:0.1.0)
+    /// 3. images ✓ (built 2 images: holosmith-proxy:0.1.0, holosmith-base:0.1.0)
     /// ```
     ///
     /// Three facts decide the shape, and each is a section of ADR-0085:
@@ -1767,7 +1768,10 @@ fn failed_with_fix(step: DeployStep, sentence: String, fix: String) -> Line {
     }
 }
 
-/// Step 3: the three images, built from the Dockerfiles embedded in this binary (ADR-0057, ADR-0114).
+/// Step 3: the two images, built from the Dockerfiles embedded in this binary (ADR-0057, ADR-0114).
+///
+/// A project's own image is not one of them: it is `hs-<project>:<digest>` over a recipe that arrives after the deploy
+/// does, so `crate::imagebuild` builds it on a session's first start (ADR-0123, ADR-0126).
 ///
 /// The answer is the step's line **and** whether the build that stopped it could not fetch a pinned source: that second
 /// bit is the one failure here that is not a verdict about the tree, and [`Report::unanswered`] carries it to
@@ -1794,7 +1798,7 @@ fn images_line(
         Ok(digest) => digest,
         Err(sentence) => return (failed(DeployStep::Images, sentence), false),
     };
-    // One expectation's values are the `satisfied` sentence's, because all three images carry the same four labels:
+    // One expectation's values are the `satisfied` sentence's, because both images carry the same four labels:
     // version, git tag, pinned pi and the binary's digest. One spelling of what step 3 would build, for both
     // sentences.
     //
@@ -1813,10 +1817,9 @@ fn images_line(
                 step: DeployStep::Images,
                 word: Word::Satisfied,
                 sentence: format!(
-                    "{}, {} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…{remark}",
+                    "{} and {} carry this binary's labels: version {}, git tag {}, pi {}, binary sha256 {}…{remark}",
                     ImageKind::Proxy.image(),
                     ImageKind::Base.image(),
-                    ImageKind::Agent.image(),
                     built.version,
                     built.git_tag,
                     built.pi_version,
@@ -1857,8 +1860,10 @@ fn images_line(
     let label = DeployStep::Images.label();
     // No log file: a deploy's sentence is the whole of what it prints, and a build here leaves nothing behind but
     // the image it tagged.
+    // `false` is "no `--no-cache`": step 3 builds because a label says the image is not this binary's, and a deploy
+    // that re-ran the base's whole recipe over a warm cache would spend minutes on a decision it has already made.
     match images::ensure(
-        machine, &binary, &digest, &release, &pending, &label, None, progress,
+        machine, &binary, &digest, &release, &pending, &label, None, false, progress,
     ) {
         Ok(sentence) => (
             Line {
@@ -1882,16 +1887,15 @@ fn images_line(
 ///
 /// Never a failure: `base_image` is the image Holosmith owns and a project extends, and an operator may point it at
 /// an image built by hand (`pi-agent:local`) — that is the escape hatch a development machine and the gate use. But
-/// a deploy that has just built step 3's three images while the config names something else has installed an image
+/// a deploy that has just built step 3's two images while the config names something else has installed an image
 /// no session will use, and a line that said nothing would leave that to be discovered at a launch.
+///
+/// A project's own image is not in this list and could not be: its tag is a digest over a recipe this binary has not
+/// read, so a `base_image` naming one is a name this step does not build — which is true, and the sentence says so.
 fn image_remark(config: &Config) -> String {
-    // Every name the step builds is a name the config may carry: a machine whose projects are this tree names
-    // `agent-image:<version>`, and a line saying of it "which this step does not build" would be false.
-    let built = [
-        images::proxy_image(),
-        images::base_image(),
-        images::agent_image(),
-    ];
+    // Every name the step builds is a name the config may carry, and a line saying of one of them "which this step
+    // does not build" would be false about a tag the same step had just built.
+    let built = [images::proxy_image(), images::base_image()];
     if built.contains(&config.base_image) {
         return String::new();
     }

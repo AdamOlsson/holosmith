@@ -204,7 +204,7 @@ needs, because a full test run followed by both musl release builds measured 9.6
 `max_live_sessions` defaults to 3, so three Rust projects building at once hold up to 60 GB of worktrees, `target/`
 and `node_modules/` between them: a host that lets them is the host that sets the floor near that sum, as this one
 does, and a host whose disk is smaller is a host that lowers `max_live_sessions` rather than either number here. The
-allow-list carries no registry host because the crates and the web app's packages are in the agent image and a build
+allow-list carries no registry host because the crates and the web app's packages are in a project's image and a build
 needs no network (ADR-0106); a project that adds a dependency adds `crates.io`, `index.crates.io`, `static.crates.io`
 and `registry.npmjs.org` back (see `docs/egress.md`).
 
@@ -259,8 +259,8 @@ still carries finds the answer.
 
 | Gone | What to write instead |
 |---|---|
-| `agent_toolchains` | Nothing. A recipe's package set is fixed, and a session has no network unless its operator gives it one, so a package a project needs goes in that project's own `docker/Dockerfile`: its sessions then run `hs-<project>:<digest>`, built from that file over the project root (ADR-0123). A project with no recipe runs `base_image`, which has no compiler. The agent recipe's own two are `python3` — which the gate's `command -v python3` guards measure with, so an image without it would turn those cases into `SKIP`s — and `ripgrep` beside it. |
-| `agent_image` | The same value under the name `base_image`: the image Holosmith owns and projects extend, defaulting to `holosmith-base:<version>`, which is what `server deploy` builds and what a session runs when its project has no recipe (ADR-0117, ADR-0123). |
+| `agent_toolchains` | Nothing. A recipe's package set is fixed, and a session has no network unless its operator gives it one, so a package a project needs goes in that project's own `docker/Dockerfile`: its sessions then run `hs-<project>:<digest>`, built from that file over the project root (ADR-0123). A project with no recipe runs `base_image`, which has no compiler. This project's own recipe carries `python3` — which the gate's `command -v python3` guards measure with, so an image without it would turn those cases into `SKIP`s — and `ripgrep` beside it. |
+| `agent_image` | The same value under the name `base_image`: the image Holosmith owns and projects extend, defaulting to `holosmith-base:<version>`, which is what `server deploy` builds and what a session runs when its project has no recipe (ADR-0117, ADR-0123). A project that needs more writes `<project root>/docker/Dockerfile` instead, and its sessions run `hs-<project>:<digest>` (ADR-0126). |
 
 ## Where the reasons are
 

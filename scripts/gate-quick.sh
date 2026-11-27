@@ -116,7 +116,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   printf 'gate-quick: cargo is not on PATH, so there is no toolchain to run the gate with.\n' >&2
   printf '            On a host: . ~/.pi/toolchains/env.sh (AGENTS.md)\n' >&2
   printf '            Inside a session container the toolchain is already on PATH, so this is a broken image\n' >&2
-  printf '            rather than a missing setup step: rebuild agent-image and retry.\n' >&2
+  printf '            rather than a missing setup step: rebuild this project image and retry.\n' >&2
   exit 2
 fi
 # The pinned major.minor, from `pins/rust.txt` the way `scripts/build.sh` reads it: the file holds the base's whole

@@ -11,7 +11,7 @@
 # gone; it warns and never fails this gate.
 #
 # Then, still before the first phase, the crate set: `scripts/check-crate-set.sh` compares this tree's `Cargo.lock`
-# with the one the agent image vendored and answers **3** when they differ, which is a stale `agent-image` and an
+# with the one this project's image vendored and answers **3** when they differ, which is a stale project image and an
 # image rebuild rather than a code fix. It is a precondition and not a phase, so the count below stays true; it prints
 # nothing when it passes (on a host there is no marker at all) and one sentence when it does not, and **3 is its
 # answer, not a phase's** — no phase ran.
@@ -3531,7 +3531,7 @@ PROBE
 # refuses a session id no row holds, and refuses an upgrade whose `Origin` is not the preview origin.
 #
 # The second is V7 itself: a real container on an `--internal` network, fetched **from the host** through the
-# shipped artifact, plus a WebSocket round trip over the same path. It needs the daemon and the agent image and
+# shipped artifact, plus a WebSocket round trip over the same path. It needs the daemon and a project image and
 # prints one SKIP line without them. The bug this case exists to catch — a preview listener that does not
 # proxy — fails the first half, so a SKIP for "no daemon" is not that bug (the rule in AGENTS.md).
 #
@@ -8935,6 +8935,11 @@ PY
 # second copy of forty lines of shim is a second thing to keep right. The three parameters are the names those cases
 # already have: the directory the shim is written into, the file it records its argv to, and the directory it keeps the
 # faked label bodies in.
+#
+# **A project's image is deliberately not faked here.** No promotion builds one — `images::outstanding` iterates the
+# proxy and the base, and a project's recipe is a session's or a gate's to build — so an arm answering
+# `hs-<project>:*` would be dead at best and, if one ever became reachable, a real project build answered by a shim
+# rather than measured. Every other question this shim does not answer goes to the real daemon.
 fake_product_images() {
   local bin="$1" docker_log="$2" state="$3"
   mkdir -p "$state"
@@ -8961,7 +8966,7 @@ case "\$1" in
       esac
     done
     case "\$tag" in
-      holosmith-proxy:*|holosmith-base:*|agent-image:*)
+      holosmith-proxy:*|holosmith-base:*)
         cat >/dev/null
         printf '{%s"faked":"yes"}' "\$json" >"$state/\$tag.json"
         printf 'faked the build of %s\n' "\$tag"
@@ -8974,12 +8979,12 @@ case "\$1" in
     format=""
     for argument in "\$@"; do
       case "\$argument" in
-        holosmith-proxy:*|holosmith-base:*|agent-image:*) tag="\$argument" ;;
+        holosmith-proxy:*|holosmith-base:*) tag="\$argument" ;;
         *Config.Labels*) format="\$argument" ;;
       esac
     done
     case "\$tag" in
-      holosmith-proxy:*|holosmith-base:*|agent-image:*)
+      holosmith-proxy:*|holosmith-base:*)
         [ -f "$state/\$tag.json" ] || exit 1
         case "\$format" in
           "") printf 'sha256:faked\n' ;;
@@ -11809,23 +11814,25 @@ SHIM
   rm -rf "$root"
 }
 
-# the step 3: the three images, built from the Dockerfiles embedded in the artifact, and what is inside them.
+# the step 3: the proxy and base images, built from the Dockerfiles embedded in the artifact, and this repository's own
+# project image beside them.
 #
-# This is the one case whose subject is the *build*: `holosmith-proxy:<version>` is what step 4's proxies run,
-# `holosmith-base:<version>` is the session image the config defaults to, and `agent-image:<version>` is that same
-# session with this repository's toolchain (ADR-0114) — so both the labels a later deploy compares and the images' own
-# contents are measured here, against a real daemon. It owns the **absent** state — it removes all three tags first —
-# because a build that only ever ran on a machine that already had the images would prove nothing.
+# Two of the three are **product** images and one is a **project's**, and the difference is the whole of this case:
+# `holosmith-proxy:<version>` is what step 4's proxies run and `holosmith-base:<version>` is the session image a project
+# without a recipe runs in, so both the labels a later deploy compares and the images' own contents are measured here,
+# against a real daemon. This case owns the **absent** state — it removes every tag it measures first — because a build
+# that only ever ran on a machine that already had the images would prove nothing.
+#
+# The third is `hs-holosmith:<digest>`: this repository's own recipe at `docker/Dockerfile`, which is a session's image
+# in *this* project and the image a gate runs in (ADR-0126). `server deploy` does not build it — a project's recipe
+# arrives after the deploy does, in the project's own history — so what is measured here is the build that does
+# (`scripts/project-image.sh ensure`), on this daemon and in the absent state as well.
 #
 # Five measurements, one per claim:
 #
-#   labels    every tag carries version, git tag, pinned pi and the binary's digest, and **no** tag carries a
-#             toolchain label: a recipe's package set is fixed, so there is no list for a label to carry. That is the
-#             read step 3's skip rule and `doctor` make (ADR-0057).
-#   agent     inside the image: `pi --version` is the pin, git answers, python3 and ripgrep are installed (the two
-#             packages that moved out of the config and into the recipe), the uid is 1000 (ADR-0035), and this
-#             binary runs `container snapshot --help` — the helper subcommand a session needs and the one thing a
-#             hand-built `pi-agent:local` does not have.
+#   labels    every product tag carries version, git tag, pinned pi and the binary's digest, and **no** product tag
+#             carries a toolchain label: a recipe's package set is fixed, so there is no list for a label to carry. That
+#             is the read step 3's skip rule and `doctor` make (ADR-0057).
 #   base      inside the image, as a uid that is neither root nor the image's own user (a session's shape, ADR-0087):
 #             `pi --version` is the pin, git answers, the isolation probe's `node -e` runs, and `command -v cargo`
 #             answers nothing — the absence is the contract, so it is measured rather than asserted.
@@ -11833,21 +11840,28 @@ SHIM
 #             is not on its allow-list and `hs_key` refuses a provider path it does not know. Neither question needs TLS
 #             or the internet, and `proxy mcp` — the third mode of the same binary — is `case_mcp_proxy`'s question
 #             against the shipped artifact: what the image is asked here is that a container from it answers at all.
-#   again     the same deploy again says `satisfied` and leaves all three image ids unchanged — the acceptance's "a
-#             second run changes nothing", for the step that is the most expensive to get wrong.
+#   project   the tag `scripts/project-image.sh tag` composes is absent before this case builds it and present after:
+#             one real `docker build` of the recipe a session here runs. `tests/images.rs` holds that tag's spelling to
+#             `projectimage::resolve`'s, and no Rust test can make the daemon build it. Inside it, the facts only a
+#             built image answers: `pi --version` is the pin (it comes from the base, so a wrong base shows here),
+#             `git` runs, `dpkg-query` names `python3` and `ripgrep` — the two packages the gate's own `command -v
+#             python3` guards depend on, whose absence would turn a score of cases into `SKIP`s and still print `ok` —
+#             and the image's own user is the invoking uid and not root.
+#   again     the same deploy again says `satisfied` and leaves both product images' ids unchanged — the acceptance's
+#             "a second run changes nothing", for the step that is the most expensive to get wrong.
 #
 # It **leaves all three images** and removes only its own containers and its scratch root: every later case's `serve`
-# boot starts the proxies from them, and removing an image a running container came from would leave that container
-# unable to restart. `case_server_deploy`'s online half removes the tags again because *it* asserts `changed`; the
-# order in `serve_cases` is what makes both honest.
+# boot starts the proxies from them, a session in this project runs the third, and removing an image a running container
+# came from would leave that container unable to restart. `case_server_deploy`'s online half removes the proxy tag again
+# because *it* asserts `changed`; the order in `serve_cases` is what makes both honest.
 #
-# A machine with no daemon or no python3 prints one SKIP line: `tests/images.rs` builds a test tag and asserts the
-# same three things through the production `Images` path, so a skipped gate is not a silent gap.
+# A machine with no daemon or no python3 prints one SKIP line: `tests/images.rs` builds a test tag and asserts the same
+# things through the production `Images` path, so a skipped gate is not a silent gap.
 case_server_images() {
   local name=case_server_images root="$repo_root/target/verify-images-$$"
-  local proxy base agent version tag pin plain status labels id_before control preview line answer
-  local base_uid probe_uid absent code
-  local egress_ip key_ip binds container package shims log state
+  local proxy base project version tag pin plain status labels id_before control preview line answer
+  local base_uid probe_uid invoking_uid image_uid package absent code
+  local egress_ip key_ip binds container shims log state
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (tests/images.rs builds a test tag and reads it back)\n' "$name"
     return 0
@@ -11866,16 +11880,17 @@ case_server_images() {
     fail "$name/version" "the artifact's version report is incomplete: $plain"
   proxy="holosmith-proxy:$version"
   base="holosmith-base:$version"
-  agent="agent-image:$version"
+  project="$(project_image)" ||
+    fail "$name/project/tag" "this tree's project image tag could not be composed, so the recipe the gate runs in was not measured"
 
   # This case owns the absent state: the deploy's own proxy containers go first (a running container pins the image
-  # it was started from, so an untag with them up fails and the build that follows would be a no-op), then all three
-  # tags are removed — and the removal is *asserted*, because "the image was already there" is exactly the state this
-  # case exists to rule out. The removal is nearly free and that is why it stays: it leaves the layer cache alone, so
-  # the build after it answers every `RUN` `CACHED` (ADR-0115).
+  # it was started from, so an untag with them up fails and the build that follows would be a no-op), then every tag is
+  # removed — and the removal is *asserted*, because "the image was already there" is exactly the state this case
+  # exists to rule out. The removal is nearly free and that is why it stays: it leaves the layer cache alone, so the
+  # build after it answers every `RUN` `CACHED` (ADR-0115).
   timeout 120 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
-  timeout 120 docker image rm -f "$proxy" "$base" "$agent" >/dev/null 2>&1 || true
-  for image in "$proxy" "$base" "$agent"; do
+  timeout 120 docker image rm -f "$proxy" "$base" "$project" >/dev/null 2>&1 || true
+  for image in "$proxy" "$base" "$project"; do
     if docker image inspect "$image" >/dev/null 2>&1; then
       fail "$name/absent" "$image survived its removal, so the build below would not be measured"
     fi
@@ -11920,10 +11935,10 @@ case_server_images() {
     fail "$name/deploy/exit" "the deploy exited $status: $(tail -20 "$WORK/$name.deploy.out")"
   assertions=$((assertions + 1))
   grep -q '^3\. images: changed: ' "$WORK/$name.deploy.out" ||
-    fail "$name/deploy/step3" "step 3 did not build the three images: $(cat "$WORK/$name.deploy.out")"
+    fail "$name/deploy/step3" "step 3 did not build the two product images: $(cat "$WORK/$name.deploy.out")"
   assertions=$((assertions + 1))
 
-  # The labels, on every tag: the four facts this binary knows about itself.
+  # The labels, on both product tags: the four facts this binary knows about itself.
   for label in version git-tag pi-version binary-sha256; do
     case "$label" in
       version) wanted="$version" ;;
@@ -11931,7 +11946,7 @@ case_server_images() {
       pi-version) wanted="$pin" ;;
       binary-sha256) wanted="$sha" ;;
     esac
-    for image in "$proxy" "$base" "$agent"; do
+    for image in "$proxy" "$base"; do
       labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)" ||
         fail "$name/labels" "$image is not on this machine after the build"
       case "$labels" in
@@ -11940,11 +11955,12 @@ case_server_images() {
       esac
     done
   done
-  # And no image carries a toolchain label, on all three: the package set is a literal in each recipe, so there is
-  # nothing for a label to carry and nothing for a skip rule to compare. This is the absence that ends where the
-  # configurable list used to be, measured rather than assumed — a label that came back would make an image read
-  # stale for a value no key configures.
-  for image in "$proxy" "$base" "$agent"; do
+  # And no product image carries a toolchain label: the package set is a literal in each recipe, so there is nothing for
+  # a label to carry and nothing for a skip rule to compare. This is the absence that ends where the configurable list
+  # used to be, measured rather than assumed — a label that came back would make an image read stale for a value no key
+  # configures. A project's image carries none either, which is why the project tag is not in this loop: it has no
+  # `org.holosmith.*` label at all (ADR-0123).
+  for image in "$proxy" "$base"; do
     labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image" 2>/dev/null)"
     case "$labels" in
       *'"org.holosmith.toolchains"'*)
@@ -11954,33 +11970,7 @@ case_server_images() {
     assertions=$((assertions + 1))
   done
 
-  # The agent image's contents, each one a fact a session depends on.
-  answer="$(timeout 300 docker run --rm --network none --entrypoint pi "$agent" --version 2>&1)" ||
-    fail "$name/agent/pi" '`pi --version` did not run in the agent image: '"$answer"
-  check "$name/agent/pi/version" "$pin" "$(sed -n '1s/^[^0-9]*//p' <<<"$answer" | tr -d '[:space:]')"
-  timeout 120 docker run --rm --network none --entrypoint git "$agent" --version >/dev/null 2>&1 ||
-    fail "$name/agent/git" "git does not run in the agent image"
-  assertions=$((assertions + 1))
-  for package in python3 ripgrep; do
-    answer="$(timeout 120 docker run --rm --network none --entrypoint dpkg-query "$agent" \
-      -W -f='${Package}' "$package" 2>&1)" ||
-      fail "$name/agent/$package" "$package is not installed in the agent image: $answer"
-    check "$name/agent/$package/name" "$package" "$answer"
-  done
-  # The image's own user is the *invoking* user's uid — that is ADR-0035's rule (a worktree the host can commit to),
-  # and it is not a constant: 1000 is the base's `node`, which happens to be this sandbox's uid. A non-root guard is
-  # what the invariant needs on top, because uid 0 would pass the equality on a root-owned machine.
-  invoking_uid="$(id -u)"
-  image_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$agent" -u 2>&1)"
-  check "$name/agent/uid" "$invoking_uid" "$image_uid"
-  [ "$image_uid" != "0" ] || fail "$name/agent/root" "the agent image runs as root, so a session's files are root's"
-  assertions=$((assertions + 1))
-  timeout 120 docker run --rm --network none --entrypoint /usr/local/bin/holosmith \
-    "$agent" container snapshot --help >/dev/null 2>&1 ||
-    fail "$name/agent/snapshot" 'this binary: `container snapshot --help` does not run in the agent image'
-  assertions=$((assertions + 1))
-
-  # ---- the base image: the same session without this repository's toolchain (ADR-0114) ------------------------
+  # ---- the base image: the session a project without a recipe runs in (ADR-0114) ----------------------------
   #
   # **The uid is neither 0 nor the image's own user**, and that is the measurement ADR-0087 asks for: a session's
   # container runs `--user <the data root's owner>`, a uid with no passwd entry and `HOME` at `/`, so an image that
@@ -12010,7 +12000,8 @@ case_server_images() {
     fail "$name/base/probe" "the isolation probe does not run in the base image: $answer"
   assertions=$((assertions + 1))
   # **The absence, measured**: no cargo, no rustc, no cross linker, no npm cache, no vendored crate set. This is the
-  # half of the contract that makes the image generic, and a `COPY` or an `apt-get` that crept in would be here.
+  # half of the contract that makes the image generic, and a `COPY` or an `apt-get` that crept in would be here. The
+  # toolchain itself is the *project's* recipe's, which this case builds below.
   for absent in cargo rustc x86_64-linux-musl-gcc; do
     # `|| code=$?` because a missing program is this check's *pass*: 127 is what `command -v` answers, and under
     # `set -e` a bare assignment holding a failed child would end the run.
@@ -12088,11 +12079,62 @@ case_server_images() {
     esac
   done
 
-  # The second deploy: `satisfied`, and no image was rebuilt.
-  # One `inspect` for all three, and the newlines turned into spaces, because the same string has to be *equal* on both
+  # ---- this repository's own project image: the third, built by the verb that builds a project's -------------
+  #
+  # The deploy above did **not** build it, which is the point rather than an omission: a project's recipe arrives after
+  # the deploy does, so `server deploy` builds two images and a session (or this case) builds the third. The absent
+  # state is the one `docker image rm` above left, so what follows measures the build itself: the tag the resolver
+  # composes, one `docker build` of `docker/Dockerfile` over the base the deploy just made, and the image there after.
+  if docker image inspect "$project" >/dev/null 2>&1; then
+    fail "$name/project/absent" "$project is on this machine after the deploy, and a project's recipe is not a deploy's to build"
+  fi
+  assertions=$((assertions + 1))
+  code=0
+  ensure_project_image >"$WORK/$name.project.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] ||
+    fail "$name/project/build" "this tree's project image did not build, so a session in this project has no image to run: $(tail -20 "$WORK/$name.project.out")"
+  assertions=$((assertions + 1))
+  if docker image inspect "$project" >/dev/null 2>&1; then
+    assertions=$((assertions + 1))
+  else
+    fail "$name/project/present" "$project is not on this machine after its build"
+  fi
+  # The image's own toolchain is `case_agent_toolchain`'s subject; what is asserted here is the one fact this case can
+  # see that no Rust test can — that the recipe the resolver names is the recipe the daemon built. `pi` comes from the
+  # base, so an image with no `pi` is an image built over the wrong base.
+  answer="$(timeout 300 docker run --rm --network none --entrypoint pi "$project" --version 2>&1)" ||
+    fail "$name/project/pi" '`pi --version` did not run in the project image: '"$answer"
+  check "$name/project/pi/version" "$pin" "$(sed -n '1s/^[^0-9]*//p' <<<"$answer" | tr -d '[:space:]')"
+  timeout 120 docker run --rm --network none --entrypoint git "$project" --version >/dev/null 2>&1 ||
+    fail "$name/project/git" "git does not run in the project image"
+  assertions=$((assertions + 1))
+  # **The two packages the removed `agent_toolchains` key named**, asked of the image by name: `scripts/verify.sh`
+  # guards a score of its cases on `command -v python3`, so a recipe that dropped the package would turn those
+  # measurements into `SKIP`s and still print `verify: <n> assertions, ok` — which is the failure mode nothing else
+  # here would see. The apt-line half is `tests/images.rs`', and this is the half only a built image can answer: the
+  # word survived, the package did not install. `ripgrep` moves with `python3` rather than being separated
+  # (ADR-0117 D2).
+  for package in python3 ripgrep; do
+    answer="$(timeout 120 docker run --rm --network none --entrypoint dpkg-query "$project" \
+      -W -f='${Package}' "$package" 2>&1)" ||
+      fail "$name/project/$package" "$package is not installed in the project image: $answer"
+    check "$name/project/$package/name" "$package" "$answer"
+  done
+  # And the image's own user is the invoking uid and not root: the base's `node`, which is what ADR-0035 needs (a
+  # session's files belong to the invoking user) and what ADR-0090 refuses to start as. Read rather than assumed, and
+  # asserted here because it takes a `docker run` of the image a session here actually runs.
+  invoking_uid="$(id -u)"
+  image_uid="$(timeout 120 docker run --rm --network none --entrypoint id "$project" -u 2>&1)"
+  check "$name/project/uid" "$invoking_uid" "$image_uid"
+  [ "$image_uid" != "0" ] ||
+    fail "$name/project/root" "the project image runs as root, so a session's files are root's"
+  assertions=$((assertions + 1))
+
+  # The second deploy: `satisfied`, and no product image was rebuilt.
+  # One `inspect` for both, and the newlines turned into spaces, because the same string has to be *equal* on both
   # sides: a continuation inside the quotes carries its indentation into the value, which is how this assertion read
   # five spaces where the comparison below had one and failed a second deploy that changed nothing.
-  id_before="$(docker image inspect --format '{{.Id}}' "$proxy" "$base" "$agent" | tr '\n' ' ')"
+  id_before="$(docker image inspect --format '{{.Id}}' "$proxy" "$base" | tr '\n' ' ')"
   status=0
   PATH="$shims:$PATH" "$artifact" server deploy --verbose --root "$root/install" --config "$WORK/config-images.toml" \
     >"$WORK/$name.again.out" 2>&1 || status=$?
@@ -12103,7 +12145,7 @@ case_server_images() {
     fail "$name/again/step3" "the second run's step 3 is not satisfied: $(cat "$WORK/$name.again.out")"
   assertions=$((assertions + 1))
   check "$name/again/ids" "$id_before" \
-    "$(docker image inspect --format '{{.Id}}' "$proxy" "$base" "$agent" | tr '\n' ' ')"
+    "$(docker image inspect --format '{{.Id}}' "$proxy" "$base" | tr '\n' ' ')"
 
   # `doctor --full` on the machine the deploy just built: the image line names the version and the tag, which is
   # the label comparison read back through its other caller — and it runs the self-test, which is the measurement
@@ -12125,9 +12167,9 @@ case_server_images() {
 
   # Its own containers and its scratch go, and so do the ones the deploy's step 4 started: both store readers mount
   # a directory inside this case's tree, so removing the tree under a running container would leave it crash-looping
-  # on a mount source that is no longer there. **Both images stay** (see this case's comment), which is what a later
-  # `serve` boot needs to start the proxies again. The responder goes first: it is this case's listener, and the next
-  # case picks its own port.
+  # on a mount source that is no longer there. **Every image stays** (see this case's comment), which is what a later
+  # `serve` boot needs to start the proxies again and a session in this project needs to run at all. The responder goes
+  # first: it is this case's listener, and the next case picks its own port.
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   holder_pid=""
@@ -12135,6 +12177,20 @@ case_server_images() {
   rm -rf "$root"
 }
 
+# The tag of this repository's own project image, and the build that makes it: `scripts/project-image.sh`'s two verbs.
+#
+# The tag is a digest and nothing else's, so it is **composed by the one thing that may compose it** — `projectimage`'s
+# rule lives in Rust and in that script, and `crates/holosmith/tests/images.rs` is what holds the two spellings
+# together. A case that spelled it itself would be a third spelling.
+project_image() {
+  bash "$repo_root/scripts/project-image.sh" tag
+}
+
+# The same tag, built when this machine does not have it. Its own output is progress on stderr and the tag on stdout, so
+# a caller reads the answer and the build's noise stays in the log.
+ensure_project_image() {
+  bash "$repo_root/scripts/project-image.sh" ensure
+}
 # The tag's name is a digest and nothing else's, so the case reads it back rather than composing it: `projectimage`
 # is the one thing that may compose `hs-<project>:<digest>`, and a case that spelled it itself would be a second
 # spelling of the rule.
@@ -12628,9 +12684,10 @@ case_base_image_lazy() {
   rm -rf "$root"
 }
 
-# The agent image can run this tree's own gate: rustc, cargo, rustfmt, clippy and the musl cross linker, at the
-# version the recipe pins, and the crates and npm packages the tree builds from inside the image itself (ADR-0105,
-# ADR-0106).
+# This project's own image can run this tree's own gate: rustc, cargo, rustfmt, clippy and the musl cross linker, at
+# the version the recipe pins, and the crates and npm packages the tree builds from inside the image itself (ADR-0105,
+# ADR-0106). The recipe is `docker/Dockerfile`, and it is also the image the gate's own container runs in, so this case
+# is the one place a session's container and the gate's container are measured to be one artifact (ADR-0126).
 #
 # The case's whole reason is that a **host cannot answer an image question**. `cargo fmt` on the gate's machine says
 # nothing about what a session's container holds, and the image is what a session runs: so the commands a worker
@@ -12652,22 +12709,23 @@ case_base_image_lazy() {
 # command below passes `--offline`**: both are the fact this case measures, because they are what a worker relies on
 # and the two things a warm registry mount used to hide.
 #
-# The image itself is `agent-image:$version`, which `case_server_images` builds and leaves in place: it removes both
-# tags at its start, so the tag this case reads is one built from **this** tree, and the ordering in `serve_cases` is
-# what makes that true. A machine where it is absent skips with the reason rather than measuring an older image.
+# The image is this repository's own **project** image — `hs-holosmith:<digest>` over `docker/Dockerfile`, the same
+# image a session here runs (ADR-0126) — which `case_server_images` builds and leaves in place: it removes the tag at
+# its start, so the tag read here is one built from **this** tree, and the ordering in `serve_cases` is what makes that
+# true. It is also the image the gate's own container is, which is why `python3` and `ripgrep` are this recipe's: the
+# `SKIP` lines `cargo test` prints below are the measurement that a gate run here lost nothing.
 case_agent_toolchain() {
   local name=case_agent_toolchain root="$repo_root/target/verify-toolchain-$$"
-  local agent version pinned answer code tree status headers dotted
+  local project pinned answer code tree status headers dotted
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
     return 0
   fi
-  version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
-  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
-  agent="agent-image:$version"
-  if ! docker image inspect "$agent" >/dev/null 2>&1; then
+  project="$(project_image)" ||
+    fail "$name/tag" "this tree's project image tag could not be composed, so the image a session runs here was not measured"
+  if ! docker image inspect "$project" >/dev/null 2>&1; then
     printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
-      "$name" "$agent"
+      "$name" "$project"
     return 0
   fi
   # The version the pin holds, read out of `pins/rust.txt`: a literal here would be a second copy of the pin. The
@@ -12702,19 +12760,19 @@ case_agent_toolchain() {
     docker run --rm --network none \
       --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
       -v "$tree:/src" -w /src \
-      --entrypoint "$entrypoint" "$agent" "$@" 2>&1
+      --entrypoint "$entrypoint" "$project" "$@" 2>&1
   }
 
   # The compiler is the one the recipe pins, asked of the toolchain rather than of the recipe's text again.
-  answer="$(in_image cargo --version)" || fail "$name/cargo" "cargo does not run in the agent image: $answer"
+  answer="$(in_image cargo --version)" || fail "$name/cargo" "cargo does not run in this project image: $answer"
   check "$name/cargo/version" "cargo $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
-  answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in the agent image: $answer"
+  answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in this project image: $answer"
   check "$name/rustc/version" "rustc $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
   # The cross linker, by name: the tree's own `.cargo/config.toml` names it for the one release target, and a session
   # that cannot find it gets a linker-not-found that reads like a code error.
   for linker in x86_64-linux-musl-gcc; do
     answer="$(in_image "$linker" --version)" ||
-      fail "$name/$linker" "$linker does not run in the agent image: $answer"
+      fail "$name/$linker" "$linker does not run in this project image: $answer"
     case "$answer" in
       *"$linker"*) assertions=$((assertions + 1)) ;;
       *) fail "$name/$linker/version" "$linker answered something else: $answer" ;;
@@ -12760,21 +12818,21 @@ case_agent_toolchain() {
   timeout 900 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint cargo "$agent" build --locked >"$WORK/$name.build.out" 2>&1 || code=$?
+    --entrypoint cargo "$project" build --locked >"$WORK/$name.build.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/build" "cargo build --locked exited $code: $(tail -20 "$WORK/$name.build.out")"
   assertions=$((assertions + 1))
   code=0
   timeout 300 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint cargo "$agent" fmt --check >"$WORK/$name.fmt.out" 2>&1 || code=$?
+    --entrypoint cargo "$project" fmt --check >"$WORK/$name.fmt.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/fmt" "cargo fmt --check exited $code: $(tail -20 "$WORK/$name.fmt.out")"
   assertions=$((assertions + 1))
   code=0
   timeout 900 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint cargo "$agent" clippy --all-targets -- -D warnings \
+    --entrypoint cargo "$project" clippy --all-targets -- -D warnings \
     >"$WORK/$name.clippy.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/clippy" "cargo clippy exited $code: $(tail -20 "$WORK/$name.clippy.out")"
   assertions=$((assertions + 1))
@@ -12782,11 +12840,11 @@ case_agent_toolchain() {
   timeout 1200 docker run --rm --name "hs_toolchain_test_$$" --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint cargo "$agent" test --no-fail-fast -- --nocapture \
+    --entrypoint cargo "$project" test --no-fail-fast -- --nocapture \
     >"$WORK/$name.test.out" 2>&1 || status=$?
   timeout 60 docker rm -f "hs_toolchain_test_$$" >/dev/null 2>&1 || true
   [ "$status" -eq 0 ] ||
-    fail "$name/test" "cargo test exited $status in the agent image: $(tail -40 "$WORK/$name.test.out")"
+    fail "$name/test" "cargo test exited $status in this project image: $(tail -40 "$WORK/$name.test.out")"
   assertions=$((assertions + 1))
   # `--nocapture` is there for this line: the container-shaped binaries print their `SKIP` to stderr, which a
   # captured run would swallow — so "the suite ran here" is a measurement rather than four green binaries that
@@ -12802,7 +12860,7 @@ case_agent_toolchain() {
   timeout 300 docker run --rm --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src/web \
-    --entrypoint npm "$agent" ci >"$WORK/$name.npm.out" 2>&1 || code=$?
+    --entrypoint npm "$project" ci >"$WORK/$name.npm.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] || fail "$name/npm" "npm ci exited $code: $(tail -20 "$WORK/$name.npm.out")"
   assertions=$((assertions + 1))
 
@@ -13847,17 +13905,20 @@ SHIM
     fail "$name/report_a/command" "the report does not name the fixture tree's own gate: $(cat "$WORK/responses/${name}_report_a.body")"
   grep -qF "\"path\":\"$candidate\"" "$WORK/responses/${name}_report_a.body" ||
     fail "$name/report_a/artifact" "the report does not name the artifact the gate left: $(cat "$WORK/responses/${name}_report_a.body")"
-  grep -qF "\"image\":\"agent-image:$version\"" "$WORK/responses/${name}_report_a.body" ||
-    fail "$name/report_a/image" "the gate did not run in agent-image:$version, the image the running release deployed: $(cat "$WORK/responses/${name}_report_a.body")"
+  # The image the gate ran in is the **fixture tree's** own project image, and this fixture has no `docker/Dockerfile`:
+  # a candidate with no recipe resolves to the base image, which is what the running release deployed (ADR-0126).
+  grep -qF "\"image\":\"holosmith-base:$version\"" "$WORK/responses/${name}_report_a.body" ||
+    fail "$name/report_a/image" "the gate did not run in holosmith-base:$version, the image a candidate with no recipe resolves to: $(cat "$WORK/responses/${name}_report_a.body")"
   assertions=$((assertions + 4))
   # The gate's own record, which is this case's side of "the full gate, and never `--no-build`" (ADR-0110 D2): the
-  # promotion handed the fixture's wrapper `agent-image:$version` — the image the running release deployed, the same
+  # promotion handed the fixture's wrapper `holosmith-base:$version` — the image a candidate tree with no
+  # `docker/Dockerfile` resolves to, the same
   # fact the report above carries — and no argument that would skip its build phase. Arm 2 runs the gate again and
   # appends the same lines, so the image is matched line-wise (`-x`, some line of the file) and the flag is counted
   # rather than sampled: neither becomes a fact about one run, and a third press in a later arm cannot turn a true
   # assertion red.
-  grep -qx "image agent-image:$version" "$recorder" ||
-    fail "$name/gate/image" "the gate was not given agent-image:$version, the image the running release deployed: $(cat "$recorder")"
+  grep -qx "image holosmith-base:$version" "$recorder" ||
+    fail "$name/gate/image" "the gate was not given holosmith-base:$version, the image a candidate with no recipe resolves to: $(cat "$recorder")"
   [ "$(grep -c '^args .*--no-build' "$recorder")" -eq 0 ] ||
     fail "$name/gate/no-build" "the gate was asked to skip its build phase, so the full gate is not what this promotion ran: $(cat "$recorder")"
   assertions=$((assertions + 2))
@@ -14143,21 +14204,22 @@ case_releases() {
 # the npm half measured on its own and the second, inside `build.sh`, is the fast path with `node_modules` already
 # there.
 #
-# The image is `agent-image:$version`, which `case_server_images` builds and leaves in place, so the tag read here is
-# one built from **this** tree; a machine without it skips with the reason rather than measuring an older image.
+# The image is this repository's own **project** image, which `case_server_images` builds and leaves in place, so the
+# tag read here is one built from **this** tree; a machine without it skips with the reason rather than measuring an
+# older image. That the recipe is the release build's own subject is the point: this is the image a session runs, and
+# `scripts/build.sh` is what a worker runs inside it.
 case_agent_offline_build() {
   local name=case_agent_offline_build root="$repo_root/target/verify-offline-build-$$"
-  local agent version tree code answer triple
+  local project tree code answer triple
   if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
     printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
     return 0
   fi
-  version="$("$artifact" version 2>/dev/null | sed -n 's/^version //p')"
-  [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
-  agent="agent-image:$version"
-  if ! docker image inspect "$agent" >/dev/null 2>&1; then
+  project="$(project_image)" ||
+    fail "$name/tag" "this tree's project image tag could not be composed, so the image a session runs here was not measured"
+  if ! docker image inspect "$project" >/dev/null 2>&1; then
     printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
-      "$name" "$agent"
+      "$name" "$project"
     return 0
   fi
 
@@ -14179,7 +14241,7 @@ case_agent_offline_build() {
     docker run --rm --network none \
       --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
       -v "$tree:/src" -w /src \
-      --entrypoint "$entrypoint" "$agent" "$@" 2>&1
+      --entrypoint "$entrypoint" "$project" "$@" 2>&1
   }
 
   # The app first, on its own: `npm ci` with `npm_config_offline=true` against `/opt/npm-cache`, then the app's own
@@ -14189,10 +14251,10 @@ case_agent_offline_build() {
   timeout 600 docker run --rm --name "hs_offline_build_web_$$" --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint /src/scripts/build-web.sh "$agent" >"$WORK/$name.web.out" 2>&1 || code=$?
+    --entrypoint /src/scripts/build-web.sh "$project" >"$WORK/$name.web.out" 2>&1 || code=$?
   timeout 60 docker rm -f "hs_offline_build_web_$$" >/dev/null 2>&1 || true
   [ "$code" -eq 0 ] ||
-    fail "$name/web" "scripts/build-web.sh exited $code in the agent image: $(tail -20 "$WORK/$name.web.out")"
+    fail "$name/web" "scripts/build-web.sh exited $code in this project image: $(tail -20 "$WORK/$name.web.out")"
   assertions=$((assertions + 1))
 
   # Then the release musl target, which is `cargo build --release --locked` with no flag beyond the lock. The tree's own
@@ -14202,10 +14264,10 @@ case_agent_offline_build() {
   timeout 1800 docker run --rm --name "hs_offline_build_release_$$" --network none \
     --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
     -v "$tree:/src" -w /src \
-    --entrypoint /src/scripts/build.sh "$agent" >"$WORK/$name.build.out" 2>&1 || code=$?
+    --entrypoint /src/scripts/build.sh "$project" >"$WORK/$name.build.out" 2>&1 || code=$?
   timeout 60 docker rm -f "hs_offline_build_release_$$" >/dev/null 2>&1 || true
   [ "$code" -eq 0 ] ||
-    fail "$name/build" "scripts/build.sh exited $code in the agent image: $(tail -40 "$WORK/$name.build.out")"
+    fail "$name/build" "scripts/build.sh exited $code in this project image: $(tail -40 "$WORK/$name.build.out")"
   assertions=$((assertions + 1))
 
   # The artifacts are read **inside the image**, over the same mount the build wrote: `build.sh` returning 0 is the
@@ -14489,13 +14551,14 @@ case_server_deploy() {
   # `hs_egress`/`hs_key`/`hs_mcp` are the machine's names: a leftover from an earlier case would make this case's first
   # run read `satisfied`, so it takes them over and removes its own at the end.
   timeout 60 docker rm -f hs_egress hs_key hs_mcp >/dev/null 2>&1 || true
-  # Step 3 builds `holosmith-proxy:<version>`, `holosmith-base:<version>` and `agent-image:<version>`, and this case
-  # asserts `changed`: it removes the two step 4 depends on first, because `case_server_images` deliberately leaves
-  # them. The base image stays — the rebuild is layer-cached either way, and the proxy is the tag that must be absent
-  # for `changed` to mean what it says.
+  # Step 3 builds `holosmith-proxy:<version>` and `holosmith-base:<version>`, and this case asserts `changed`: it
+  # removes the proxy tag first, because `case_server_images` deliberately leaves it. The base image stays — the rebuild
+  # is layer-cached either way, and the proxy is the tag that must be absent for `changed` to mean what it says. Nor is
+  # this project's own image touched: step 3 does not build it, so removing it would change nothing this case reads and
+  # cost the next case a build.
   version="$("$artifact" version | sed -n 's/^version //p')"
   [ -n "$version" ] || fail "$name/version" "the artifact does not report a version"
-  timeout 120 docker image rm -f "holosmith-proxy:$version" "agent-image:$version" >/dev/null 2>&1 || true
+  timeout 120 docker image rm -f "holosmith-proxy:$version" >/dev/null 2>&1 || true
   rm -rf "$root"
   mkdir -p "$root"
   control="$(free_port)" || fail "$name/port" "could not ask the kernel for a port"
@@ -16773,7 +16836,7 @@ SHIM
   HOLOSMITH_CRATE_SET="$root/stale-marker" "$repo_root/scripts/check-crate-set.sh" >"$out" 2>"$err" || rc=$?
   check "$name/crateset/stale/exit" 3 "$rc"
   present 'names a different Cargo.lock' "$err" "$name/crateset/stale/cause"
-  present 'rebuild agent-image on this host' "$err" "$name/crateset/stale/fix"
+  present 'rebuild this project image on this host' "$err" "$name/crateset/stale/fix"
   # The digest is taken from `$repo_root/Cargo.lock` and not from this case's working directory: the script hashes
   # its own repository root's lock, and the two must be the same file for a match to mean anything.
   printf '%s\n' "$(sha256sum "$repo_root/Cargo.lock" | cut -d' ' -f1)" >"$root/matching-marker"
@@ -16784,7 +16847,7 @@ SHIM
   rc=0
   HOLOSMITH_CRATE_SET="$root/stale-marker" "$repo_root/scripts/gate-quick.sh" --lib-only >"$out" 2>"$err" || rc=$?
   check "$name/crateset/preflight/exit" 3 "$rc"
-  present 'rebuild agent-image on this host' "$err" "$name/crateset/preflight/sentence"
+  present 'rebuild this project image on this host' "$err" "$name/crateset/preflight/sentence"
 }
 
 # The gate's own hygiene (`scripts/gate-cleanup.sh`): the record a run claims, the pass that kills only what a

@@ -450,8 +450,9 @@ pub struct Config {
     /// The default names the image a deployed machine already has: `holosmith-base:<this binary's version>` —
     /// from [`crate::images::base_image`], which is the one place that name is spelled. A machine may point it at
     /// an image built by hand (`pi-agent:local`), which is how a development machine and the gate run a session in
-    /// an image no deploy built; step 3's line then says the image it built is not the one a session will use. The
-    /// agent image beside it — `images::agent_image` — is this repository's own choice, not a key.
+    /// an image no deploy built; step 3's line then says the image it built is not the one a session will use. This
+    /// repository's own toolchain is not a key either: it is the recipe at `docker/Dockerfile` in this project, which
+    /// a session's image is resolved from ([`crate::projectimage`]).
     pub base_image: String,
     /// What one session's container may use (spec item 6's resource limits): whole CPUs,
     /// mebibytes of memory, and a process count. Three integers because a config value has no decimal

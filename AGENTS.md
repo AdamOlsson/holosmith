@@ -33,8 +33,9 @@ Issue tracking is remote only. Do not add `HS-*`/`HOL-*`/`PER-*` citations to co
 | `crates/holosmith/src/` | The binary: CLI, HTTP, sessions, events, Docker backend, proxies, deploy/release |
 | `crates/holosmith/tests/` | Integration tests; `tests/support/` and `tests/fixtures/` hold shared helpers and real pi recordings |
 | `crates/holosmith/migrations/` | Embedded, forward-only SQL migrations |
-| `crates/holosmith/images/` | Embedded Dockerfiles for the agent, proxy, base and smoke images |
+| `crates/holosmith/images/` | Embedded Dockerfiles for the proxy, base and smoke images |
 | `crates/holosmith/fixtures/` | The recorded turn the smoke image replays |
+| `docker/Dockerfile` | This repository's own session recipe — a project's image, built from the project root, not a product one |
 | `web/` | Vite + TypeScript PWA; built into `web/dist` and embedded in the binary |
 | `scripts/` | Build, static-artifact checks, embed checks and the end-to-end gate |
 | `README.md` | The human overview, including the getting-started path: install, key, project, phone, tailnet |
@@ -61,11 +62,11 @@ scripts/verify.sh
 
 It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
 (~5 min 20 s of it the session offline build case). It is 34 to 43 minutes when the image cases rebuild
-every layer of this repository's own image, `agent-image` (two such runs measured here: 34 and 43 minutes). The tags
-`case_server_images` removes are not what costs that: a removal leaves the layer cache intact, so the build after it
-is **0.73 s with all 16 layers `CACHED`**, and a new commit's rebuild is nearly as cheap now that the three label-only
-build arguments sit below every `RUN` — a changed git tag used to bust every one of them, for values nothing above
-`LABEL` reads (ADR-0115). Green is its last line: `verify: <n> assertions, ok`.
+every layer of this repository's own image, from the recipe at `docker/Dockerfile` (two such runs measured here: 34 and
+43 minutes). The tags `case_server_images` removes are not what costs that: a removal leaves the layer cache intact, so
+the build after it is **0.73 s with every layer `CACHED`**, and a new commit's rebuild is nearly as cheap now that the
+three label-only build arguments sit below every `RUN` — a changed git tag used to bust every one of them, for values
+nothing above `LABEL` reads (ADR-0115). Green is its last line: `verify: <n> assertions, ok`.
 A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure its
 fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added, so read
 the shape of that line, not its number. It wants a working Docker daemon for the container cases.
@@ -88,8 +89,8 @@ a worker's turn goes when it re-runs `cargo test` two or three times. `cargo tes
 belong to the parent: its run is the proof, and a green quick gate says on its last line that the tree
 is not proven. The two tiers are therefore recorded here and not in an ADR — ADR-0003 still reads as if
 there is one gate, which is the cost of keeping the rule where an agent will read it.
-Both gates also exit 3 when this repository's image vendors a crate set from another `Cargo.lock`
-(`scripts/check-crate-set.sh`, which both run as a precondition before their first phase): a stale `agent-image`, and
+Both gates also exit 3 when this project's image vendors a crate set from another `Cargo.lock`
+(`scripts/check-crate-set.sh`, which both run as a precondition before their first phase): a stale project image, and
 an image rebuild rather than a code fix. `scripts/verify.sh` also exits 4 when a case could not measure because a build
 could not fetch a source it pins — the case prints `UNREACHABLE <case>` at column 0 and stops the run (ADR-0111). That
 one is a host that did not answer and not a red tree: a `FAIL` there would make `holosmith update` record a gate
@@ -101,12 +102,15 @@ artifact the `build` phase just produced, never `target/debug`. Do not invent a 
 phases are the build.
 
 `scripts/verify-in-container.sh [<verify.sh argument>...]` runs that same gate **in a container** on this
-machine's daemon (ADR-0109): this repository's own image, `agent-image:<the version in VERSION>`, by default, the tree
-and its git dirs at their own absolute paths, the invoking uid, `--network host`, and the host's `docker` CLI and
-socket mounted in for the run. It parses no argument of its own — every argument and every exit status is
-`scripts/verify.sh`'s, so `--help` there is the gate's usage — and it needs no host toolchain, because the image's is
-the gate's. Its refusals (root, no `docker` CLI, a `DOCKER_CONTEXT` with no `DOCKER_HOST`, no daemon, no image, no
-`VERSION` file, a tree the daemon cannot see) are exit 2 with one sentence naming the fix. A failed run's work dir is
+machine's daemon (ADR-0109): this repository's own **project** image, `hs-holosmith:<digest>` from the recipe at
+`docker/Dockerfile` (ADR-0126), by default — the same image a session here runs, which is the first time the gate's
+container and a session's container are one artifact on purpose. It mounts the tree and its git dirs at their own
+absolute paths, the invoking uid, `--network host`, and the host's `docker` CLI and socket for the run. It parses no
+argument of its own — every argument and every exit status is `scripts/verify.sh`'s, so `--help` there is the gate's
+usage — and it needs no host toolchain, because the image's is the gate's. Its refusals (root, no `docker` CLI, a
+`DOCKER_CONTEXT` with no `DOCKER_HOST`, no daemon, a tree the daemon cannot see) are exit 2 with one sentence naming the
+fix, and this tree's own image, when it is not on the daemon, is **built** (`scripts/project-image.sh ensure`) rather
+than refused — an image a caller names (`HOLOSMITH_VERIFY_IMAGE`) must already exist. A failed run's work dir is
 under `target/tmp-verify-in-container`, and the gate's own `kept work dir:` line prints the container path
 `/verify-work/tmp.XXXX`, which is that directory's `tmp.XXXX`.
 
@@ -236,7 +240,7 @@ no visible reason is usually one of them missing:
   `--experimental-strip-types`). A bare `cargo build` never runs npm.
 - **git 2.38 or newer**: the merge check runs `git merge-tree --write-tree`. macOS' `/usr/bin/git` shim reports
   2.20 until the Command Line Tools are installed; the preflight prints the version it found.
-- **`openssl`, twice, for different jobs**: in the agent image, because `holosmith proxy key` runs
+- **`openssl`, twice, for different jobs**: in a session's image, because `holosmith proxy key` runs
   `openssl s_client` (the artifact is static and has no TLS stack, ADR-0048) — a missing one is a 502 from the
   proxy, never a silent fallback; and on the host, because web push signs, derives and delivers through four
   `openssl` children per message (ADR-0071), which `doctor --full` reports as `Check::Openssl` rather than
@@ -263,9 +267,10 @@ Optional, and each one is a `SKIP` with a reason rather than a failure — a mac
   network self-test's probe is a node script, ADR-0044) whose default user is not root, for `tests/container.rs`
   and the two mount/reconcile cases. The two install cases run the artifact in it too, as the machine the command hands
   a home of its own (ADR-0108). It is run as the config's `base_image`, so a development machine may point that key at
-  an image it tagged by hand. The three product images are `holosmith-proxy:<version>`, `holosmith-base:<version>` —
-  the generic session image, and what `base_image` defaults to — and `agent-image:<version>`, this repository's own,
-  which no config key names by default (ADR-0057, ADR-0114, ADR-0117).
+  an image it tagged by hand. The two product images are `holosmith-proxy:<version>` and `holosmith-base:<version>` —
+  the generic session image, and what `base_image` defaults to (ADR-0057, ADR-0114, ADR-0117). This repository's own
+  toolchain is not a third: it is the recipe at `docker/Dockerfile`, whose image is `hs-holosmith:<digest>`
+  (ADR-0126).
 - **A Docker daemon.** The development sandbox binds its socket because every story is a fact about a real
   `docker run` — that is host root by another name (anything reaching the socket can mount `/`), so it is
   granted deliberately and only when the socket exists. The empty-root run `scripts/check-static.sh` makes is a
@@ -289,10 +294,11 @@ that build on its own — it needs a daemon and it is idempotent on the tag's ex
 pre-warms the base. A build has the internet and the session it produces does not, which is why a project's `apt-get`
 belongs in its recipe.
 
-This repository is the project that needs a Rust toolchain, so its own image is `agent-image:<version>`, built from its
-own recipe at `crates/holosmith/images/agent.Dockerfile`: the pinned rustc, this tree's crate set vendored beside it and
-the web app's packages in its npm cache (ADR-0106). A machine whose projects are this tree names it in `base_image`, and
-a session there — no network, nothing mounted, `CARGO_HOME` empty — runs `cargo build --locked`, `cargo fmt`,
+This repository is the project that needs a Rust toolchain, so its own image is a **project's** image like any other:
+`hs-holosmith:<digest>` over `docker/Dockerfile` at the repository root, which is `FROM` the base image and installs the
+pinned rustc, this tree's crate set vendored beside it and the web app's packages in its npm cache (ADR-0106,
+ADR-0126). A machine whose projects are this tree needs no `base_image` key at all: the resolver finds the recipe, and a
+session there — no network, nothing mounted, `CARGO_HOME` empty — runs `cargo build --locked`, `cargo fmt`,
 `cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag. `scripts/build.sh` too, and the gate proves it:
 `case_agent_toolchain` runs `cargo build --locked`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` and `npm ci` inside that image under `--network none`, and `case_agent_offline_build` runs
@@ -320,9 +326,9 @@ The vendored crate set is the lock's and nothing else, and measured under `--net
 ``error: the crate `rand` could not be found in registry index.`` — a sentence about the image, not about a broken
 registry. A crate the lock *does* name resolves, which is how the two are told apart. So a dependency the lock has never
 seen is a manifest and lock edit that a host makes with its own `cargo fetch --locked`, then a rebuild of the image that
-project's sessions run — for this repository, `agent-image`, from the recipe at
-`crates/holosmith/images/agent.Dockerfile`. `scripts/check-crate-set.sh` is what refuses the old image with its own
-sentence instead of letting every phase report the same symptom (the exit-3 rule is in "Build and gates").
+project's sessions run — for this repository, that recipe at `docker/Dockerfile`, giving `hs-holosmith:<digest>`.
+`scripts/check-crate-set.sh` is what refuses the old image with its own sentence instead of letting every phase report
+the same symptom (the exit-3 rule is in "Build and gates").
 
 **A `SKIP` measures nothing.** In a container `cargo test` prints a `SKIP` for each integration binary that wants a
 Docker daemon, and `scripts/build.sh`'s last step prints one for `git_tag` (the case builds in a `git ls-files` copy, so
@@ -464,7 +470,7 @@ so a seq is **strictly increasing with gaps** and the next one is `last_seq + 1`
 ## The release path: build, smoke, upgrade, rollback
 
 A release artifact is built by **the tree's own** `scripts/build.sh`, and where that runs is the caller's business: a
-worker builds with the toolchain its turn has (the agent image's, or a host's own on `PATH`),
+worker builds with the toolchain its turn has (the project image's, or a host's own on `PATH`),
 `scripts/verify-in-container.sh` runs the whole gate in that image on this machine's daemon (ADR-0109), and
 `holosmith update` verifies the candidate tree by running that gate in the image the running release deployed
 (ADR-0109) and promotes the artifact the gate left. The artifact is `dist/<triple>/holosmith` with
@@ -505,7 +511,7 @@ next boot resumes them.
 - **The version is `VERSION`, and `Cargo.toml` says `0.0.0`.** `build.rs` reads the file into `holosmith::VERSION`
   (the version `version`, `/api/health` and every image tag report), and the placeholder in `[workspace.package]` is
   what keeps a bump out of `Cargo.lock` — whose digest `scripts/check-crate-set.sh` compares against the crate set
-  the agent image vendors, so a version living in the lock would make every bump read as a stale image and be the
+  this project's image vendors, so a version living in the lock would make every bump read as a stale image and be the
   one edit a tree could not promote. Never read `env!("CARGO_PKG_VERSION")`: it answers the placeholder, and
   `tests/version_single_source.rs` fails on it. The golden config fixture and the two tests that read it substitute
   `<version>`, so a bump edits one file.

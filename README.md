@@ -10,7 +10,7 @@ Requirements: Linux with systemd (240 or newer for a promotion's job), Docker, g
 ## Quick start
 
 ```bash
-holosmith install                # the tree, the three images, the unit; waits for /api/health
+holosmith install                # the tree, the two images, the unit; waits for /api/health
 holosmith key set opencode-go    # paste the key, then Enter
 holosmith project add https://github.com/you/project
 ```

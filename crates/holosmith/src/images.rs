@@ -1,16 +1,21 @@
-//! The three images `server deploy`'s step 3 builds — proxy, base and agent — from the Dockerfiles embedded here.
+//! The two images `server deploy`'s step 3 builds — proxy and base — from the Dockerfiles embedded here.
 //!
 //! The Dockerfiles are `include_str!`ed rather than shipped beside the binary: a deploy runs on a machine that
 //! has the artifact and nothing else, so the recipe has to be *inside* it, and `scripts/check-static.sh` greps
 //! the built artifact for each file's marker to prove it is. The bodies are in `images/`, because a Dockerfile
 //! written as a Rust string literal is a file no linter reads and no human diffs.
 //!
+//! **A project's own image is not one of them and is not built here.** `crate::projectimage` resolves a project's
+//! `docker/Dockerfile` into `hs-<project>:<digest>` and `crate::imagebuild` builds it, from the project root as the
+//! context — which is why that recipe is a file in the project's tree and not a string in this binary (ADR-0126).
+//! This module is the two recipes Holosmith itself owns.
+//!
 //! Three things about a build are load-bearing and each has its own doc comment below:
 //!
 //! - **The daemon is handed a tar on stdin**, not a directory: `docker build -` reads a context from an
 //!   archive, which is the only way to build without a directory on disk that holds a copy of this binary. What
-//!   travels in it besides the Dockerfile and the binary is [`Kind::context`]'s answer — the agent image's crate
-//!   set, and nothing for the proxy or the base.
+//!   travels in it besides the Dockerfile and the binary is [`Context`]'s answer, which is nothing for both of
+//!   these recipes: neither installs a Rust build for a context to reach.
 //! - **The image's labels are the read.** `server deploy`'s second run must be honestly `satisfied`, and the
 //!   five `org.holosmith.*` labels are what says an image was built by *this* binary — not a tag, which any
 //!   `docker tag` can move, and not a build timestamp, which says nothing about what is inside. One of them is a
@@ -38,75 +43,44 @@ pub const PROXY_DOCKERFILE: &str = include_str!("../images/proxy.Dockerfile");
 /// The **generic** session image's Dockerfile: pi at the pinned version, node under it, git, CA certificates,
 /// `openssl` and `procps`, and nothing else.
 ///
-/// A third recipe beside the proxy's and the agent's, and the agent image is the same session with this repository's
-/// toolchain in it — the two answer different projects rather than different moments of one. It carries no binary at
-/// all, which is the one way its build differs from the other two; `Kind::Base.context` is empty for the same reason
-/// the proxy's is.
+/// A second recipe beside the proxy's, and this repository's own toolchain lives in `docker/Dockerfile` at the project
+/// root instead: the two answer different projects rather than different moments of one, and a project that needs a
+/// package builds its own image `FROM` this one (`crate::projectimage`). It carries no binary at all, which is one way
+/// its build differs from the proxy's; the `Context` it is handed is empty for the same reason the proxy's is.
 pub const BASE_DOCKERFILE: &str = include_str!("../images/base.Dockerfile");
 
-/// The agent image's Dockerfile, for the same reason.
-pub const AGENT_DOCKERFILE: &str = include_str!("../images/agent.Dockerfile");
-
-/// The **smoke** image's recipe (spec item 10 step 2): the candidate as `pi`, on the agent image's base.
+/// The **smoke** image's recipe (spec item 10 step 2): the candidate as `pi`, on the base image's base.
 ///
-/// A third recipe rather than a variant of the agent image, because the two answer different questions: the agent
-/// image is what a session runs in production (pi at the pinned version, git, this repository's toolchain), and this
-/// one exists so a *candidate binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`,
-/// never by `server deploy` — it is not what a promotion ships, and the ADR says so.
+/// A third recipe rather than a variant of the base image, because the two answer different questions: the base image
+/// is what a session runs in production (pi at the pinned version, git, node), and this one exists so a *candidate
+/// binary* can prove itself with a `pi` that replays a recording. Built by `holosmith smoke`, never by
+/// `server deploy` — it is not what a promotion ships, and the ADR says so.
 pub const SMOKE_DOCKERFILE: &str = include_str!("../images/smoke.Dockerfile");
 
 /// The entries a build context carries, each written under the path it is named by, with the text the daemon reads
 /// there.
 ///
 /// The path is the file's real relative path in this repository, so a context's names are the tree's names and a
-/// slice of these is a list of files rather than of labels for them.
+/// slice of these is a list of files rather than of labels for them. Both recipes this module builds are handed an
+/// empty one: a project's recipe is the one with files to reach, and it is built from a directory rather than from an
+/// archive ([`crate::projectimage::Build`]).
 pub type Context = [(&'static str, &'static str)];
-
-/// The build context entries the **agent** image carries, so a build of it can vendor this tree's dependencies.
-///
-/// Six files, embedded at the path each one has in the repository, and every one of them is load-bearing:
-///
-/// - the workspace `Cargo.toml` and the member's, because `cargo vendor` resolves a workspace from the root manifest
-///   and a package from its own;
-/// - the member's real `src/lib.rs`, because a target is a source file and not a manifest entry: the three manifests
-///   alone answer `no targets specified in the manifest`, and measured, these six produce the crate set a vendor over
-///   the whole tree does. That is why the file travels rather than a generated stub;
-/// - `Cargo.lock`, because a vendored crate set that is not the lock's is a build with other crates in it;
-/// - the web pair, for the app this binary embeds: `npm ci`'s two files.
-///
-/// The lock is also an input of *this binary* — it is embedded here — so an edited lock changes the artifact's bytes
-/// and with them [`LABEL_BINARY`]: a deploy rebuilds the image with no other label of its own having moved.
-///
-/// The proxy image has none of it: it is the artifact on alpine, and its recipe runs no Rust.
-const AGENT_CONTEXT: [(&str, &str); 6] = [
-    ("Cargo.toml", include_str!("../../../Cargo.toml")),
-    ("Cargo.lock", include_str!("../../../Cargo.lock")),
-    ("crates/holosmith/Cargo.toml", include_str!("../Cargo.toml")),
-    ("crates/holosmith/src/lib.rs", include_str!("lib.rs")),
-    (
-        "web/package.json",
-        include_str!("../../../web/package.json"),
-    ),
-    (
-        "web/package-lock.json",
-        include_str!("../../../web/package-lock.json"),
-    ),
-];
 
 /// The smoke image's tag: `holosmith-smoke:<version>`, one spelling for `images` and `smoke`.
 pub fn smoke_image() -> String {
     format!("holosmith-smoke:{}", crate::VERSION)
 }
 
-/// Where the binary lives inside the proxy and agent images (`--entrypoint`, and `holosmith container snapshot`).
+/// Where the binary lives inside the proxy image (`--entrypoint`).
 ///
-/// The base image carries no binary: the three `--entrypoint` sites are all proxy containers, and the one
+/// Neither product image carries a binary: the three `--entrypoint` sites are all proxy containers, and the one
 /// in-container entry point left, `holosmith container snapshot`, has no caller in the product path.
 pub const BINARY_IN_IMAGE: &str = "/usr/local/bin/holosmith";
 
 /// The build argument a recipe with a rust stage reads its base's reference from, and the only argument that is
 /// not a label: its value is [`crate::pins::rust_image`]'s, so a recipe holds no digest and a bump is one edit
-/// (ADR-0118).
+/// (ADR-0118). It is a **project's** argument now: the recipe that declares it is `docker/Dockerfile`, handed it by
+/// [`crate::projectimage::Build::arguments`].
 pub const RUST_IMAGE_ARG: &str = "HOLOSMITH_RUST_IMAGE";
 
 /// The labels an image carries: the four facts this binary knows about itself, all under this build's own namespace.
@@ -114,10 +88,10 @@ pub const RUST_IMAGE_ARG: &str = "HOLOSMITH_RUST_IMAGE";
 /// Read back by step 3's skip rule and by `doctor`, so the spelling is a contract: an image built by another
 /// tool and labelled differently is "not built from this binary's Dockerfile" rather than "close enough".
 ///
-/// There is no label for the recipe's package set. The set is fixed — python3, ripgrep and the Rust toolchain are
-/// part of the recipe — so there is no list a machine could change and nothing for a label to carry, and an image
-/// built by a release that still wrote `org.holosmith.toolchains` is not current because the recipe it was built
-/// from is not this one.
+/// There is no label for the recipe's package set. The set is fixed — this repository's own toolchain, the crate set
+/// and the npm cache are a project's recipe's, and pi and git are the base's — so there is no list a machine could
+/// change and nothing for a label to carry, and an image built by a release that still wrote
+/// `org.holosmith.toolchains` is not current because the recipe it was built from is not this one.
 pub const LABEL_VERSION: &str = "org.holosmith.version";
 pub const LABEL_GIT_TAG: &str = "org.holosmith.git-tag";
 pub const LABEL_PI: &str = "org.holosmith.pi-version";
@@ -131,24 +105,20 @@ pub const LABEL_PI: &str = "org.holosmith.pi-version";
 /// running it. The acceptance's word is "the binary", so the read measures the binary.
 pub const LABEL_BINARY: &str = "org.holosmith.binary-sha256";
 
-/// One **product** image's build bound: the agent image's first build installs pi and the musl.cc cross toolchain over the network.
+/// One **product** image's build bound: the base image's first build installs pi over the network.
 ///
-/// Forty minutes rather than the proxies' minute, because the agent image's `npm install` fetches pi from one
-/// package manager, its `apt-get` installs a C compiler from a second, and it downloads and unpacks a cross
-/// toolchain of its own. **Measured at 10 min 30 s with both base images already on the machine** — `rust` is
-/// 2.2 GB and `node` 333 MB, so a cold one also pulls ~2.5 GB that this bound has to cover — and the rust stage
-/// is copied rather than installed, which is why the number is minutes and not an hour. That figure predates the
-/// vendor and npm steps (ADR-0106), which run **inside** the same bound: their own cost is unmeasured, so the forty
-/// minutes is the ceiling a `cargo vendor --locked` of the lock's 105 crates and one `npm ci` of the web app have to
-/// fit in, not a number that includes them. It is a **bound** and not a timeout to fail by: `Ok(None)` from the build
-/// is "the build did not finish", which stops the step with a sentence rather than hanging a deploy nobody is
+/// Forty minutes rather than the proxies' minute, because a product image's `npm install` fetches pi from a package
+/// manager and its `apt-get` installs a set of packages, and because the base it builds `FROM` may have to be pulled
+/// first. **Measured at 10 min 30 s with the base image already on the machine** — `node` is 333 MB, so a cold one
+/// also pulls that, which this bound has to cover. It is a **bound** and not a timeout to fail by: `Ok(None)` from the
+/// build is "the build did not finish", which stops the step with a sentence rather than hanging a deploy nobody is
 /// watching.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(2400);
 
-/// One **project's** build bound: an hour, because a project's first build is slower than any of the three above.
+/// One **project's** build bound: an hour, because a project's first build is slower than any of the two above.
 ///
 /// A project's recipe installs its own toolchain — this repository's installs a Rust toolchain, runs `cargo vendor`
-/// over the lock and `npm ci` over the web app — and none of it is measured here: the number is the agent image's
+/// over the lock and `npm ci` over the web app — and none of it is measured here: the number is the base image's
 /// [`BUILD_TIMEOUT`] with room on top, because the one build this repository can time is not the build a project's
 /// author wrote. It is a **bound** and not a timeout to fail by, for the same reason: a build that does not finish
 /// inside it is `Ok(None)` from [`Docker::build_bounded`], which is a sentence rather than a wedged session.
@@ -167,20 +137,16 @@ pub fn base_image() -> String {
     Kind::Base.image_of(crate::VERSION)
 }
 
-/// `agent-image:<version>`: this repository's own image, with the Rust toolchain, the crate set and the npm cache
-/// in it. It is a product image and not a config key: a session runs its project's image, which is `base_image`'s
-/// tag unless the project carries a recipe of its own ([`crate::projectimage::resolve`]), and `base_image` defaults
-/// to [`base_image`].
-pub fn agent_image() -> String {
-    Kind::Agent.image_of(crate::VERSION)
-}
-
-/// Which of the three images step 3 builds.
+/// Which of the two images step 3 builds.
+///
+/// There is no third arm. This repository's own session image is a **project's** image — `hs-holosmith:<digest>` over
+/// `docker/Dockerfile` — so it is resolved and built by [`crate::projectimage`] and [`crate::imagebuild`] like any
+/// other project's, and a deploy that stamped labels on it would be a deploy claiming to have read a recipe it did
+/// not (ADR-0126).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Proxy,
     Base,
-    Agent,
 }
 
 impl Kind {
@@ -189,19 +155,6 @@ impl Kind {
         match self {
             Self::Proxy => PROXY_DOCKERFILE,
             Self::Base => BASE_DOCKERFILE,
-            Self::Agent => AGENT_DOCKERFILE,
-        }
-    }
-
-    /// The extra entries this image's build context carries after its Dockerfile and its binary.
-    ///
-    /// The agent image's are `AGENT_CONTEXT`, the six files a build vendors this tree's crates from; the proxy's and
-    /// the base's are none, because neither recipe installs a Rust build for a context to reach. An empty slice rather
-    /// than an `Option`, so "this context has no extra entries" is a list of length zero at every place one is read.
-    pub fn context(self) -> &'static Context {
-        match self {
-            Self::Proxy | Self::Base => &[],
-            Self::Agent => &AGENT_CONTEXT,
         }
     }
 
@@ -219,7 +172,6 @@ impl Kind {
         match self {
             Self::Proxy => format!("holosmith-proxy:{version}"),
             Self::Base => format!("holosmith-base:{version}"),
-            Self::Agent => format!("agent-image:{version}"),
         }
     }
 
@@ -244,7 +196,7 @@ impl Kind {
 ///
 /// Every image carries the digest, including the base image, whose recipe copies no binary at all: the label is the
 /// **build's** fact — these bytes went into this recipe — and a rule that skipped it there would answer `satisfied`
-/// for an image built from the previous artifact as readily as the agent image would.
+/// for an image built from the previous artifact.
 ///
 /// The `kind` is a field because the **tag** the image is read and built under is `kind`'s, and that depends on the
 /// release's version: a promotion to 0.2.0 asks the daemon for `holosmith-proxy:0.2.0`, which is what the *new*
@@ -296,7 +248,7 @@ impl Expectation {
         }
     }
 
-    /// The tag this image is read and built under: `holosmith-proxy:<version>`, `agent-image:<version>`.
+    /// The tag this image is read and built under: `holosmith-proxy:<version>`, `holosmith-base:<version>`.
     pub fn tag(&self) -> String {
         self.kind.image_of(&self.version)
     }
@@ -518,10 +470,10 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// What one `docker build` is handed as its context.
 ///
-/// Two shapes because the two things this tree builds are two different things: the three product images are an
-/// archive on stdin — the Dockerfile and the binary, embedded in this binary, with no directory on disk that holds a
-/// copy of either — and a project's image is a directory on disk, `<project root>`, which Docker filters by the
-/// project's own `.dockerignore` and reads `docker/Dockerfile` from (ADR-0123).
+/// Two shapes because the two things this tree builds are two different things: the two product images are an archive
+/// on stdin — the Dockerfile and the binary, embedded in this binary, with no directory on disk that holds a copy of
+/// either — and a project's image is a directory on disk, `<project root>`, which Docker filters by the project's own
+/// `.dockerignore` and reads `docker/Dockerfile` from (ADR-0123, ADR-0126).
 ///
 /// The shape decides three things at once, which is why it is one value: whether the child's stdin is a pipe or
 /// `/dev/null`, how long the build may take ([`BUILD_TIMEOUT`] or [`PROJECT_BUILD_TIMEOUT`]), and what a build that
@@ -748,24 +700,36 @@ fn write_octal(field: &mut [u8], value: u64) {
 /// `--build-arg` for every fact the Dockerfile labels with, in [`Expectation::build_args`]'s order, so the
 /// image's labels are this binary's values and not a constant in a file.
 ///
-/// **The one argument that is not a label is the rust base's**, and only the agent image's vector carries it: that
-/// recipe has a rust stage and takes its reference from [`crate::pins::rust_image`] rather than holding a literal in
-/// a `FROM` line (ADR-0118). The value is the pin's, verbatim — nothing here spells a version — and a recipe with no
-/// rust stage is sent no argument at all, because a `--build-arg` a recipe does not declare is a BuildKit warning
-/// over nothing.
-pub fn build_arguments(tag: &str, expectation: &Expectation) -> Vec<String> {
+/// **No other argument is passed, and that is a rule rather than an omission.** The one argument that is not a label is
+/// a recipe's rust base, and only a *project's* recipe has a rust stage: it declares `HOLOSMITH_RUST_IMAGE` and
+/// [`crate::projectimage::Build::arguments`] fills it, so a product recipe is handed the label arguments and nothing
+/// else. A `--build-arg` a recipe does not declare is a BuildKit warning over nothing.
+///
+/// **`no_cache` is `--force`'s, and it is a parameter rather than a decision here** because this function builds a
+/// command line and not a policy: a deploy and a promotion always pass `false` — their question is "are the labels
+/// current", and a rebuild they did not ask for would re-run the toolchain's layers — while `image build --force` passes
+/// `true`, because skipping the existence check is not rebuilding ([`NO_CACHE`]).
+pub fn build_arguments(tag: &str, expectation: &Expectation, no_cache: bool) -> Vec<String> {
     let mut arguments = build_head(tag);
+    if no_cache {
+        arguments.push(NO_CACHE.to_string());
+    }
     for (key, value) in expectation.build_args() {
         arguments.push("--build-arg".to_string());
         arguments.push(format!("{key}={value}"));
     }
-    if expectation.kind == Kind::Agent {
-        arguments.push("--build-arg".to_string());
-        arguments.push(format!("{RUST_IMAGE_ARG}={}", crate::pins::rust_image()));
-    }
     arguments.push("-".to_string());
     arguments
 }
+
+/// The flag that makes a build ignore the layer cache: `--no-cache`, and the answer a `--force` gives.
+///
+/// It is a const rather than a literal in two places because two paths pass it — [`ensure`], which is the product
+/// images' build, and [`crate::imagebuild`], which is a project's — and a build that spelled the flag differently in one
+/// of them would be a `--force` that rebuilt nothing. A build whose inputs are unchanged is otherwise answered entirely
+/// from the layer cache, so every step reports `CACHED`, the same config is re-exported, and the tag is left exactly as
+/// it was: `--force` without this is a no-op on the one thing it exists to change.
+pub const NO_CACHE: &str = "--no-cache";
 
 /// `build -t <tag>`: the two arguments every `docker build` in this tree starts with.
 ///
@@ -917,7 +881,7 @@ pub const CERTIFICATE_WARNING: &str = "warning: musl.cc's certificate did not ve
 /// tarball without a count because one fetch falling back or both is the build's own business, and the clause is one
 /// clause either way.
 ///
-/// One sentence carries it, [`ensure`]'s, over the three product images: a recipe is built here or not at all.
+/// One sentence carries it, [`ensure`]'s, over the two product images: a recipe is built here or not at all.
 pub(crate) const CERTIFICATE_CLAUSE: &str = "; musl.cc's certificate did not verify, so the pinned tarball was fetched \
                                               without verification and its digest matched";
 
@@ -1077,20 +1041,24 @@ pub fn read(images: &dyn Images, expectation: &Expectation) -> Status {
     }
 }
 
-/// The images of `release` that are not on this machine or not built from its bytes, proxy, base, agent.
+/// The images of `release` that are not on this machine or not built from its bytes: the proxy and the base.
 ///
 /// **One function with two callers**, because acceptance bullet 4 ("rebuilds the images only when the binary or
 /// a pinned version changed") has to mean one thing for `server deploy`'s step 3 and for a promotion: the read is
 /// the labels, the reason is the read's own sentence, and an empty answer is "nothing to build". The digest is the
 /// caller's because both already have one (the deploy hashes its own bytes once; a promotion has the candidate's
 /// `.sha256`), and `release` is the version whose tag the images are read under.
+///
+/// A project's own image is **not** in this list: it carries no labels, it is read by the existence of its content
+/// address, and [`crate::imagebuild`] is what builds it. `server deploy` cannot build it either — the recipe arrives
+/// after the deploy does, in the project's own git history (ADR-0123, ADR-0126).
 pub fn outstanding(
     images: &dyn Images,
     release: &VersionInfo,
     digest: &str,
 ) -> Vec<(Kind, String)> {
     let mut pending: Vec<(Kind, String)> = Vec::new();
-    for kind in [Kind::Proxy, Kind::Base, Kind::Agent] {
+    for kind in [Kind::Proxy, Kind::Base] {
         let expectation = Expectation::of_release(kind, release, digest);
         // The reason is the read's own sentence, so the plan says *why* a build is coming rather than only that
         // one is.
@@ -1111,16 +1079,15 @@ pub fn outstanding(
 /// Docker's `amd64`/`arm64` and the target triple's `x86_64`/`aarch64` — before the first build, and anything
 /// else is compared verbatim rather than guessed at.
 pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String> {
-    // A daemon that cannot answer is the same failure as a mismatch and needs the same sentence's subject: the three
+    // A daemon that cannot answer is the same failure as a mismatch and needs the same sentence's subject: the two
     // images nothing will build. Docker's own words about `docker version` name none of them.
     let arch = images.daemon_arch().map_err(|said| {
         format!(
             "no image was built, because this machine's daemon did not say which architecture it builds for \
-             ({said}): {}, {} and {} are built here, and a build for another architecture is an image whose \
+             ({said}): {} and {} are built here, and a build for another architecture is an image whose \
              entrypoint could not start",
             proxy_image(),
-            base_image(),
-            agent_image()
+            base_image()
         )
     })?;
     let binary = target.split('-').next().unwrap_or(target);
@@ -1133,21 +1100,19 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
         return Ok(arch);
     }
     Err(format!(
-        "this binary is {binary} and this machine's daemon builds {arch}: {}, {} and {} would be {arch} images \
+        "this binary is {binary} and this machine's daemon builds {arch}: {} and {} would be {arch} images \
          with a {binary} holosmith inside, whose entrypoint could not start — build this machine's artifact, or \
          deploy from the build for {built}",
         proxy_image(),
-        base_image(),
-        agent_image()
+        base_image()
     ))
 }
 
-/// Build the images `pending` names, proxy, base, agent, answering the line's sentence; `Err` is the step's failure.
+/// Build the images `pending` names, proxy then base, answering the line's sentence; `Err` is the step's failure.
 ///
 /// The order is the spec's: the proxy image is what step 4 starts, so a machine that runs out of bounds or disk has
-/// the image its proxies need before the larger ones, and the base comes before the agent because it is the cheap
-/// half of the same session. The guard runs once, before the first build, because every image is built by the same
-/// daemon and one mismatch is enough to stop.
+/// the image its proxies need before the base's. The guard runs once, before the first build, because every image is
+/// built by the same daemon and one mismatch is enough to stop.
 ///
 /// `release` is the version the images are built **for** and `binary` the bytes that go inside them: the same pair
 /// for `server deploy` (this process, its own bytes) and for a promotion (the candidate, its `.sha256`). The two
@@ -1174,6 +1139,12 @@ pub fn architecture(images: &dyn Images, target: &str) -> Result<String, String>
 /// keep nothing — their sentence is the whole of what they print — and a session's lazy build keeps
 /// `<data>/images/<repository>.log`, because the sentence it puts on the row is a bounded tail and an operator who has
 /// to hunt for the rest has been told half of what happened ([`log_clause`]).
+///
+/// **`no_cache` is `image build --base --force`'s and nothing else's.** A deploy's step 3 and a promotion pass `false`:
+/// they build because a label said the image is not this binary's, which is a decision about currency, and re-running
+/// the base's apt line and pi install over a cache that answers every step would cost minutes for nothing. The one
+/// caller that passes `true` is `imagebuild::base`, on `Currency::Forced` — and it is what makes that flag's promise
+/// hold ([`NO_CACHE`]).
 #[allow(clippy::too_many_arguments)]
 pub fn ensure(
     images: &dyn Images,
@@ -1183,6 +1154,7 @@ pub fn ensure(
     pending: &[(Kind, String)],
     label: &str,
     log: Option<&Path>,
+    no_cache: bool,
     progress: &mut dyn Progress,
 ) -> Result<String, BuildError> {
     if pending.is_empty() {
@@ -1198,8 +1170,8 @@ pub fn ensure(
     for (kind, _) in pending {
         let expectation = Expectation::of_release(*kind, release, digest);
         let tag = expectation.tag();
-        let archive = archive(kind.dockerfile(), kind.context(), binary)?;
-        let arguments = build_arguments(&tag, &expectation);
+        let archive = archive(kind.dockerfile(), &[], binary)?;
+        let arguments = build_arguments(&tag, &expectation, no_cache);
         progress.note(label, &format!("building {tag}"));
         let built = images.build(&tag, Input::Archive(&archive), &arguments, log);
         // A daemon that could not run the build at all did not build the image either.
@@ -1430,12 +1402,12 @@ mod tests {
         // sentence says the fact once, and the sink still hears every line the builds printed.
         let pending = [
             (
-                Kind::Base,
-                "holosmith-base is not on this machine".to_string(),
+                Kind::Proxy,
+                "holosmith-proxy is not on this machine".to_string(),
             ),
             (
-                Kind::Agent,
-                "agent-image is not on this machine".to_string(),
+                Kind::Base,
+                "holosmith-base is not on this machine".to_string(),
             ),
         ];
         // The archive carries the Dockerfile and a binary read from a path, which is the one thing this needs from the
@@ -1445,8 +1417,8 @@ mod tests {
         let digest = "0".repeat(64);
         let tags = format!(
             "{}, {}",
-            Kind::Base.image_of(&release.version),
-            Kind::Agent.image_of(&release.version)
+            Kind::Proxy.image_of(&release.version),
+            Kind::Base.image_of(&release.version)
         );
 
         let mut sink = Notes::default();
@@ -1464,6 +1436,7 @@ mod tests {
             &pending,
             "images",
             None,
+            false,
             &mut sink,
         )
         .expect("a successful build is not an error");
@@ -1500,6 +1473,7 @@ mod tests {
                 &pending,
                 "images",
                 None,
+                false,
                 &mut sink,
             )
             .expect("a successful build is not an error"),

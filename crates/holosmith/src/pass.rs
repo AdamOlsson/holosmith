@@ -11,11 +11,13 @@
 //!    240), asked before the room check and the gate: a machine under it cannot promote whatever the tree proves, so it
 //!    is not asked to spend three quarters of an hour proving it, and the refusal names the version it found.
 //! 3. **the gate** — the candidate's own `<source>/scripts/verify-in-container.sh`, with
-//!    `HOLOSMITH_VERIFY_IMAGE=agent-image:<this binary's version>`, full and **not** `--no-build`. It runs the whole
-//!    proof in the image the running release deployed, and inside it the gate's `build` phase produces
-//!    `dist/<triple>/holosmith` while `case_server_images` builds the *candidate's* product images from the
-//!    candidate's own recipes (ADR-0110 D5). **Exit 0 is the acknowledgement**: this command has no
-//!    `--acknowledge-review`, because the gate is the record where an operator's flag would be.
+//!    `HOLOSMITH_VERIFY_IMAGE` set to the candidate tree's own project image (`<source>/docker/Dockerfile` over the
+//!    base image the running release deployed), full and **not** `--no-build`. It runs the whole proof in that image,
+//!    which is the first caller that makes the gate's container and a session's container the same artifact
+//!    (ADR-0126), and inside it the gate's `build` phase produces `dist/<triple>/holosmith` while `case_server_images`
+//!    builds the *candidate's* product images from the candidate's own recipes (ADR-0110 D5). **Exit 0 is the
+//!    acknowledgement**: this command has no `--acknowledge-review`, because the gate is the record where an
+//!    operator's flag would be.
 //! 4. **the promotion** — [`crate::promote`] on `<source>/dist/<this machine's triple>/holosmith`, exactly as
 //!    `upgrade` calls it: smoke, images, drain, backup, release, `current`, restart, the twenty-second poll and the
 //!    switch back.
@@ -73,6 +75,7 @@ use crate::config::Config;
 use crate::deploy::{self, Root};
 use crate::disk;
 use crate::images;
+use crate::projectimage;
 use crate::promote::{self, Steps};
 use crate::remote;
 use crate::update;
@@ -87,12 +90,15 @@ pub const VERB: &str = "update";
 /// How much free space a pass needs on the candidate's filesystem, in GB, before the gate starts (ADR-0107).
 pub const NEEDED_GB: u64 = 10;
 
-/// The variable the gate's wrapper reads to pick the image it runs in.
+/// The two variables the gate's wrapper reads to pick the image it runs in and to compose the tag that image is under.
 ///
-/// `scripts/verify-in-container.sh`'s own knob, named here because this command sets it and the gate does not read it
-/// from anywhere else: its default is the tag of the tree's `VERSION`, which in a candidate tree names the
-/// *candidate's* version — and the candidate's image is the one thing that cannot exist before the candidate does.
+/// `scripts/verify-in-container.sh`'s and `scripts/project-image.sh`'s own knobs, named here because this command sets
+/// them and the gate does not read them from anywhere else. `IMAGE` is the tag; `BASE` is the base the candidate tree's
+/// recipe is composed over, and it is the running release's because that is the base image the machine has — a
+/// candidate that bumped `VERSION` has no base of its own until it is promoted. Handing both lets the wrapper build the
+/// tag when it is absent and still agree with this command about which tag that is.
 const IMAGE: &str = "HOLOSMITH_VERIFY_IMAGE";
+const BASE: &str = "HOLOSMITH_BASE_IMAGE";
 
 /// The candidate tree's own wrapper, relative to `[update] source` (ADR-0109).
 const VERIFY: &str = "scripts/verify-in-container.sh";
@@ -205,17 +211,28 @@ fn pass(
         );
     }
 
-    // 3. The gate: the candidate tree's own wrapper, in the image the running release deployed.
+    // 3. The gate: the candidate tree's own wrapper, in the candidate tree's own project image.
+    //
+    //    The image is resolved from the candidate's `docker/Dockerfile` — the file a session's container would run,
+    //    resolved by the same function ([`crate::projectimage::resolve`]), so the gate's container and a session's
+    //    container are one artifact (ADR-0126). Its base tag is the running release's, because that is the base image
+    //    this machine has: a candidate that bumps `VERSION` carries no base of its own until it is promoted. A candidate
+    //    with no recipe resolves to that base image, which is honest — a tree that cannot compile has no project image
+    //    to run a gate in, and the gate's own failure says which command was missing.
     let script = candidate.source.join(VERIFY);
     if !script.is_file() {
         return refused(report, "candidate", no_wrapper(&script));
     }
-    let image = images::agent_image();
+    let base = images::base_image();
+    let image = match projectimage::resolve(&candidate.source, env!("CARGO_PKG_NAME"), &base) {
+        Ok(resolved) => resolved.image,
+        Err(unusable) => return refused(report, "candidate", unusable.sentence()),
+    };
     println!(
         "{VERB}: gate: {} ({IMAGE}={image}); {available} GB free on that filesystem, {NEEDED_GB} needed",
         script.display()
     );
-    let gate = match verify(&script, &candidate.source, &image) {
+    let gate = match verify(&script, &candidate.source, &image, &base) {
         Ok(gate) => gate,
         Err(said) => return could_not_verify(report, said),
     };
@@ -345,7 +362,7 @@ pub enum Verdict {
     Verified,
     /// 1: the gate ran and the tree failed it, and the gate's own `FAIL` line says where.
     Refused,
-    /// 3: the candidate's `Cargo.lock` names a crate set the running release's `agent-image` does not vendor.
+    /// 3: the candidate's `Cargo.lock` names a crate set the image its gate runs in does not vendor.
     ///
     /// `scripts/check-crate-set.sh`'s own exit, reached through `scripts/verify.sh`'s preflight — a **host act**
     /// rather than a code fix: the image is not stale, it is the running release's, and a container has no registry
@@ -452,10 +469,10 @@ fn gate_sentence(verdict: Verdict, tail: &[String]) -> String {
             NOTHING_ASKED
         ),
         Verdict::StaleCrateSet => format!(
-            "the gate answered 3: the candidate's `Cargo.lock` names a crate set the running release's \
-             `agent-image` does not vendor, which is a host act and not a broken registry — fetch that lock on a host \
-             that has one (`cargo fetch --locked` in the candidate tree), build and deploy the candidate's own image \
-             from it, and run this again. {NOTHING_ASKED}"
+            "the gate answered 3: the candidate's `Cargo.lock` names a crate set the image the gate runs in does not \
+             vendor, which is a host act and not a broken registry — fetch that lock on a host that has one \
+             (`cargo fetch --locked` in the candidate tree), build the candidate tree's own image from it \
+             (`holosmith image build holosmith --force`), and run this again. {NOTHING_ASKED}"
         ),
         Verdict::Unverified(failure) => {
             format!(
@@ -568,12 +585,15 @@ struct Gate {
 /// Forwarding as it arrives rather than buffering the whole run: the gate takes three quarters of an hour and its
 /// output is the only feedback a job's log has. The lines are also read for the two facts a refusal and the report
 /// need — the `SKIP ` count, and the last few lines — which is why it is a pipe and not an inherited stream.
-fn verify(script: &Path, source: &Path, image: &str) -> Result<Gate, String> {
+fn verify(script: &Path, source: &Path, image: &str, base: &str) -> Result<Gate, String> {
     let mut child = Command::new(script)
         // The candidate tree, the same `WorkingDirectory=` a job started from a request gets ([`crate::update`]):
         // the gate derives its own root from `BASH_SOURCE`, and a job's relative paths are this tree's either way.
         .current_dir(source)
         .env(IMAGE, image)
+        // The base the candidate tree's recipe is composed over, so a wrapper that has to build the tag from that tree
+        // composes the tag this command resolved rather than the one its own `VERSION` file would name.
+        .env(BASE, base)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -974,7 +994,7 @@ mod tests {
             }),
             gate: Some(GateReport {
                 command: PathBuf::from("/src/holosmith/scripts/verify-in-container.sh"),
-                image: "agent-image:0.1.0".to_string(),
+                image: "holosmith-base:0.1.0".to_string(),
                 exit_code: Some(125),
                 ending: "could not verify".to_string(),
                 skips: 3,
@@ -998,7 +1018,7 @@ mod tests {
             value["gate"]["command"],
             "/src/holosmith/scripts/verify-in-container.sh"
         );
-        assert_eq!(value["gate"]["image"], "agent-image:0.1.0");
+        assert_eq!(value["gate"]["image"], "holosmith-base:0.1.0");
         assert_eq!(value["gate"]["exit_code"], 125);
         assert_eq!(value["gate"]["skips"], 3);
         assert!(value["artifact"].is_null());

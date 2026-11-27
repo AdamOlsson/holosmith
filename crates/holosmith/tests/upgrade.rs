@@ -297,17 +297,14 @@ fn a_promotion_asks_the_machine_in_the_specs_order() {
     let trace = steps.trace();
     let proxy = format!("holosmith-proxy:{}", world.info.version);
     let base = format!("holosmith-base:{}", world.info.version);
-    let agent = format!("agent-image:{}", world.info.version);
     assert_eq!(
         trace,
         [
             "smoke".to_string(),
             format!("labels:{proxy}"),
             format!("labels:{base}"),
-            format!("labels:{agent}"),
             format!("build:{proxy}"),
             format!("build:{base}"),
-            format!("build:{agent}"),
             "drain".to_string(),
             "restart".to_string(),
             "health:0".to_string(),
