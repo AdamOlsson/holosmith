@@ -808,7 +808,8 @@ fn a_session_container_carries_no_git_credential() {
     };
     let settings =
         ContainerSettings::at(fixture.projects.clone(), fixture._dir.path().to_path_buf());
-    let container = SessionContainer::of(&settings, &session);
+    let container = SessionContainer::of(&settings, &session)
+        .expect("a project with no recipe runs the base image");
     let arguments = container.run_args();
 
     // 1. The mounts: `-v host:at[:ro]`, five of them (spec item 1's four plus pi's own directory).

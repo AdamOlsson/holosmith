@@ -171,6 +171,11 @@ fn list(projects_root: &Path) -> ExitCode {
                 names.push(name.to_string());
                 unreadable = true;
             }
+            // The fifth cannot come from `refuse`, which answers the repository's rules alone: the recipe's is
+            // `projectimage::resolve`'s and is read where a session is created, not where a name is listed. The
+            // arm is here because the enum is one type, and a name this command prints is one a create may still
+            // refuse for its recipe — which is `doctor`'s line to say, not this list's.
+            Err(Refusal::UnusableImage(_)) => names.push(name.to_string()),
         }
     }
     names.sort();

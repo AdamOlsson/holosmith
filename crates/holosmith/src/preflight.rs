@@ -111,6 +111,14 @@ pub enum Check {
     /// asked in **both** depths — `--quick` is the unit's `ExecStartPre`, and a `current` that resolves to nothing is
     /// a machine systemd cannot start (see [`crate::doctor`]).
     Release,
+    /// One project's session image: which tag its sessions run, and whether that image is built.
+    ///
+    /// One finding per project under the projects root, so a machine with three projects has three `project`
+    /// lines and a machine with none has no line at all. Its word is not [`Image`](Self::Image)'s: that one is a
+    /// verdict about the image `base_image` names, and this one is a fact about each project's own — neither a
+    /// verdict nor, ever, a failure, because a project with no recipe runs the base image and one with an unbuilt
+    /// recipe will be built on its first session ([`crate::projectimage`], ADR-0123).
+    Project,
 }
 
 impl Check {
@@ -132,6 +140,7 @@ impl Check {
             Self::Openssl => "openssl",
             Self::Release => "release",
             Self::ToolKey => "tool-key",
+            Self::Project => "project",
         }
     }
 }
@@ -174,18 +183,24 @@ impl fmt::Display for Complaint {
     }
 }
 
-/// What a check found, from the operator's side: the two verdicts and the one honest third.
+/// What a check found, from the operator's side: the two verdicts, the one honest third, and the one that is not a
+/// verdict at all.
 ///
 /// Only [`Outcome::Fail`] is a reason not to run: an `unknown` is *"this check did not produce a verdict about
 /// whether `serve` may run here"*, and its sentence says what was missing and what does need it. That is
 /// ADR-0044's rule one level up — "we could not measure" is not "we measured a leak" — and it is what keeps
 /// `doctor --quick` runnable on a machine that has no systemd and no Tailscale daemon, where `serve` by hand is
 /// still supported (ADR-0054).
+///
+/// [`Outcome::Information`] is the fourth, and it is neither: nothing was measured and nothing failed. It is a fact
+/// an operator is better off knowing — "this project's sessions have no compiler" — and it exists so that such a
+/// fact can be printed without either claiming a verdict or being read as one (ADR-0123).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Pass,
     Fail,
     Unknown,
+    Information,
 }
 
 impl Outcome {
@@ -195,6 +210,7 @@ impl Outcome {
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Unknown => "unknown",
+            Self::Information => "info",
         }
     }
 }
@@ -238,6 +254,15 @@ impl Finding {
         Self {
             check,
             outcome: Outcome::Unknown,
+            sentence: sentence.into(),
+        }
+    }
+
+    /// A fact worth printing that is neither a verdict nor a failure (ADR-0123).
+    pub fn information(check: Check, sentence: impl Into<String>) -> Self {
+        Self {
+            check,
+            outcome: Outcome::Information,
             sentence: sentence.into(),
         }
     }

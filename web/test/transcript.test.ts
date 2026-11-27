@@ -879,12 +879,17 @@ test("a message.end with no usage is dropped, so it cannot claim a spend of zero
 });
 
 test("a project's refusal is its sentence alone, and every other answer keeps its code", () => {
-  // the three refusals are about the project, and the story asks the page to explain them in
+  // the project's refusals are about the project, and the story asks the page to explain them in
   // one sentence rather than to show a code the phone cannot act on. The codes are the contract and
   // the page still refuses to hide a *different* failure behind a sentence alone: a client that cannot
   // tell `bad_project` from silence would not know the request never reached a repository.
   const sentence = "the project's .git is not a directory, so it was refused";
-  for (const code of ["git_not_directory", "submodules_present", "worktree_config_enabled"]) {
+  for (const code of [
+    "git_not_directory",
+    "submodules_present",
+    "worktree_config_enabled",
+    "unusable_image",
+  ]) {
     assert.equal(createFailure(code, sentence), sentence, `${code} is a project refusal`);
   }
   assert.equal(createFailure("bad_project", sentence), `bad_project: ${sentence}`);
@@ -892,12 +897,18 @@ test("a project's refusal is its sentence alone, and every other answer keeps it
   assert.equal(createFailure("unreachable", "Request timed out"), "unreachable: Request timed out");
 });
 
-test("the three project refusals are three codes, not one code and three sentences", () => {
-  // The story's demo asks for a distinct code per hole, so the page's list is the check that the three
-  // stay three: folding them into one code would make the list below a list of one.
+test("the project refusals are four codes, not one code and four sentences", () => {
+  // The story's demo asks for a distinct code per hole, so the page's list is the check that they stay
+  // apart: folding them into one code would make the list below a list of one. `unusable_image` is the
+  // recipe's — its sentence names the file — and it arrives from the same create answer.
   assert.deepEqual(
     [...PROJECT_REFUSALS].sort(),
-    ["git_not_directory", "submodules_present", "worktree_config_enabled"],
+    [
+      "git_not_directory",
+      "submodules_present",
+      "unusable_image",
+      "worktree_config_enabled",
+    ],
   );
 });
 

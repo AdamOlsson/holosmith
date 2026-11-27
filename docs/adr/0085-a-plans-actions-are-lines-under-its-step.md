@@ -23,7 +23,7 @@ per line**:
 deploy: dry run
 deploy: into the system paths, with sudo where each write needs it
 
-1. preflight: satisfied: 11 findings: 10 pass, 0 fail, 1 unknown (release)
+1. preflight: satisfied: 11 findings: 10 pass, 0 fail, 1 unknown, 0 info (release)
 
 2. files: needs: 10 actions:
     - useradd --system --groups docker --home-dir /var/lib/holosmith --shell /usr/sbin/nologin holosmith

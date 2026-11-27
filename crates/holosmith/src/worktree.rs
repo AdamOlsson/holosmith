@@ -483,10 +483,13 @@ pub fn repository_of(projects_root: &Path, project: &str) -> PathBuf {
     projects_root.join(project)
 }
 
-/// Why a project's repository must not be mounted into a session's container (spec item 1).
+/// Why a project's session must not start: its repository may not be mounted into a container (spec item 1), or
+/// the recipe its sessions' image is built from cannot become one.
 ///
-/// Three refusals the spec names, plus the fourth answer that is not a policy: a repository git cannot
-/// read has not been checked at all, and saying it may be mounted would be a lie.
+/// Three mount refusals the spec names, plus the fourth answer that is not a policy: a repository git cannot
+/// read has not been checked at all, and saying it may be mounted would be a lie. The fifth is the image's
+/// ([`crate::projectimage`]): a project carries its own recipe at `docker/Dockerfile`, and a create that cannot
+/// turn it into a tag is refused here rather than by a `docker run` three steps later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// `<project>/.git` is not a directory: a linked worktree, a submodule checkout, or no checkout.
@@ -497,6 +500,9 @@ pub enum Refusal {
     WorktreeConfigEnabled,
     /// `git` could not read the repository, so nothing about it can be promised.
     Unreadable(GitError),
+    /// The project's recipe cannot become the image its sessions run: not a file, empty, unreadable, or a project
+    /// name Docker cannot spell as a repository.
+    UnusableImage(crate::projectimage::Unusable),
 }
 
 /// The one `git` reading the refusal rules make: the repository's own answer about

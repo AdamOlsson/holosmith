@@ -528,6 +528,12 @@ impl doctor::Machine for Fake {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// Nothing is built here beyond the three product images, and a deploy's fixtures add no project with a
+    /// recipe: the projects root is a temporary directory the run owns.
+    fn image_exists(&self, _image: &str) -> bool {
+        false
+    }
 }
 
 impl images::Images for Fake {
@@ -707,7 +713,8 @@ fn the_report_prints_the_tally_and_no_owner_list() {
             Line {
                 step: DeployStep::Preflight,
                 word: Word::Satisfied,
-                sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                sentence: "10 findings: 8 pass, 0 fail, 2 unknown, 0 info (systemd, disk)"
+                    .to_string(),
                 fix: None,
             },
             Line {
@@ -756,7 +763,7 @@ fn the_report_prints_the_tally_and_no_owner_list() {
         lines[2..],
         [
             "",
-            "1. preflight: satisfied: 10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)",
+            "1. preflight: satisfied: 10 findings: 8 pass, 0 fail, 2 unknown, 0 info (systemd, disk)",
             "",
             "2. files: changed: 2 actions; the account operator is in the docker group",
             "",
@@ -818,7 +825,7 @@ fn five_words() -> Report {
             Line {
                 step: DeployStep::Preflight,
                 word: Word::Satisfied,
-                sentence: "10 findings: 8 pass, 0 fail, 2 unknown (systemd, disk)".to_string(),
+                sentence: "10 findings: 8 pass, 0 fail, 2 unknown, 0 info (systemd, disk)".to_string(),
                 fix: None,
             },
             Line {

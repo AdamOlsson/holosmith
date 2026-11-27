@@ -142,6 +142,9 @@ fn tools_with_real_git(dir: &TempDir) -> Tools {
 fn config(dir: &TempDir, docker_host: Option<String>) -> Config {
     Config {
         data_root: dir.path().join("data"),
+        // The projects root is the test's too, and it is not created: a machine's own would put its projects'
+        // findings in a report whose list of checks is asserted word for word.
+        projects_root: dir.path().join("projects"),
         docker_host,
         control_listen: "127.0.0.1:0".parse().expect("a listener address"),
         preview_listen: "127.0.0.1:0".parse().expect("a listener address"),
@@ -181,13 +184,16 @@ fn fake_daemon(path: &Path) -> Arc<AtomicUsize> {
     answered
 }
 
-/// A machine whose four container questions the test decides.
+/// A machine whose five container questions the test decides.
 struct FakeMachine {
     running: Vec<&'static str>,
     image_pi: Result<String, String>,
     /// The image's `org.holosmith.*` labels: `Ok(None)` is an image built by another tool (`pi-agent:local`).
     image_labels: Result<Option<BTreeMap<String, String>>, String>,
     selftest: selftest::Outcome,
+    /// Whether a project's image is on the daemon: the whole currency question for a tag that is a content
+    /// address and carries no label to read.
+    image_exists: bool,
 }
 
 impl FakeMachine {
@@ -203,6 +209,8 @@ impl FakeMachine {
             image_pi: Ok(holosmith::pins::pi_version().to_string()),
             image_labels: Ok(Some(BTreeMap::new())),
             selftest: selftest::Outcome::Passed,
+            // A machine whose projects carry no recipe is the common one, and no image question is asked for it.
+            image_exists: false,
         }
     }
 }
@@ -222,6 +230,10 @@ impl Machine for FakeMachine {
 
     fn selftest(&self, _names: &selftest::Names, _image: &str) -> selftest::Outcome {
         self.selftest.clone()
+    }
+
+    fn image_exists(&self, _image: &str) -> bool {
+        self.image_exists
     }
 }
 
@@ -335,8 +347,135 @@ fn a_clean_machine_passes_quick_with_its_whole_list_in_order() {
     );
     assert_eq!(
         report.render().lines().last(),
-        Some("doctor: 11 findings: 9 pass, 0 fail, 2 unknown"),
+        Some("doctor: 11 findings: 9 pass, 0 fail, 2 unknown, 0 info"),
         "the tally is not one line of the report"
+    );
+}
+
+/// One line per project saying which image its sessions run, sorted by name, and **never** a failure — the
+/// acceptance's three arms over a fixture projects root, through the report's own shape rather than the arms'
+/// ([`holosmith::doctor`]'s unit test is that half).
+///
+/// The fixture has the four shapes a machine can be in: a project with no recipe, one whose recipe is written and
+/// built, one whose recipe is written and not built, and one whose recipe is empty — which the create refuses and
+/// which this report may only mention. `.worktrees` sits beside them and is not a project.
+#[test]
+fn every_project_is_one_line_saying_which_image_its_sessions_run() {
+    let _serial = one_at_a_time();
+    let dir = TempDir::new("doctor-projects");
+    let socket = dir.file("docker.sock");
+    fake_daemon(&socket);
+    let mut config = config(&dir, Some(format!("unix://{}", socket.display())));
+    config.role = Role::Server;
+    deployed_data_root(&config);
+    let projects = config.projects_root.clone();
+    // Sorted order is the assertion, and it is not the order they are made in.
+    for name in ["zeta", "alpha"] {
+        std::fs::create_dir_all(projects.join(name)).expect("the project is creatable");
+    }
+    for (name, recipe) in [("beta", "FROM holosmith-base:0.1.0\n"), ("gamma", "")] {
+        std::fs::create_dir_all(projects.join(name).join("docker"))
+            .expect("the recipe's directory is creatable");
+        std::fs::write(
+            projects.join(name).join(holosmith::projectimage::RECIPE),
+            recipe,
+        )
+        .expect("the recipe is writable");
+    }
+    std::fs::create_dir_all(
+        projects
+            .join(holosmith::worktree::WORKTREES)
+            .join("0123456789abcdef"),
+    )
+    .expect("the worktree directory is creatable");
+
+    let report = doctor::run(
+        &config,
+        Depth::Quick,
+        &tools_with_real_git(&dir),
+        &FakeMachine::healthy(),
+    );
+    let lines: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.check == Check::Project)
+        .collect();
+    assert_eq!(lines.len(), 4, "{}", report.render());
+    // Sorted by project name, so one machine's report is one report. The sentence names its project in every
+    // arm: the unusable-recipe one names the path, which holds the name.
+    for (finding, project) in lines.iter().zip(["alpha", "beta", "gamma", "zeta"]) {
+        assert!(
+            finding.sentence.contains(project),
+            "{} does not name {project}",
+            finding.sentence
+        );
+        assert_ne!(finding.outcome, Outcome::Fail, "{}", finding.sentence);
+    }
+    // The no-recipe arms name the base image and what it lacks; the unbuilt one says when it will be built; and
+    // the unusable one names the path the create would refuse over.
+    assert_eq!(lines[0].outcome, Outcome::Information);
+    assert!(
+        lines[0].sentence.contains(&config.base_image) && lines[0].sentence.contains("no compiler"),
+        "{}",
+        lines[0].sentence
+    );
+    assert_eq!(lines[1].outcome, Outcome::Information);
+    assert!(
+        lines[1]
+            .sentence
+            .contains("will be built on the first session"),
+        "{}",
+        lines[1].sentence
+    );
+    assert_eq!(lines[2].outcome, Outcome::Information);
+    assert!(
+        lines[2].sentence.contains("docker/Dockerfile"),
+        "{}",
+        lines[2].sentence
+    );
+    assert_eq!(lines[3].outcome, Outcome::Information);
+    // A report with four informations and nothing else is still a machine `serve` starts, and the tally counts them.
+    assert!(!report.failed(), "{}", report.render());
+    let tally = report.render();
+    let tally = tally.lines().last().unwrap_or_default();
+    assert!(
+        tally.ends_with("15 findings: 9 pass, 0 fail, 2 unknown, 4 info"),
+        "the tally does not count the four informations: {tally}"
+    );
+    assert!(
+        !report.render().contains(holosmith::worktree::WORKTREES),
+        "the worktree directory was reported as a project:\n{}",
+        report.render()
+    );
+
+    // And the daemon that has the recipe's image turns that one line into a pass carrying the tag.
+    let built = FakeMachine {
+        image_exists: true,
+        ..FakeMachine::healthy()
+    };
+    let report = doctor::run(&config, Depth::Quick, &tools_with_real_git(&dir), &built);
+    let beta = report
+        .findings
+        .iter()
+        .find(|finding| finding.check == Check::Project && finding.sentence.starts_with("beta"))
+        .unwrap_or_else(|| panic!("no beta finding in:\n{}", report.render()));
+    assert_eq!(beta.outcome, Outcome::Pass, "{}", beta.sentence);
+    assert!(
+        beta.sentence.contains("hs-beta:"),
+        "the pass does not carry the tag: {}",
+        beta.sentence
+    );
+    // A projects root that is not there has no projects and so no lines, which is not a failure either.
+    let mut missing = config.clone();
+    missing.projects_root = dir.file("no-projects-here");
+    let report = doctor::run(&missing, Depth::Quick, &tools_with_real_git(&dir), &built);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.check != Check::Project),
+        "a machine with no projects root reported a project:\n{}",
+        report.render()
     );
 }
 
@@ -725,6 +864,8 @@ fn tailscales_three_arms_are_measured() {
                 says(finding)
             ),
             Outcome::Pass => {}
+            // The three tailscale arms are pass, fail and unknown: an information is not one of them.
+            Outcome::Information => panic!("the tailscale check answered an information"),
         }
     }
 }
@@ -950,7 +1091,7 @@ fn full_adds_the_self_test_the_proxies_and_the_image() {
     assert_eq!(image.outcome, Outcome::Fail);
     assert!(
         says(image).contains("0.0.0-not-the-pinned-one")
-            && says(image).contains("rebuild the session image"),
+            && says(image).contains("rebuild that image"),
         "the sentence is not the one a session fails with: {}",
         says(image)
     );

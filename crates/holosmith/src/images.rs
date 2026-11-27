@@ -159,8 +159,9 @@ pub fn base_image() -> String {
 }
 
 /// `agent-image:<version>`: this repository's own image, with the Rust toolchain, the crate set and the npm cache
-/// in it. It is a product image and not a config key: a session runs the image `base_image` names, which defaults to
-/// [`base_image`].
+/// in it. It is a product image and not a config key: a session runs its project's image, which is `base_image`'s
+/// tag unless the project carries a recipe of its own ([`crate::projectimage::resolve`]), and `base_image` defaults
+/// to [`base_image`].
 pub fn agent_image() -> String {
     Kind::Agent.image_of(crate::VERSION)
 }

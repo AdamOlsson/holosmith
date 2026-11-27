@@ -1054,7 +1054,7 @@ fn a_repository_git_cannot_read_is_not_treated_as_mountable() {
 
 #[tokio::test]
 async fn a_refused_create_answers_422_with_its_own_code_and_writes_nothing() {
-    // The story's demo, one project per hole: three codes, each 422 in ADR-0008's envelope, and no
+    // The story's demo, one project per hole: four codes, each 422 in ADR-0008's envelope, and no
     // session, no worktree directory and no registration left behind — the fourth acceptance line.
     let dir = TempDir::new("refusal-api");
     let root = dir.file("projects");
@@ -1076,13 +1076,25 @@ async fn a_refused_create_answers_422_with_its_own_code_and_writes_nothing() {
         &["config", "extensions.worktreeConfig", "true"],
     );
 
+    // The fourth hole is the image's: a project whose recipe is there and blank is refused by
+    // `DockerBackend::refuse_project`, so the 422 comes from the create rather than from a `docker run`
+    // three steps later.
+    let unwritten = root.join("unwritten");
+    repository(&unwritten);
+    std::fs::create_dir_all(unwritten.join("docker")).expect("the recipe's directory is creatable");
+    std::fs::write(unwritten.join("docker/Dockerfile"), "  \n")
+        .expect("a blank recipe is writable");
+
     let state = docker_state(&dir, &root);
     let served = Served::start(http::router(state.clone()), GRACE).await;
 
-    for (project, code) in [
-        ("linked", "git_not_directory"),
-        ("submodule", "submodules_present"),
-        ("configured", "worktree_config_enabled"),
+    for (project, code, says) in [
+        ("linked", "git_not_directory", "refused"),
+        ("submodule", "submodules_present", "refused"),
+        ("configured", "worktree_config_enabled", "refused"),
+        // A mount refusal says the project is refused; a recipe that cannot become an image names what the
+        // operator's next step is instead, because the file is theirs to write or remove.
+        ("unwritten", "unusable_image", "cannot start"),
     ] {
         let response = post_create_for(served.addr, project, &format!("refusal-{project}")).await;
         assert_eq!(response.status, 422, "{project}: {}", response.body);
@@ -1102,8 +1114,8 @@ async fn a_refused_create_answers_422_with_its_own_code_and_writes_nothing() {
             "the sentence repeats the code instead of explaining it: {sentence}"
         );
         assert!(
-            sentence.contains("refused"),
-            "the sentence does not say the project was refused: {sentence}"
+            sentence.contains(says),
+            "the sentence does not say `{says}`: {sentence}"
         );
     }
 
@@ -1124,7 +1136,7 @@ async fn a_refused_create_answers_422_with_its_own_code_and_writes_nothing() {
         !root.join(".worktrees").exists(),
         "a refused create made a worktree directory"
     );
-    for project in ["linked", "submodule", "configured"] {
+    for project in ["linked", "submodule", "configured", "unwritten"] {
         let repo = root.join(project);
         // One entry: the repository's own checkout. A session's would be a second, and the id it is named
         // after never existed — so the count is the whole claim, not the path (a `.git` file's repository
