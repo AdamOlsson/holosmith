@@ -13695,7 +13695,10 @@ SHIM
   # `systemd-run` is what a transient unit would be: it records its argv, reads the two `--property=` values it needs, and
   # starts the job **in a session of its own**, which is the whole point — a promotion outlives the restart it performs,
   # and a child of the process being restarted would be killed with it (ADR-0110 D4). `>>` on the log is the `append:`
-  # the argv asked for, so the job's output is the file `GET /api/update` reads afterwards.
+  # the argv asked for, so the job's output is the file `GET /api/update` reads afterwards. The argv's
+  # `--property=UMask=0077` is **not** read here and must not be: this shell and not a manager creates the file, under the
+  # gate's own umask, so what this case measures is the property's presence in the argv — the count and tail matches
+  # below — and the mode a real unit gives the file is Fact 2's by-hand measurement.
   cat >"$bin/systemd-run" <<SHIM
 #!/bin/sh
 {
@@ -13903,17 +13906,18 @@ SHIM
   accepted="$(sed -n 's/.*"since":\([0-9][0-9]*\).*/\1/p' "$WORK/responses/${name}_press_b.body")"
   [ -n "$accepted" ] || fail "$name/press_b/since" "the acceptance carries no `since`: $(cat "$WORK/responses/${name}_press_b.body")"
   # The launcher was asked for one transient unit, and for this job: the unit's name, the two properties that make the
-  # output a file, `--collect`, and the words after `--`. **This arm's own record is the subject**, because the log is
-  # appended to and arm 1's press is already in it: that line names the artifact, since the first `serve` was started
-  # from it, while this press is served by the release the rollback's `restart` started — which is what makes "the
-  # *restarted* release starts the job" the fact measured here. So the count is exactly two, one per press, and the job's
-  # words are read off the **last** line rather than matched anywhere in the file.
+  # output a file, the `UMask=0077` that file is created under, `--collect`, and the words after `--`. **This arm's own
+  # record is the subject**, because the log is appended to and arm 1's press is already in it: that line names the
+  # artifact, since the first `serve` was started from it, while this press is served by the release the rollback's
+  # `restart` started — which is what makes "the *restarted* release starts the job" the fact measured here. So the count
+  # is exactly two, one per press, and the job's words are read off the **last** line rather than matched anywhere in the
+  # file.
   [ "$(grep -c '^systemd-run --user --unit=holosmith-update --collect --property=StandardOutput=append:' "$runner_log")" -eq 2 ] ||
     fail "$name/launch" "the launcher was not asked for a transient unit appending to the log once per press: $(cat "$runner_log")"
   # The program is `current_exe()`'s, so it is the resolved path of the release `current` named at that restart — the
   # same both-sides-resolved comparison as `/proc/<pid>/exe` above, for the same reason.
   tail -n 1 "$runner_log" |
-    grep -qF -- "--property=StandardError=append:$data/update.log --property=WorkingDirectory=$source -- $(readlink -f "$root/releases/old/holosmith") update --config $config --root $root --report $data/update.json" ||
+    grep -qF -- "--property=StandardError=append:$data/update.log --property=WorkingDirectory=$source --property=UMask=0077 -- $(readlink -f "$root/releases/old/holosmith") update --config $config --root $root --report $data/update.json" ||
     fail "$name/launch/job" "the job the launcher was asked for is not this machine's own update of the fixture tree, started by the release the rollback restarted into: $(cat "$runner_log")"
   assertions=$((assertions + 2))
 

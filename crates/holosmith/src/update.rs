@@ -15,6 +15,7 @@
 //!   --property=StandardOutput=append:<data>/update.log \
 //!   --property=StandardError=append:<data>/update.log \
 //!   --property=WorkingDirectory=<source tree> \
+//!   --property=UMask=0077 \
 //!   -- <program> <argument>...
 //! ```
 //!
@@ -25,6 +26,13 @@
 //!   the gate's `FAIL` lines on stdout and the sentence a program that could not be run leaves on stderr — is what an
 //!   operator reads after the restart. `append:` is what lets a second run's output sit beside the first's rather
 //!   than replace it.
+//! - **The log's mode is the machine's, not the manager's.** `UMask=0077` is the property [`crate::deploy::unit_text`]
+//!   already renders for the service, so the job's file is created the way every other file the machine writes under the
+//!   data root is: `0666 & ~0077 = 0600`. Left to itself the job inherits the **user manager's** default umask — `0002`
+//!   on the machine this was measured on — and the file a promotion writes most of would be `-rw-rw-r--` while the rest
+//!   of the data root is its operator's alone (ADR-0110's Fact 2 measured both modes). The property is a service
+//!   property and not 240's spelling: [`FLOOR`] is the release that introduced `append:`'s spelling, and the job's
+//!   `UMask=` adds no floor of its own.
 //! - **`WorkingDirectory=` is the source tree**, so the job's own relative paths are that tree's and never depend on
 //!   the directory `serve` was started in.
 //! - **The unit's name is the lock.** systemd refuses a second unit under a live name, so two presses are one
@@ -73,7 +81,9 @@ pub const UNIT_NAME: &str = "holosmith-update";
 pub const LOG: &str = "update.log";
 
 /// The systemd release a promotion's job needs: `StandardOutput=append:` and `StandardError=append:` are 240's
-/// spelling, quoted from systemd's own `NEWS` under `CHANGES WITH 240` (ADR-0110).
+/// spelling, quoted from systemd's own `NEWS` under `CHANGES WITH 240` (ADR-0110). The job's `UMask=` is not part of
+/// this number: it is a service property the argv spells for the mode of the file those two streams name, so the floor
+/// is `append:`'s spelling and the job's `UMask=` adds no floor of its own.
 ///
 /// The floor is **the job's and not the machine's**, which is why it is a constant here beside the argv that needs it:
 /// a 239 installs, boots and serves sessions like any other, and only a promotion's transient unit asks for the two
@@ -270,7 +280,11 @@ pub fn start(tools: &Tools, data_root: &Path, job: &Job<'_>) -> Result<Answer, S
     ))
 }
 
-/// The `systemd-run` argv for one job: the unit, the output file, the tree, and then the command line after `--`.
+/// The `systemd-run` argv for one job: the unit, the output file, the tree, the mode that file is created under, and
+/// then the command line after `--`.
+///
+/// `systemd-run` reads the properties in any order; this one is last because `case_web_update`'s tail match expects it
+/// between `WorkingDirectory=` and `--`.
 ///
 /// A function of its own so the argv the launcher runs and the argv a test asserts are one expression. `--` is the
 /// boundary that keeps the job's words out of `systemd-run`'s: everything after it belongs to the job, whatever it
@@ -290,6 +304,7 @@ fn argv(log: &Path, job: &Job<'_>) -> Vec<OsString> {
         property("StandardOutput", &append),
         property("StandardError", &append),
         property("WorkingDirectory", job.source.as_os_str()),
+        property("UMask", OsStr::new("0077")),
         OsString::from("--"),
     ];
     argv.extend(job.command.iter().cloned());
@@ -384,7 +399,8 @@ mod tests {
     }
 
     /// One start is one transient unit: the argv names the unit, both output properties append to the log under the
-    /// data root, `WorkingDirectory=` is the source tree, and the job's own words follow `--` untouched.
+    /// data root, `UMask=0077` is what the manager creates that file under, `WorkingDirectory=` is the source tree, and
+    /// the job's own words follow `--` untouched.
     #[test]
     fn one_start_is_a_transient_unit_writing_to_the_data_roots_log() {
         let dir = scratch("started");
@@ -434,6 +450,7 @@ mod tests {
                 format!("--property=StandardOutput=append:{}", log.display()),
                 format!("--property=StandardError=append:{}", log.display()),
                 format!("--property=WorkingDirectory={}", source.display()),
+                "--property=UMask=0077".to_string(),
                 "--".to_string(),
                 program.display().to_string(),
                 "run".to_string(),
