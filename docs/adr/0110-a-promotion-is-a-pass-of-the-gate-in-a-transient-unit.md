@@ -421,7 +421,7 @@ stop properties and its sandbox — `Type=simple`, `UMask=0077`, `NoNewPrivilege
 `RestrictSUIDSGID=yes`, `RestrictNamespaces=yes`, `RestrictRealtime=yes`, `SystemCallFilter=@system-service`,
 `KillMode=mixed` and `TimeoutStopSec=30s` — with the four lines that aim the section at a release absent and replaced
 by the probe's own (`ExecStart=`, `ExecStartPre=`, `Restart=`, `RestartSec=`), started with the environment read out of
-`/proc/2686/environ`; its `ExecStart` ran the launcher's own argv (`update::argv`'s, word for word):
+`/proc/2686/environ`; its `ExecStart` ran the launcher's own argv (`update::argv`'s, word for word as it stood then):
 
 ```text
 systemd-run --user --unit=holosmith-update --collect \
@@ -430,6 +430,10 @@ systemd-run --user --unit=holosmith-update --collect \
   --property=WorkingDirectory=<source tree> \
   -- <program> <argument>...
 ```
+
+The argv has one more word now: `--property=UMask=0077`, after `WorkingDirectory=` and immediately before `--`. That
+probe carried no `UMask=` and did not have to — Fact 2's second unit measured the property on its own, and what it
+buys is the mode the log is created under.
 
 The job behind it did what a promotion does in miniature: it wrote both streams, asked the manager about itself, ran
 `systemctl --user restart holosmith-probe.service` — the restart a promotion performs, aimed at the unit that started
@@ -499,14 +503,28 @@ $ stat -c '%A %a %n' umask-log.log unit-made.txt
 ```
 
 So `0666 & ~0077 = 0600`: the unit's `UMask=`, and not the manager's, decides the mode of the file the manager opens
-for `append:`. The promotion's job unit is started with no `UMask=` property at all — `update::argv` sets the unit's
-name, `--collect`, the two output streams and `WorkingDirectory=` and nothing else — so it inherits this user manager's
-default, `0002`, and `0666 & ~0002 = 0664` is where the `-rw-rw-r--` above came from. The lever on a machine that
-wanted a `0600` log would be `--property=UMask=` in the launcher's argv, and this ADR does not make that change.
+for `append:`. When this was measured the promotion's job unit was started with no `UMask=` property at all —
+`update::argv` set the unit's name, `--collect`, the two output streams and `WorkingDirectory=` and nothing else — so
+it inherited this user manager's default, `0002`, and `0666 & ~0002 = 0664` is where the `-rw-rw-r--` above came from.
 
-Either mode is readable by the account whose unit this is (ADR-0088 D2: a user unit runs as its owner), which is the
-whole of what the API's "read the job's answer" needs. That half is the citation and not a measurement — the run never
-read the file *as* `serve`.
+**The launcher's argv now carries `--property=UMask=0077`**, which is the lever this measurement named. The job's log is
+created `0600`, and so is a file the job creates without a mode of its own; that is the mode every other file the
+machine writes under the data root already has — `server deploy` writes its files `0600`, and `deploy::unit_text`
+renders the same `UMask=0077` for the service itself — so the service's files and its job's files are one rule rather
+than two, and the one file a promotion writes most of is no longer the exception. The `0600` is the mode of a log this
+argv **creates**: `append:` opens the file when it is there and does not change its mode, so a log an older release
+created at `0664` keeps that mode until it is removed and the next run creates it afresh. The property is a
+service property and not 240's: the floor in the section below is `append:`'s spelling, and the job's `UMask=` adds no
+floor of its own.
+
+The gate's `systemd-run` stand-in is a shell that opens the `append:` file with `>>` under the **gate's** umask, so what
+a case can measure is the argv — the whole of it in `tests/update_api.rs`, and `case_web_update`'s tail match — and a
+promotion's `0600` log stays the paragraph above and the unit that measured it: a by-hand fact on a machine whose
+systemd is real.
+
+`0600` is readable by the account whose unit this is (ADR-0088 D2: a user unit runs as its owner), which is the whole of
+what the API's "read the job's answer" needs. That half is the citation and not a measurement — the run never read the
+file *as* `serve`.
 
 **And `append:` is not every systemd's spelling.** The host's own `systemd` `NEWS` says, under `CHANGES WITH 240`:
 
@@ -577,10 +595,12 @@ the unit did not start.
   **A pass of the gate end to end** are about, below. What *is* measured here is the argv: `tests/update_api.rs`
   points `deploy::Tools::systemd_run` at a recorder and asserts the whole command line D4 decided — `--user`,
   `--unit=holosmith-update`, `--collect`, both `append:` streams under the data root, `WorkingDirectory=` naming the
-  candidate tree, and the job's own words after `--` — and `case_web_update` stands in for the launcher with a script
-  that does what the unit would: it reads those two properties and starts the job in a session of its own, which is how
-  "a promotion outlives the restart it performs" becomes something a run can watch rather than something this ADR
-  asserts.
+  candidate tree, `UMask=0077` after it, and the job's own words after `--` — and `case_web_update` stands in for the
+  launcher with a script that does what the unit would: it reads those two properties and starts the job in a session of
+  its own, which is how "a promotion outlives the restart it performs" becomes something a run can watch rather than
+  something this ADR asserts. The `UMask=` is in that enumeration as an **argv word** and not as a mode: the stand-in's
+  `>>` creates the log under the gate's umask, so this case asserts the argv only and the `0600` a promotion's log gets
+  on a real machine is Fact 2's by-hand measurement.
 - **A linger-only, headless machine's unit environment.** The measurement's environment was read out of
   `/proc/2686/environ` on a desktop host, where both `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` are in the
   manager's block because the operator's graphical session put them there — `DISPLAY=:1` in the probe's outer

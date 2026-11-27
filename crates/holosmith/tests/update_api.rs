@@ -12,8 +12,8 @@
 //! `systemd-run` is a script that records its argv and exits 0: this crate denies `unsafe`, a test cannot `set_var` a
 //! `PATH`, and `deploy::Tools` exists so that the program a start runs is a parameter ([`World::tools`]). So the
 //! launcher's argv is a file this test reads, word for word, and every property ADR-0110 D4 rests on — the unit's
-//! name, `--collect`, both `append:` streams under the data root, and `WorkingDirectory=` naming the candidate tree —
-//! is an assertion about bytes rather than about a sentence.
+//! name, `--collect`, both `append:` streams under the data root, the `UMask=0077` the manager creates that file under,
+//! and `WorkingDirectory=` naming the candidate tree — is an assertion about bytes rather than about a sentence.
 //!
 //! **The job itself is run in process**, through [`pass::run`], with the `--report` path the recorded argv names. The
 //! program in that argv is `std::env::current_exe()`, which in a test binary is the test harness and not a CLI, so
@@ -698,7 +698,8 @@ async fn the_guards_refuse_a_press_with_no_client_header_and_one_from_a_foreign_
 // ---- the press that starts a job -----------------------------------------------------------------
 
 /// A good press is `202 {job, since}`, and the launcher is asked for exactly the transient unit ADR-0110 D4 describes:
-/// this binary's `update`, both streams appended to the data root's log, and the candidate tree as the job's directory.
+/// this binary's `update`, both streams appended to the data root's log at the machine's `0600` rather than the user
+/// manager's umask, and the candidate tree as the job's directory.
 #[tokio::test]
 async fn a_press_is_accepted_and_the_launcher_is_asked_for_one_transient_unit() {
     let world = world("update-api-start");
@@ -728,6 +729,7 @@ async fn a_press_is_accepted_and_the_launcher_is_asked_for_one_transient_unit() 
         format!("--property=StandardOutput=append:{}", log.display()),
         format!("--property=StandardError=append:{}", log.display()),
         format!("--property=WorkingDirectory={}", world.source.display()),
+        "--property=UMask=0077".to_string(),
         "--".to_string(),
         exe.display().to_string(),
         "update".to_string(),
