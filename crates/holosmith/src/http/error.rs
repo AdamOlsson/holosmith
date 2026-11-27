@@ -181,6 +181,13 @@ pub const NO_CANDIDATE: &str = "no_candidate";
 /// machine.
 pub const UPDATE_DISABLED: &str = "update_disabled";
 
+/// A promotion was asked of a machine whose systemd is older than the floor a promotion's job needs.
+///
+/// `409` and not `403`, for [`NOT_DEPLOYED`]'s reason: the route exists, this machine may promote, and the client
+/// could press on another machine or after the operator's distribution upgraded — what refuses is a version, which
+/// is the machine's fact and not the request's. One code for the one thing to change, and the message names it.
+pub const SYSTEMD_TOO_OLD: &str = "systemd_too_old";
+
 /// A changes view was refused because there is no worktree to read (spec item 12).
 ///
 /// One code for four facts — the row never recorded a worktree, the directory is gone, git no longer registers
@@ -798,6 +805,15 @@ impl ApiError {
     /// comparison is one function for the page and the request, so the refusal cannot word it twice.
     pub fn stale_candidate(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, STALE_CANDIDATE, message)
+    }
+
+    /// What a promotion request answers on a machine whose systemd is below [`crate::update::FLOOR`].
+    ///
+    /// The message is [`crate::update::below_floor`]'s own sentence, which names the version that machine reports, the
+    /// floor, and the distribution's systemd as the only move: the route, both verbs and a pass all refuse with it, so
+    /// one version cannot be spelled four ways.
+    pub fn systemd_too_old(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::CONFLICT, SYSTEMD_TOO_OLD, message)
     }
 
     /// What a promotion request answers on a machine with no candidate.

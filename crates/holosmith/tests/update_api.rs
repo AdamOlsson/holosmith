@@ -46,8 +46,8 @@ use holosmith::config::{Config, Update};
 use holosmith::deploy::{Root, Tools};
 use holosmith::http::AppState;
 use holosmith::http::error::{
-    BAD_CLIENT, BAD_ORIGIN, INTERNAL, NO_CANDIDATE, STALE_CANDIDATE, UPDATE_DISABLED,
-    UPDATE_RUNNING,
+    BAD_CLIENT, BAD_ORIGIN, INTERNAL, NO_CANDIDATE, STALE_CANDIDATE, SYSTEMD_TOO_OLD,
+    UPDATE_DISABLED, UPDATE_RUNNING,
 };
 use holosmith::http::{self, Guards};
 use holosmith::images::{self, Log};
@@ -119,6 +119,18 @@ impl World {
         Tools {
             systemd_run: self.dir.file("bin/systemd-run-busy"),
             systemctl: self.dir.file("bin/systemctl-inactive"),
+            ..Tools::default()
+        }
+    }
+
+    /// The launcher these arms measure, with a manager that answers `--version` with `line` and nothing else: the floor
+    /// is read from that one line, so the version a machine reports is the whole of what a floor arm needs to give it.
+    fn manager_answering(&self, line: &str) -> Tools {
+        let path = self.dir.file("bin/systemctl-version");
+        answering(&path, line);
+        Tools {
+            systemd_run: self.runner.clone(),
+            systemctl: path,
             ..Tools::default()
         }
     }
@@ -290,6 +302,18 @@ fn stand_in(path: &Path, ran: &Path, status: i32, stderr: &str) {
                 format!("printf '%s\\n' \"{stderr}\" >&2\n")
             }
         ),
+    )
+    .expect("the stand-in is writable");
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the stand-in is executable");
+}
+
+/// A stand-in that answers with one line on stdout: the `systemctl --version` a floor is read from, and nothing else — a
+/// manager whose answers are a sentence rather than an argv record.
+fn answering(path: &Path, line: &str) {
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{line}'\nexit 0\n"),
     )
     .expect("the stand-in is writable");
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -484,6 +508,40 @@ async fn a_machine_whose_kill_switch_is_false_refuses_the_press_as_update_disabl
     assert!(
         !world.ran.exists(),
         "a machine that may not promote started a unit: {:?}",
+        recorded(&world.ran)
+    );
+    served.finish().await.expect("the app stops");
+}
+
+/// A machine whose systemd is older than a promotion's job needs is `409 systemd_too_old`, and nothing is started: a
+/// machine under the floor cannot promote any tree, so it is told the version it reports rather than left to
+/// `systemd-run` refusing the job's two `append:` properties later.
+///
+/// The refusal is the route's own, asked after the release tree and **before** the candidate's five `git` children:
+/// this arm is what fails if the route's call site is deleted, which the in-process test of
+/// [`holosmith::update::below_floor`] cannot show.
+#[tokio::test]
+async fn a_machine_below_the_systemd_floor_refuses_the_press_and_starts_nothing() {
+    let world = world("update-api-floor");
+    let tools = world.manager_answering("systemd 239 (239-1)");
+    let served = world
+        .serving(world.app(&world.config, tools.clone()), &world.config)
+        .await;
+    let refused = press(served.addr, &commit_body(&head(&world.source))).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(code_of(&refused.body), SYSTEMD_TOO_OLD);
+    let body: Value = serde_json::from_str(&refused.body).expect("a refusal is one JSON object");
+    let said = body["message"]
+        .as_str()
+        .expect("a refusal carries a sentence");
+    assert_eq!(
+        said,
+        holosmith::update::below_floor(&tools).expect("a 239 is below the floor"),
+        "the route worded the floor's sentence itself"
+    );
+    assert!(
+        !world.ran.exists(),
+        "a machine under the floor started a unit: {:?}",
         recorded(&world.ran)
     );
     served.finish().await.expect("the app stops");

@@ -46,6 +46,13 @@
 //! sentence, which says why such a machine cannot promote at all today. `doctor` reports no program for this for the
 //! same reason it reports none for `systemctl`: what it reads as `systemd` is the unit **directory**, not a manager's
 //! program, so there is nothing there for this to be reported beside.
+//!
+//! **One question is about the machine, and it is asked at the press.** The user manager is a version, and the two
+//! `append:` properties above are [`FLOOR`]'s spelling (ADR-0110), so [`below_floor`] asks `systemctl --version` and
+//! answers the one sentence a machine under it deserves. It is asked by the route and by both verbs **before** a press
+//! starts anything, and never at boot: a systemd below the floor installs, boots and serves sessions like any other,
+//! and only the job a promotion starts needs the two properties (ADR-0125). A version that could not be measured
+//! refuses nothing — see [`below_floor`].
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -64,6 +71,14 @@ pub const UNIT_NAME: &str = "holosmith-update";
 /// it: retention is the backups' question (ADR-0082 D9), and the reader a later change adds is `std::fs` on this one
 /// path ([`log_path`]).
 pub const LOG: &str = "update.log";
+
+/// The systemd release a promotion's job needs: `StandardOutput=append:` and `StandardError=append:` are 240's
+/// spelling, quoted from systemd's own `NEWS` under `CHANGES WITH 240` (ADR-0110).
+///
+/// The floor is **the job's and not the machine's**, which is why it is a constant here beside the argv that needs it:
+/// a 239 installs, boots and serves sessions like any other, and only a promotion's transient unit asks for the two
+/// properties. `docs/requirements.md` states the same number in its dependency table, scoped to the promotion.
+pub const FLOOR: u32 = 240;
 
 /// What the job is: the tree it works in, and the command line to run there.
 ///
@@ -98,6 +113,67 @@ pub enum Answer {
 /// of after the restart.
 pub fn log_path(data_root: &Path) -> PathBuf {
     data_root.join(LOG)
+}
+
+/// The user manager's version, asked of the one child that answers it without the bus.
+///
+/// `systemctl --version`'s first line is `systemd 255 (255.4-1ubuntu8.18)`, and the version is the field after the
+/// program's name ([`major`]). No `--user` is passed and none must be: `--version` is answered by the client itself,
+/// so it answers on a machine whose manager this process could not otherwise reach — a `serve` from cron, a container
+/// — and the client and the manager it talks to are one package, which is what makes the binary's version the user
+/// manager's version.
+///
+/// `None` is every way a version could not be measured: the program could not be run, it exited non-zero, or its
+/// first line is not `systemd <number> …`. Nothing measured a version there, and [`below_floor`] refuses nothing on
+/// it.
+fn version(tools: &Tools) -> Option<u32> {
+    let output = std::process::Command::new(&tools.systemctl)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    major(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The major version in `systemctl --version`'s first line: the field after the program's name, up to its first
+/// character that is not a digit — so `systemd 255 (255.4-1ubuntu8.18)` and `systemd 255.4` are both 255.
+fn major(text: &str) -> Option<u32> {
+    let mut words = text.lines().next()?.split_whitespace();
+    if words.next()? != "systemd" {
+        return None;
+    }
+    words
+        .next()?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// `None` when this machine's systemd meets [`FLOOR`], and the one sentence when it measured a version below it.
+///
+/// **A version this build could not measure refuses nothing.** A `systemctl` that could not be run, one that answered
+/// non-zero and a line with no version in it are three ways of not knowing, and a press refused on a fact nobody has
+/// would be "we could not measure" read as "we measured" (ADR-0044): so they answer `None`, and the press goes on to
+/// what the next step says about the machine.
+///
+/// The sentence names the version it found, the floor, and the half of the machine that is fine: everything but the
+/// job works, so the move is the distribution's systemd rather than anything this tree could supply.
+pub fn below_floor(tools: &Tools) -> Option<String> {
+    let found = version(tools)?;
+    (found < FLOOR).then(|| {
+        format!(
+            "this machine's systemd is version {found}, and a promotion's job needs {FLOOR} or newer: the job's two \
+             output properties are `StandardOutput=append:` and `StandardError=append:`, which a {FLOOR} has and this \
+             {found} refuses, while everything else on this machine — the install, the boot and the sessions — works. \
+             Nothing in this tree can supply a newer systemd: take the one your distribution packages, {FLOOR} or \
+             above, and start the promotion again"
+        )
+    })
 }
 
 /// Start [`Job`] as the transient user unit, and say what became of it.
@@ -235,7 +311,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
-    use super::{Answer, Job, LOG, UNIT_NAME, log_path, start};
+    use super::{Answer, FLOOR, Job, LOG, UNIT_NAME, below_floor, log_path, major, start};
     use crate::deploy;
 
     /// A directory of this test's own, emptied first: the stand-ins and the argv each one records go here, and no
@@ -253,13 +329,29 @@ mod tests {
     /// An executable rather than a recorder in process, because the question is what the **child** is given: every
     /// word here is argv, and the one bug it can have is being spelled nowhere but in a printed line.
     fn stand_in(dir: &Path, name: &str, status: i32, stderr: &str) -> (PathBuf, PathBuf) {
+        answering(dir, name, status, "", stderr)
+    }
+
+    /// The same stand-in, with one line on its standard output: what a manager asked `--version` prints.
+    fn answering(
+        dir: &Path,
+        name: &str,
+        status: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> (PathBuf, PathBuf) {
         let log = dir.join(format!("{name}.argv"));
         let program = dir.join(name);
         std::fs::write(
             &program,
             format!(
-                "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; }} > \"{}\"\n{}exit {status}\n",
+                "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; }} > \"{}\"\n{}{}exit {status}\n",
                 log.display(),
+                if stdout.is_empty() {
+                    String::new()
+                } else {
+                    format!("printf '%s\\n' \"{stdout}\"\n")
+                },
                 if stderr.is_empty() {
                     String::new()
                 } else {
@@ -594,5 +686,124 @@ mod tests {
             !said.contains("did not start"),
             "the failure claims the unit is not running, which nothing measured: {said}"
         );
+    }
+
+    /// The version is the field after the program's name on the first line, up to its first non-digit: `255` in
+    /// `systemd 255 (255.4-1ubuntu8.18)`, and `255` in a `systemd 255.4` an older release prints. A first line that is
+    /// not `systemd <number>` is no version at all, which is what makes it unmeasurable rather than zero.
+    #[test]
+    fn the_version_is_the_field_after_the_programs_name() {
+        assert_eq!(major("systemd 255 (255.4-1ubuntu8.18)"), Some(255));
+        assert_eq!(major("systemd 240 (240-1)"), Some(240));
+        assert_eq!(major("systemd 255.4 (255.4-1)"), Some(255));
+        assert_eq!(major("systemd 255\n+PAM +AUDIT +SELINUX"), Some(255));
+        assert_eq!(major(""), None);
+        assert_eq!(major("systemd"), None);
+        assert_eq!(major("systemd (255)"), None);
+        assert_eq!(major("systemctl 255"), None);
+    }
+
+    /// The floor is asked with one child and one flag: `systemctl --version`, no `--user` — the question is the
+    /// package's version, and `--version` is answered without the bus a `serve` started from cron cannot reach.
+    #[test]
+    fn the_floor_is_asked_with_systemctl_version_and_nothing_else() {
+        let dir = scratch("version-argv");
+        let (manager, asked) =
+            answering(&dir, "systemctl", 0, "systemd 255 (255.4-1ubuntu8.18)", "");
+        let tools = deploy::Tools {
+            systemctl: manager,
+            ..deploy::Tools::default()
+        };
+
+        assert_eq!(
+            below_floor(&tools),
+            None,
+            "a manager newer than the floor was refused"
+        );
+        assert_eq!(
+            recorded(&asked),
+            vec!["--version".to_string()],
+            "the version question is not `systemctl --version`, and nothing else"
+        );
+    }
+
+    /// The floor is inclusive: a 240 has both `append:` properties, so it is met and not refused, and a later release
+    /// is met by the same reading.
+    #[test]
+    fn a_manager_at_or_above_the_floor_is_refused_nothing() {
+        let dir = scratch("version-floor");
+        for (label, said) in [
+            ("floor", "systemd 240 (240-1)"),
+            ("newer", "systemd 255 (255.4-1ubuntu8.18)"),
+        ] {
+            let (manager, _) = answering(&dir, &format!("systemctl-{label}"), 0, said, "");
+            let tools = deploy::Tools {
+                systemctl: manager,
+                ..deploy::Tools::default()
+            };
+            assert_eq!(below_floor(&tools), None, "{said} is not below the floor");
+        }
+    }
+
+    /// One version below the floor is one sentence, and it names the version it found, the floor, the half of the
+    /// machine that works, and the only move there is: a newer systemd from the distribution.
+    #[test]
+    fn a_manager_below_the_floor_is_one_sentence_naming_both_numbers() {
+        let dir = scratch("version-below");
+        let (manager, _) = answering(&dir, "systemctl", 0, "systemd 239 (239-1)", "");
+        let tools = deploy::Tools {
+            systemctl: manager,
+            ..deploy::Tools::default()
+        };
+
+        let said = below_floor(&tools).expect("239 is below the floor");
+        assert!(said.contains("version 239"), "{said}");
+        assert!(
+            said.contains(&FLOOR.to_string()),
+            "the sentence does not name the floor: {said}"
+        );
+        assert!(
+            said.contains("append:"),
+            "the sentence does not say what the floor is for: {said}"
+        );
+        assert!(
+            said.contains("the install, the boot and the sessions"),
+            "the sentence does not say what still works: {said}"
+        );
+        assert!(
+            said.contains("distribution"),
+            "the sentence does not say where a newer systemd comes from: {said}"
+        );
+    }
+
+    /// Three ways of not knowing are not a refusal: a manager that cannot be run, one that exits non-zero, and output
+    /// with no version in it all answer `None`, so a press on a machine nothing measured is never refused over the
+    /// version (ADR-0044).
+    #[test]
+    fn a_version_that_could_not_be_measured_refuses_nothing() {
+        let dir = scratch("version-unmeasured");
+        // A manager that is not there at all: a container, or a `serve` on a machine with no systemd.
+        let missing = deploy::Tools {
+            systemctl: dir.join("no-systemctl-here"),
+            ..deploy::Tools::default()
+        };
+        assert_eq!(below_floor(&missing), None);
+
+        for (label, status, stdout) in [
+            ("non-zero", 1, "systemd 239 (239-1)"),
+            ("empty", 0, ""),
+            ("unparsable", 0, "something else entirely"),
+        ] {
+            let (manager, _) = answering(&dir, &format!("systemctl-{label}"), status, stdout, "");
+            let tools = deploy::Tools {
+                systemctl: manager,
+                ..deploy::Tools::default()
+            };
+            assert_eq!(
+                below_floor(&tools),
+                None,
+                "{label} output was read as a version below the floor"
+            );
+        }
     }
 }

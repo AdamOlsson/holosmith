@@ -227,6 +227,10 @@ struct World {
     log: PathBuf,
     /// The file `--report` names.
     report: PathBuf,
+    /// The programs a pass asks the machine for, with the manager a stand-in that answers `--version` with
+    /// `systemd 255`: the floor is a fact about the host's systemd, and a pass whose version came from the host would
+    /// pass on one machine and refuse on another.
+    tools: holosmith::deploy::Tools,
 }
 
 /// A world whose gate exits `code` and prints two `SKIP ` lines.
@@ -286,6 +290,12 @@ fn world(label: &str, code: i32) -> World {
         .expect("the previous release is the live one");
 
     let report = dir.file("report.json");
+    let manager = dir.file("systemctl");
+    answering(&manager, "systemd 255 (255.4-1ubuntu8.18)");
+    let tools = holosmith::deploy::Tools {
+        systemctl: manager,
+        ..holosmith::deploy::Tools::default()
+    };
     World {
         _dir: dir,
         config,
@@ -293,6 +303,7 @@ fn world(label: &str, code: i32) -> World {
         source,
         log,
         report,
+        tools,
     }
 }
 
@@ -325,6 +336,15 @@ fn seed_of(report: &Path) -> PathBuf {
     report.with_file_name("report-at-the-gate.json")
 }
 
+/// A `systemctl` stand-in at `path` whose answer to every question is `line` on stdout, and exit 0: the pass reads the
+/// floor out of the one line `--version` answers with, and a restart's own success is nothing but the exit status.
+fn answering(path: &Path, line: &str) {
+    std::fs::write(path, format!("#!/bin/sh\nprintf '{line}\\n'\n"))
+        .expect("the stand-in is writable");
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the stand-in is executable");
+}
+
 impl World {
     /// Run one pass with `steps` and read its report back: the report is written for every ending, so a test that
     /// wants the sentence a refusal carries reads the file a job's caller would.
@@ -337,7 +357,7 @@ impl World {
                 wait: Duration::from_millis(1),
             },
             steps,
-            &holosmith::deploy::Tools::default(),
+            &self.tools,
         );
         let text = std::fs::read_to_string(&self.report)
             .expect("a run with --report writes one for every ending");
@@ -658,6 +678,41 @@ fn a_machine_with_no_candidate_never_reaches_the_gate() {
         "the gate ran for a machine with no candidate"
     );
     assert!(steps.trace().is_empty());
+}
+
+#[test]
+fn a_machine_below_the_systemd_floor_is_refused_before_the_gate() {
+    let world = world("update-floor", 0);
+    // The manager every pass in this file is given answers `systemd 255`; this is the one machine the job's two
+    // `append:` properties cannot run on, and the version is the whole of what makes it that.
+    answering(&world.tools.systemctl, "systemd 239 (239-1)");
+    let steps = Recorder::new("0.1.0");
+    let (code, report) = world.run(&steps);
+
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(report["state"], "refused");
+    assert_eq!(
+        step_list(&report),
+        ["candidate resolved", "systemd refused"],
+        "the report does not say the candidate was resolved and the machine's systemd was what refused"
+    );
+    let said = detail(&report);
+    assert!(said.contains("version 239"), "{said}");
+    assert!(
+        said.contains(&holosmith::update::FLOOR.to_string()),
+        "the refusal does not name the floor: {said}"
+    );
+    // The floor is a step of its own, before the gate: a machine that cannot promote is not asked to spend the gate's
+    // three quarters of an hour proving a tree, so the fixture gate ran not at all.
+    assert!(
+        !world.log.exists(),
+        "the gate ran on a machine under the floor"
+    );
+    assert!(
+        steps.trace().is_empty(),
+        "a pass refused at the floor asked the machine something later: {:?}",
+        steps.trace()
+    );
 }
 
 #[test]
