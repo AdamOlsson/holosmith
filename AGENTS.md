@@ -91,7 +91,11 @@ is not proven. The two tiers are therefore recorded here and not in an ADR — A
 there is one gate, which is the cost of keeping the rule where an agent will read it.
 Both gates also exit 3 when this project's image vendors a crate set from another `Cargo.lock`
 (`scripts/check-crate-set.sh`, which both run as a precondition before their first phase): a stale project image, and
-an image rebuild rather than a code fix. `scripts/verify.sh` also exits 4 when a case could not measure because a build
+an image rebuild rather than a code fix. **That check is this repository's own, not a product mechanism**: the recipe
+writes the digest of the lock it vendored beside the crates and this project's script compares it, and Holosmith checks
+no other project's image — it reads no project's lock, writes no label for one, and a session's start compares nothing
+(ADR-0127). A project that vendors content copies the recipe's `sha256sum` clause and writes a script of its own.
+`scripts/verify.sh` also exits 4 when a case could not measure because a build
 could not fetch a source it pins — the case prints `UNREACHABLE <case>` at column 0 and stops the run (ADR-0111). That
 one is a host that did not answer and not a red tree: a `FAIL` there would make `holosmith update` record a gate
 refusal nobody made, which is why `server deploy`'s image step answers 4 as well.
@@ -328,7 +332,9 @@ registry. A crate the lock *does* name resolves, which is how the two are told a
 seen is a manifest and lock edit that a host makes with its own `cargo fetch --locked`, then a rebuild of the image that
 project's sessions run — for this repository, that recipe at `docker/Dockerfile`, giving `hs-holosmith:<digest>`.
 `scripts/check-crate-set.sh` is what refuses the old image with its own sentence instead of letting every phase report
-the same symptom (the exit-3 rule is in "Build and gates").
+the same symptom (the exit-3 rule is in "Build and gates"). That refusal is **this project's**: another project with a
+recipe of its own writes its own check, copying `docker/Dockerfile`'s `sha256sum` clause and putting a script beside it,
+because Holosmith reads no project's vendored crate set (ADR-0127).
 
 **A `SKIP` measures nothing.** In a container `cargo test` prints a `SKIP` for each integration binary that wants a
 Docker daemon, and `scripts/build.sh`'s last step prints one for `git_tag` (the case builds in a `git ls-files` copy, so

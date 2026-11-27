@@ -17311,11 +17311,12 @@ command -v cargo >/dev/null 2>&1 ||
 
 # The crate set, after the toolchain and before any phase. After it, because a session whose image carries no
 # toolchain answers that sentence first and the two name the same rebuild. Before the phases, because a candidate
-# whose `Cargo.lock` the image does not vendor fails every one of the later ones with `could not be found in registry
-# index` — a sentence about the registry for a fact about the image — and because this gate is what a promotion's
-# acknowledgement is, so the wrong diagnosis is exactly what it may not hand back. The check's own endings are 0 and
-# 3, and the status reaches the caller unchanged, so nothing here can invent a 2 (this invocation was wrong) or a 1
-# (the tree is not proven). It prints its own sentence, and nothing here repeats it.
+# whose `Cargo.lock` the image does not vendor fails every one of the later ones with a `no matching package named`
+# line over `location searched: directory source /opt/cargo-vendor` — a sentence about a directory source for a fact
+# about the image — and because this gate is what a promotion's acknowledgement is, so the wrong diagnosis is exactly
+# what it may not hand back. The check's own endings are 0 and 3, and the status reaches the caller unchanged, so
+# nothing here can invent a 2 (this invocation was wrong) or a 1 (the tree is not proven). It prints its own sentence,
+# and nothing here repeats it.
 crate_set_rc=0
 "$repo_root/scripts/check-crate-set.sh" || crate_set_rc=$?
 if [ "$crate_set_rc" -ne 0 ]; then

@@ -19,14 +19,15 @@
 # GATE_QUICK_ALLOW_TOOLCHAIN=1 runs anyway, and repeats the mismatch in the footer so it cannot be missed.
 #
 # The crate set is the image's and not this tree's: under the image's source replacement a crate the crate set
-# does not hold fails as "could not be found in registry index", which reads as a broken registry, so
+# does not hold fails as "no matching package named `rand` found", over "location searched: directory source
+# /opt/cargo-vendor (which is replacing registry crates-io)", which reads as a dependency problem, so
 # `scripts/check-crate-set.sh` runs before the phases and refuses an image vendored from another `Cargo.lock` with
 # its own sentence — the tree is fine and the image is stale.
 #
 # Exit 0 green, 1 a phase failed (its last line names the phase, and the binary when it was one), 2 misuse: no
 # name, an unknown name, cargo absent or the wrong version, `pins/rust.txt` unreadable or naming no version to
 # compare against, `--lib-only` or `--list` combined with names, 3 the image's crate set is a different
-# `Cargo.lock`'s than this tree's: a stale agent image, which an image rebuild fixes and no code change does.
+# `Cargo.lock`'s than this tree's: a stale project image, which an image rebuild fixes and no code change does.
 # There is no `--all` and no `--full` on purpose: `cargo test` is that, and a second spelling of the whole suite
 # is the thing this script exists to stop a worker from reaching for.
 

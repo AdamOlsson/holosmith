@@ -6,7 +6,7 @@ resolver = "3"
 # A placeholder, and deliberately not the version. `VERSION` at the repository root is the one copy of that, and
 # `build.rs` reads it into `holosmith::VERSION`. Cargo's manifest needs a version of its own; a real one here would
 # be a second answer to the same question, and because it lands in `Cargo.lock` it would move the lock's digest on
-# every bump — which is what `scripts/check-crate-set.sh` compares against the crate set the agent image vendors.
+# every bump — which is what `scripts/check-crate-set.sh` compares against the crate set this project's image vendors.
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.100"
