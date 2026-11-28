@@ -63,6 +63,26 @@ impl Docker {
         command
     }
 
+    /// The same invocation as a line an operator can paste into a shell or a pipeline.
+    ///
+    /// `docker`, `-H` when the config named a daemon, then the arguments, each shell-quoted by [`crate::remote::quote`]
+    /// so a path with a space in it stays one word. It is the verb's own output for `holosmith image run`: a pipeline
+    /// that cannot have holosmith is handed the line instead, and a line that is not the one that ran is worse than
+    /// no line at all — so this renders the same `-H` the spawn uses, from the same field.
+    pub fn line(&self, arguments: &[String]) -> String {
+        let mut words = vec!["docker".to_string()];
+        if let Some(host) = &self.host {
+            words.push("-H".to_string());
+            words.push(host.clone());
+        }
+        words.extend(arguments.iter().cloned());
+        words
+            .iter()
+            .map(|word| crate::remote::quote(word))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Run `docker <arguments>` and answer its stdout, or an error carrying the first line it printed.
     ///
     /// The first line rather than all of it: Docker puts the actionable sentence first and then repeats
@@ -705,6 +725,23 @@ mod tests {
         assert_eq!(
             first_line("   ", None),
             "docker was killed and printed nothing"
+        );
+    }
+
+    #[test]
+    fn the_line_is_the_spawn_the_host_and_the_quoting() {
+        // `image run`'s own output (ADR-0130), so the two facts nothing else measures are here: the `-H` a config's
+        // `docker_host` adds — the spawn's own field, not a second reading — and a word the shell would split.
+        let arguments: Vec<String> = ["run", "-v", "/srv/a b:/work", "img", "sh -c"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            Docker::new(None).line(&arguments),
+            "docker run -v '/srv/a b:/work' img 'sh -c'"
+        );
+        assert_eq!(
+            Docker::new(Some("unix:///run/user/1000/docker.sock".to_string())).line(&arguments),
+            "docker -H unix:///run/user/1000/docker.sock run -v '/srv/a b:/work' img 'sh -c'"
         );
     }
 
