@@ -96,9 +96,28 @@ that the count is now guarded by an assertion in the case that owns the image ra
 ## D5 — what pins the smoke image's base
 
 `smoke.Dockerfile` was held to the **agent** recipe's last `FROM` by a test, so the two could not drift onto different
-node bases. That recipe is gone. The base recipe's own `FROM` is the pinned node digest now — this repository's project
-recipe is `FROM ${HOLOSMITH_BASE_IMAGE}`, so it holds no node digest of its own — and the smoke recipe's test compares
-the base recipe's `FROM` with the smoke recipe's, which is the same invariant with one fewer hop.
+node bases. That recipe is gone, and the base recipe's own `FROM` — the pinned node manifest-list digest — is the pin
+now. Two spellings were open, and this section is the decision between them: keep the digest and re-point the comparison
+at the base recipe, or build the smoke image `FROM holosmith-base:<version>` and inherit the base instead of copying it.
+
+**The first is the decision, and the reason is the machine a smoke run has to work on.** A smoke run is the one path that
+must answer on a machine carrying a daemon and a candidate and little else, so a `FROM` naming `holosmith-base:<version>`
+would make the run need an image it has no other business with: either it pulls that image, or it gains a "the base image
+is not on this machine" refusal. A version would arrive as an `ARG` rather than as a substitution, so the embedded
+recipe's bytes stay exactly as committed — but `smoke::ensure_image` passes no `--build-arg` today, so a version in that
+`FROM` would have to be plumbed into that build the way a project's recipe's arguments are: a second thing to keep in
+step, and one the smoke run has no other use for. Copying one line costs neither, and the smoke image is still the
+base's in the sense the invariant is about: both sit on one distribution, so the boot's `node -e` probe and the fake
+`pi` run on what a session's base carries. It is also the honest shape now that this repository's session image is a
+project's recipe — the smoke image stands in for the **base**, and a project's image is a layer the smoke run never
+touches.
+
+What holds it, all of it already there: the base recipe's `FROM` is the pinned node digest, the smoke recipe copies that
+line character for character, `the_smoke_recipe_names_the_base_images_base` in `src/smoke.rs` compares the two last
+`FROM` lines — beside that test's "installs nothing" and "`pi` is the candidate" arms — `tests/images.rs` asserts the
+base recipe's `FROM` carries a digest, and `case_smoke` measures the end of it, a real smoke run turning a recorded one.
+The node digest is a literal in the base recipe and the smoke recipe with one test tying them, which is the copy a
+Dockerfile cannot avoid: a `FROM` cannot `include` anything.
 
 ## The currency gap this inherits
 
@@ -115,8 +134,10 @@ This decision supersedes the **agent-image parts** of ADR-0105, ADR-0106, ADR-01
 ADR-0124 — D2's "this repository's `agent-image`", which named a product image this decision deletes, and D3's "slower
 than any of the three product images", which are two now — and writes nothing over them: their claims about where a
 toolchain is installed and why a session has no network are still the reasons, and only "the image is `agent-image`"
-changes to "the image is this project's". ADR-0109's wrapper still runs the whole gate in a container with the daemon
-outside it; the image it names is D2's. The rest of ADR-0123 and ADR-0124 is unchanged and now applies to this
+changes to "the image is this project's". ADR-0081's D2 is superseded in part the same way: the smoke recipe's `FROM`
+is the base recipe's digest-pinned node base rather than the agent image's (D5 above), and the boot's self-test probes
+the config's `base_image` rather than `agent_image`. ADR-0109's wrapper still runs the whole gate in a container with
+the daemon outside it; the image it names is D2's. The rest of ADR-0123 and ADR-0124 is unchanged and now applies to this
 repository as it does to any other project: a project's build is still lazier, is still the slow one, and still pays
 for whatever its recipe installs.
 
