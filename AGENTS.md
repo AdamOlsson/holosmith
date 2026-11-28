@@ -298,6 +298,16 @@ that build on its own — it needs a daemon and it is idempotent on the tag's ex
 pre-warms the base. A build has the internet and the session it produces does not, which is why a project's `apt-get`
 belongs in its recipe.
 
+**A project can check its own image in its own CI, in a session's shape.** `holosmith image run <project> -- <cmd>` runs
+one command in the image the project's sessions would run: no network, `--cap-drop ALL`, `no-new-privileges`, this
+machine's three limits, the data root's owner as `--user`, and the project's checkout writable at `/work` (`--work DIR`
+overrides it). It builds the tag first when it is absent, under the same lock and into the same log a create uses, and
+exits with the command's own status. The flags come from one value, `container::SessionShape`, which
+`SessionContainer::run_args` passes too — a second spelling of `--cap-drop ALL` is a place to forget it. The
+`docker run` line is printed on stderr, so a pipeline that cannot have holosmith can carry the line instead, and
+`--user` is the flag a hand-written copy gets wrong: the invoking uid may have no passwd entry inside the image. It
+writes no row, creates no network and touches no event log — it is one `docker run` (ADR-0130).
+
 This repository is the project that needs a Rust toolchain, so its own image is a **project's** image like any other:
 `hs-holosmith:<digest>` over `docker/Dockerfile` at the repository root, which is `FROM` the base image and installs the
 pinned rustc, this tree's crate set vendored beside it and the web app's packages in its npm cache (ADR-0106,

@@ -42,7 +42,7 @@ Both run ahead of the phases, and neither is counted as one.
 | `cleanup` | `case_gate_cleanup` | 7 s | the cleanup script's contract: the marker it kills by, the prefix it does not, the lock, and a registered checkout this host cannot see skipped rather than refused |
 | `build` | `scripts/build.sh` | 188 s warm, 317 s after a change | `npm test`, the web build, the musl artifact, and `check-static.sh` (statically linked, empty `readelf -d`, plus the empty-root container run) |
 | `embed` | `scripts/check-embed.sh` | 52 s | app present, app absent (placeholder), app required and absent (red) |
-| `serve` | every case in `serve_cases` (111) against `dist/<host-triple>/holosmith` | 1774 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
+| `serve` | every case in `serve_cases` (114) against `dist/<host-triple>/holosmith` | 1774 s | the shipped artifact serves: the boot, the API, the event log, the container paths, every proxy, the release verbs |
 
 A full green run on this host is therefore about **42 minutes**: 476 s of source-level phases, 240 s of artifact
 phases, and 1774 s of `serve` — **about three quarters of the gate is the serve phase**, and the serve phase is mostly
@@ -52,7 +52,7 @@ The build phase ends with a check that the artifact's `git_tag` is *this tree's*
 it refuses (`git_tag e440b28 is not this tree (e440b28-dirty): re-run scripts/build.sh`). The gate is a fact about a
 commit, and that is where it says so.
 
-## The serve phase: one booted artifact, 111 cases
+## The serve phase: one booted artifact, 114 cases
 
 The phase boots the shipped musl artifact on a random port with a temp config (`owner`, `max_live_sessions = 1`,
 `backend = "stub"`, `idle_stop_min = 1`, `turn_timeout_min = 1`) and a temp data root, runs `serve_cases` in order, and
@@ -91,7 +91,7 @@ names the check behind every verdict.
 | `case_stopped_expiry`, `case_internet_toggle` | 11 s each | a real session network compared by endpoint count; an aged row swept |
 | `case_smoke`, `case_reconcile_orphans`, `case_history` | 10 s each | a real smoke run; containers and networks swept; a page of a long transcript |
 
-Everything else is at or under 7 s, and **68 of the 112 cases measured here are at or under 1 s** — they are HTTP and
+Everything else is at or under 7 s, and **68 of the 113 cases measured here are at or under 1 s** — they are HTTP and
 file facts about an artifact that is already running.
 
 The two cases above that copy this tree into a container are the only place in the gate where a session does its own
@@ -108,6 +108,11 @@ What replaces those two is `case_session_build` (ADR-0128): one case whose subje
 four facts are the session's shape rather than this tree's toolchain: a build as the invoking uid, `--network none`, a
 cache read-only for that uid while npm's log land is `/tmp`, and npm's own sentence for a package the image does not
 hold. It costs seconds, because the layer its `COPY` makes is cached and nothing is fetched at case time.
+
+`case_image_run` is the verb's own case, and it is separate on purpose: `holosmith image run <project> -- <cmd>`
+runs one command in that same shape, and `case_session_build` may not use the verb it partly exists to justify
+(ADR-0130). Its subject is the `docker run` line the verb prints, the exit status it hands back, and the identity and
+working directory the line names.
 
 The three image cases after it are the **lazy** half (ADR-0124): `case_project_image` makes a project carry a
 `docker/Dockerfile` and lets its first session build `hs-<project>:<digest>`, `case_project_image_failure` gives one a

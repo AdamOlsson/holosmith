@@ -33,6 +33,11 @@
 //! an empty root-owned directory, so a typo in the projects root would give the agent an empty `/work` and
 //! a `.git` that is not the repository — silently. [`Mounts::check`] is the question that rules that out,
 //! and it is asked before the container is created.
+//!
+//! **One command can run in the same shape without a session.** `holosmith image run <project> -- <cmd>` is
+//! [`ImageRun`], which takes the shared [`SessionShape`] and adds `--network none`, one writable mount at
+//! `/work` and the command instead of pi — so a project's CI gets a session's hardening, limits and identity
+//! from the same value a session's container does, rather than from a hand-written copy of its flags.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -487,6 +492,95 @@ pub(crate) fn owner_of(path: &Path) -> Option<(u32, u32)> {
     Some((metadata.uid(), metadata.gid()))
 }
 
+/// The flags a container has because it is a session's: its lifecycle, its hardening, its limits and its identity.
+///
+/// Two callers pass them: [`SessionContainer::run_args`], which interleaves its own name, network, environment and
+/// mounts, and [`ImageRun::run_args`], which passes the shared blocks in a row. The blocks are four rather than one
+/// list so each caller can put its own flags where they belong without either of them spelling a shared flag
+/// itself — a session's name follows its lifecycle flags and precedes the hardening. **A second place that spells
+/// `--cap-drop ALL` is a place to forget it**, which is why `holosmith image run` reproduces a session's shape
+/// through this value rather than through a copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionShape {
+    pub limits: Limits,
+    /// The uid and gid the container runs as: **the data root's owner**, read from the tree rather than assumed.
+    ///
+    /// ADR-0087. The image's own user is its base's `node` (uid 1000) and the machine's service user is a system
+    /// account, so the two numbers do not meet — and a container that is not the worktree's owner cannot write a
+    /// file in it. The identity that must match is the one that owns the tree, and the directory every session
+    /// writes under is the data root, so its metadata is the read. `None` when it cannot be read (a test's fake
+    /// settings, a tree not made yet), which leaves the image's own user: the same fallback the key proxy has.
+    pub user: Option<(u32, u32)>,
+}
+
+impl SessionShape {
+    /// The shape for a machine whose data root is `data_root` and whose limits are `limits`.
+    ///
+    /// The identity is [`owner_of`]'s read of the data root, so a session's container and one `image run` on the
+    /// same machine name the same uid (ADR-0087).
+    pub fn of(data_root: &Path, limits: Limits) -> Self {
+        Self {
+            limits,
+            user: owner_of(data_root),
+        }
+    }
+
+    /// `-i --rm --init`: attached, removed when it exits, and with a reaping init as pid 1.
+    ///
+    /// `-i` and not `-t`: stdin stays open for the RPC commands, and a terminal would wrap pi's JSONL in escape
+    /// sequences and redraw it.
+    pub fn lifecycle(&self) -> Vec<String> {
+        ["-i", "--rm", "--init"].map(str::to_string).to_vec()
+    }
+
+    /// The four list entries of spec item 1's third bullet that no mount can express, and the working directory.
+    ///
+    /// A dropped capability set is what makes remount and unmount impossible, and `no-new-privileges` is what
+    /// keeps a setuid binary in the worktree from getting one back.
+    pub fn hardening(&self) -> Vec<String> {
+        [
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--workdir",
+            WORKDIR,
+        ]
+        .map(str::to_string)
+        .to_vec()
+    }
+
+    /// The three limits: a runaway agent is bounded in CPU, memory and processes, so "it cannot take the machine
+    /// down" is a kernel fact rather than a hope.
+    pub fn limit_flags(&self) -> Vec<String> {
+        vec![
+            "--cpus".to_string(),
+            self.limits.cpus.to_string(),
+            "--memory".to_string(),
+            format!("{}m", self.limits.memory_mb),
+            "--pids-limit".to_string(),
+            self.limits.pids.to_string(),
+        ]
+    }
+
+    /// `--user <uid>:<gid>`, or nothing when the tree named no owner and the image's own user runs it.
+    pub fn identity(&self) -> Vec<String> {
+        match self.user {
+            Some((uid, gid)) => vec!["--user".to_string(), format!("{uid}:{gid}")],
+            None => Vec::new(),
+        }
+    }
+
+    /// Every shared flag, in the order a caller passes them when it has no flags of its own between them.
+    pub fn arguments(&self) -> Vec<String> {
+        let mut arguments = self.lifecycle();
+        arguments.extend(self.hardening());
+        arguments.extend(self.limit_flags());
+        arguments.extend(self.identity());
+        arguments
+    }
+}
+
 /// One session's container: the image it runs, the name it takes, and how it is mounted.
 ///
 ///  added the lifecycle flags (`--rm`, `-i`, `--init`), the network and the limits; turns the
@@ -511,18 +605,11 @@ pub struct SessionContainer {
     /// The thinking level the row chose, as `--thinking` carries it.
     pub thinking: String,
     pub mounts: Mounts,
-    pub limits: Limits,
+    /// The lifecycle, hardening, limits and identity every session's container shares ([`SessionShape`]).
+    pub shape: SessionShape,
     /// The port the preview listener forwards to inside this container, carried as
     /// [`PREVIEW_PORT_ENV`].
     pub preview_port: u16,
-    /// The uid and gid the container runs as: **the data root's owner**, read from the tree rather than assumed.
-    ///
-    /// ADR-0087. The image's own user is its base's `node` (uid 1000) and the machine's service user is a system
-    /// account, so the two numbers do not meet — and a container that is not the worktree's owner cannot write a
-    /// file in it. The identity that must match is the one that owns the tree, and the directory every session
-    /// writes under is the data root, so its metadata is the read. `None` when it cannot be read (a test's fake
-    /// settings, a tree not made yet), which leaves the image's own user: the same fallback the key proxy has.
-    pub user: Option<(u32, u32)>,
 }
 
 impl SessionContainer {
@@ -557,9 +644,8 @@ impl SessionContainer {
             model: session.model.clone(),
             thinking: session.thinking.clone(),
             mounts: Mounts::of(&worktree, home),
-            limits: settings.limits,
+            shape: SessionShape::of(&settings.data_root, settings.limits),
             preview_port: settings.preview_port,
-            user: owner_of(&settings.data_root),
         })
     }
 
@@ -577,49 +663,22 @@ impl SessionContainer {
     /// unchanged — a worktree the host can commit to — and it is a measurement of the tree rather than a guess about
     /// the base image. The non-root requirement is still asserted separately: `id -u` in the container is not `0`.
     pub fn run_args(&self) -> Vec<String> {
-        let mut arguments = vec![
-            "run".to_string(),
-            // `-i` and not `-t`: stdin stays open for the RPC commands, and a terminal would wrap pi's
-            // JSONL in escape sequences and redraw it.
-            "-i".to_string(),
-            // The two flags that make a stop leave nothing behind and a killed container not become a
-            // zombie: `--rm` is spec item 6's, and `--init` puts a reaping init in as pid 1, so the
-            // agent's own children are not the container's problem.
-            "--rm".to_string(),
-            "--init".to_string(),
-            "--name".to_string(),
-            self.name.clone(),
-            "--network".to_string(),
-            self.network.clone(),
-            // The four list entries of spec item 1's third bullet that no mount can express: a dropped
-            // capability set is what makes remount and unmount impossible, and `no-new-privileges` is
-            // what keeps a setuid binary in the worktree from getting one back.
-            "--cap-drop".to_string(),
-            "ALL".to_string(),
-            "--security-opt".to_string(),
-            "no-new-privileges".to_string(),
-            "--workdir".to_string(),
-            WORKDIR.to_string(),
-            "--env".to_string(),
-            format!("{SESSION_ID_ENV}={}", self.session_id),
-            // What this session's dev server is expected to listen on: the machine's one preview port.
-            "--env".to_string(),
-            format!("{PREVIEW_PORT_ENV}={}", self.preview_port),
-            // The three limits: a runaway agent is bounded in CPU, memory and processes, so
-            // "it cannot take the machine down" is a kernel fact rather than a hope.
-            "--cpus".to_string(),
-            self.limits.cpus.to_string(),
-            "--memory".to_string(),
-            format!("{}m", self.limits.memory_mb),
-            "--pids-limit".to_string(),
-            self.limits.pids.to_string(),
-        ];
+        let mut arguments = vec!["run".to_string()];
+        arguments.extend(self.shape.lifecycle());
+        arguments.push("--name".to_string());
+        arguments.push(self.name.clone());
+        arguments.push("--network".to_string());
+        arguments.push(self.network.clone());
+        arguments.extend(self.shape.hardening());
+        arguments.push("--env".to_string());
+        arguments.push(format!("{SESSION_ID_ENV}={}", self.session_id));
+        // What this session's dev server is expected to listen on: the machine's one preview port.
+        arguments.push("--env".to_string());
+        arguments.push(format!("{PREVIEW_PORT_ENV}={}", self.preview_port));
+        arguments.extend(self.shape.limit_flags());
         // The identity, when the tree named one: the container is the owner of the data root, which is the user
         // `serve` runs as — so a file the agent writes is a file the host can commit (ADR-0087).
-        if let Some((uid, gid)) = self.user {
-            arguments.push("--user".to_string());
-            arguments.push(format!("{uid}:{gid}"));
-        }
+        arguments.extend(self.shape.identity());
         // pi's environment (spec item 2): its own directory, and the four switches that keep it from
         // refreshing anything, checking for a release, sending telemetry, or sending a provider call
         // through the egress proxy that is not there yet.
@@ -653,6 +712,53 @@ impl SessionContainer {
         arguments.push(self.model.clone());
         arguments.push("--thinking".to_string());
         arguments.push(self.thinking.clone());
+        arguments
+    }
+}
+
+/// One `holosmith image run`: a project's image, the one directory it mounts, and the command.
+///
+/// It is [`SessionContainer`]'s shape without the session. The hardening, the lifecycle, the limits and the
+/// identity come from the same [`SessionShape`] a session's vector does; what differs is what a session's own
+/// half gives: `--network none` instead of a private `agents_<id>` network, one writable mount at [`WORKDIR`]
+/// instead of the five a session has, and a command instead of pi. Nothing here names a session, a row or an
+/// event: it is the argument vector for one `docker run`, and a project's CI can check its image with it
+/// without a model and a provider key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRun {
+    /// The image the project's sessions run, from [`crate::projectimage::resolve`].
+    pub image: String,
+    /// The directory mounted writable at [`WORKDIR`]: the project's checkout, or `--work`'s directory.
+    pub work: PathBuf,
+    /// What runs inside the container, after the image.
+    pub command: Vec<String>,
+    pub shape: SessionShape,
+}
+
+impl ImageRun {
+    /// The `docker run` arguments, from `run` to the command's last word.
+    ///
+    /// **`--network none`, not a session's `agents_<id>` one.** A session's network exists so the key and egress
+    /// proxies are the only routes out; a CI run has no proxy to reach and no model to call, and `none` is the
+    /// stronger statement of the same fact. The one mount is the work directory, writable: a session's git mounts
+    /// and its pi-home are a session's.
+    pub fn run_args(&self) -> Vec<String> {
+        let mut arguments = vec!["run".to_string()];
+        arguments.extend(self.shape.arguments());
+        arguments.push("--network".to_string());
+        arguments.push("none".to_string());
+        arguments.push("-v".to_string());
+        arguments.push(
+            Mount {
+                host: self.work.clone(),
+                at: PathBuf::from(WORKDIR),
+                read_only: false,
+                source: Source::Directory,
+            }
+            .argument(),
+        );
+        arguments.push(self.image.clone());
+        arguments.extend(self.command.iter().cloned());
         arguments
     }
 }
@@ -1201,6 +1307,140 @@ mod tests {
         }
     }
 
+    /// The four blocks a session's container and one `image run` share, pinned as literals.
+    ///
+    /// One expectation per block, so a flag added, moved or re-valued in the shape is one edit here rather than a
+    /// reviewer's memory of what the other caller spells. The test below is what makes the two callers read this
+    /// value instead of their own copy of it.
+    #[test]
+    fn the_shared_shape_is_one_spelling_of_the_lifecycle_the_hardening_the_limits_and_the_identity()
+    {
+        let shape = SessionShape {
+            limits: Limits {
+                cpus: 3,
+                memory_mb: 1024,
+                pids: 64,
+            },
+            user: Some((1000, 1000)),
+        };
+        assert_eq!(shape.lifecycle(), vec!["-i", "--rm", "--init"]);
+        assert_eq!(
+            shape.hardening(),
+            vec![
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--workdir",
+                WORKDIR,
+            ]
+        );
+        assert_eq!(
+            shape.limit_flags(),
+            vec!["--cpus", "3", "--memory", "1024m", "--pids-limit", "64"]
+        );
+        assert_eq!(shape.identity(), vec!["--user", "1000:1000"]);
+        // With no tree to read there is no user, and nothing is named: the image's own user runs it.
+        let unread = SessionShape {
+            limits: Limits::default(),
+            user: None,
+        };
+        assert_eq!(unread.identity(), Vec::<String>::new());
+        // `arguments` is the four blocks in the order a caller passes them when it has no flags of its own between
+        // them, which is `image run`'s order.
+        let mut whole = shape.lifecycle();
+        whole.extend(shape.hardening());
+        whole.extend(shape.limit_flags());
+        whole.extend(shape.identity());
+        assert_eq!(shape.arguments(), whole);
+    }
+
+    /// The session's vector and a project's run take every shared flag from the one value (ADR-0130).
+    ///
+    /// Each block is asserted **whole and adjacent** in both vectors: a caller that spells a shared flag itself —
+    /// with another order, another value, or not at all — loses the block and fails here. **And exactly once**: a
+    /// caller that kept the block *and* pushed a second one of its own would pass that first assertion while being
+    /// precisely the second spelling this value exists to prevent. The second half is what the run adds and the
+    /// session alone has, so the split the ticket promises is a fact of the two vectors rather than of the shape's
+    /// comments.
+    #[test]
+    fn the_session_and_a_project_run_take_their_shared_flags_from_one_value() {
+        let shape = SessionShape {
+            limits: Limits {
+                cpus: 3,
+                memory_mb: 1024,
+                pids: 64,
+            },
+            user: Some((1000, 1000)),
+        };
+        let mut one = container();
+        one.shape = shape;
+        let session = one.run_args();
+        let run = ImageRun {
+            image: "hs-holosmith:0123456789abcdef".to_string(),
+            work: PathBuf::from("/srv/holosmith/projects/holosmith"),
+            command: vec!["npm".to_string(), "ci".to_string()],
+            shape,
+        };
+        let arguments = run.run_args();
+
+        for block in [
+            shape.lifecycle(),
+            shape.hardening(),
+            shape.limit_flags(),
+            shape.identity(),
+        ] {
+            for (who, vector) in [("the session", &session), ("the run", &arguments)] {
+                assert!(
+                    vector
+                        .windows(block.len())
+                        .any(|window| window == block.as_slice()),
+                    "{who} does not carry {block:?} whole: {vector:?}"
+                );
+            }
+        }
+        for flag in [
+            "--cap-drop",
+            "--security-opt",
+            "--workdir",
+            "--cpus",
+            "--memory",
+            "--pids-limit",
+            "--user",
+        ] {
+            for (who, vector) in [("the session", &session), ("the run", &arguments)] {
+                let spelled = vector.iter().filter(|word| word.as_str() == flag).count();
+                assert_eq!(
+                    spelled, 1,
+                    "{who} spells {flag} {spelled} times: {vector:?}"
+                );
+            }
+        }
+
+        let mut expected = vec!["run".to_string()];
+        expected.extend(shape.arguments());
+        expected.extend([
+            "--network".to_string(),
+            "none".to_string(),
+            "-v".to_string(),
+            "/srv/holosmith/projects/holosmith:/work".to_string(),
+            "hs-holosmith:0123456789abcdef".to_string(),
+            "npm".to_string(),
+            "ci".to_string(),
+        ]);
+        assert_eq!(
+            arguments, expected,
+            "the run is the shared shape, `--network none`, one mount, the image and the command"
+        );
+        // The session's own half stayed with the session: no name, no environment, no session network.
+        for absent in ["--name", "--env", "--detach"] {
+            assert!(
+                !arguments.contains(&absent.to_string()),
+                "the run carries the session's {absent}: {arguments:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_run_arguments_pin_the_name_the_hardening_and_the_session_id() {
         let container = container();
@@ -1223,7 +1463,7 @@ mod tests {
         // otherwise. This fixture's data root may or may not exist on the machine running the tests, so the
         // assertion is the read's shape rather than a constant: a named uid is the owner, and nothing is named when
         // nothing could be read. The test below is the arm that proves the read itself.
-        match container.user {
+        match container.shape.user {
             Some((uid, gid)) => assert!(
                 arguments
                     .windows(2)
@@ -1249,7 +1489,7 @@ mod tests {
         let container = SessionContainer::of(&settings, &session("holosmith", "0123456789abcdef"))
             .expect("a project with no recipe runs the base image");
         let owner = owner_of(&dir).expect("the data root this test just made has an owner");
-        assert_eq!(container.user, Some(owner));
+        assert_eq!(container.shape.user, Some(owner));
         let arguments = container.run_args();
         let at = arguments
             .iter()

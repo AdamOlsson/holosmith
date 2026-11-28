@@ -229,12 +229,14 @@ pub enum Cmd {
         #[command(subcommand)]
         action: HubAction,
     },
-    /// Build a project's image, or the base image, without waiting for a session to need it.
+    /// Build a project's image, or the base image, without waiting for a session to need it — or run one command
+    /// in a project's image, in a session's shape.
     ///
     /// A project's sessions run `hs-<project>:<digest>`, a content address over its `docker/Dockerfile` and the base
     /// image's tag, and the first session that needs one builds it — under a lock, so two creates do not run one
-    /// build. This verb is that build on its own: a fresh machine should not pay six minutes of it inside somebody's
-    /// first turn.
+    /// build. `build` is that build on its own: a fresh machine should not pay six minutes of it inside somebody's
+    /// first turn. `run` is the same image with one command in it, so a project's CI can check the image its
+    /// sessions will run.
     Image {
         #[command(subcommand)]
         action: ImageAction,
@@ -381,6 +383,26 @@ pub enum ImageAction {
         /// Rebuild even when the tag is already there.
         #[arg(long)]
         force: bool,
+    },
+    /// Run one command in a project's image, in the shape a session's container has, and exit with its status.
+    ///
+    /// The shape is a session's: no network, a dropped capability set, no new privileges, this machine's three
+    /// limits, the data root's owner as the user, and the project's checkout writable at `/work` (a `--work`
+    /// directory overrides it). The image is the one the project's sessions run, and it is built first when the
+    /// tag is not there — so a project's own CI can check that image without reproducing the flags by hand.
+    ///
+    /// The `docker run` line it used is printed on stderr, so the command's own stdout is the command's, and the
+    /// exit status is the command's. Nothing is written: no session, no network, no event log.
+    Run {
+        /// The project whose image to run: a directory directly inside the projects root.
+        #[arg(value_name = "PROJECT")]
+        project: String,
+        /// Run in this directory instead of the project's own checkout.
+        #[arg(long, value_name = "DIR")]
+        work: Option<PathBuf>,
+        /// The command to run inside the container, after `--`.
+        #[arg(last = true, num_args = 0.., value_name = "CMD")]
+        command: Vec<String>,
     },
 }
 

@@ -93,6 +93,28 @@ deploy and never regenerated (ADR-0058).
 | `container_prefix` | string | `""` | Prepended to every session **container** name, which is otherwise `s_<id>`. Empty, or lowercase letters/digits/`_`/`-`/`.` starting with a letter or digit and **ending in `_`** (so `smoke_` gives `smoke_s_<id>`). This is how a smoke run's names cannot collide with a machine's own. |
 | `network_prefix` | string | `""` | The same for session **network** names (`agents_<id>`), with the same alphabet. Two keys because two different sweeps read the two names. |
 
+### Running one command in that container
+
+`holosmith image run <project> -- <cmd>` runs one command in the image the project's sessions run, in the shape above:
+no network, the capability set dropped, `no-new-privileges`, the three limits, the data root's owner as the user, and
+the project's checkout writable at `/work` (a `--work DIR` runs in another directory instead). It is for a project
+that wants to check its image in its own CI, where a session cannot go: a session needs a model and a provider key.
+The image is built first when its tag is not there — the same build, the same lock and the same `<data>/images` log a
+session's first start uses — and the verb exits with the command's own status, so a pipeline reads what the command
+said. Nothing is written: no session, no network, no event log. It is one `docker run`.
+
+The line it used is printed on stderr, so the command's own stdout stays the command's and a pipeline that cannot have
+holosmith can carry the line instead:
+
+```text
+docker run -i --rm --init --cap-drop ALL --security-opt no-new-privileges --workdir /work --cpus 2 --memory 4096m \
+  --pids-limit 512 --user 1000:1000 --network none -v /srv/holosmith/projects/foo:/work hs-foo:<digest> npm ci
+```
+
+`--user` is the data root's owner (ADR-0087), and it is the flag a hand-written copy gets wrong: root passes, the
+image's own user passes, and the invoking uid — the one a session uses, which may have no passwd entry inside the
+image — is the one that shows whether the image can write the tree it is given.
+
 ## What a session may reach
 
 | Key | Type | Default | Meaning |

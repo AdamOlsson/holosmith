@@ -745,6 +745,10 @@ _Avoid_: Create lock, session mutex, start guard
 The container one session runs in: the name `s_<id>`, the image its project resolves to (a **project image**, or `base_image` when the project carries no recipe), and the mounts the session needs. Its machine name is `SessionContainer` in `crates/holosmith/src/container.rs`.
 _Avoid_: Agent container, sandbox, box
 
+**Session shape**:
+The lifecycle, hardening, limits and identity a container has because it is a session's: `-i --rm --init`, `--cap-drop ALL` with `--security-opt no-new-privileges` and `--workdir /work`, the three `container_*` limits, and `--user` as the data root's owner. Its machine name is `SessionShape` in `crates/holosmith/src/container.rs`, consumed by `SessionContainer::run_args` and by `ImageRun::run_args`, so a second spelling of one of those flags is a second place to forget it.
+_Avoid_: Flags, options, container settings (that is `ContainerSettings`)
+
 **Mounts**:
 The four bind mounts of spec item 1 that make a session's files reachable: the worktree at `/work` (writable), the project repository's `.git` at its own host path (writable, because `objects`, `refs`, `logs` and `worktrees/<id>` are what a commit writes), and `.git/hooks` and `.git/config` stacked on top of it **read-only**, because each is a way a repository could run a program on the host. Each keeps its host path inside the container except `/work`, because a worktree's `.git` file holds an absolute `gitdir:`. Its machine name is `Mounts` in `crates/holosmith/src/container.rs`.
 _Avoid_: Volumes, binds, mounts list

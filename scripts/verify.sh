@@ -661,6 +661,7 @@ serve_cases=(
   case_project_image_failure
   case_base_image_lazy
   case_session_build
+  case_image_run
   case_smoke
   case_upgrade
   case_rollback
@@ -12915,6 +12916,123 @@ case_session_build() {
 
   # The image is this case's alone and goes on a green run, with the scratch tree the arms wrote into.
   timeout 120 docker image rm -f "$tag" >/dev/null 2>&1 || true
+  rm -rf "$root"
+}
+
+# `holosmith image run <project> -- <cmd>`: one command in a project's image, in a session's shape.
+#
+# The verb exists because a project that wants to check its image in its own CI would otherwise reproduce a session's
+# container by hand, and the one flag every hand-written copy gets wrong is `--user` (ADR-0087): root passes, the
+# image's own user passes, and the invoking uid — the one a session actually uses, which may have no passwd entry
+# inside the image — is the only one that shows whether the image can write the tree it is given. The line the verb
+# prints is the whole shape, so a pipeline that cannot have holosmith is handed that line instead (ADR-0130).
+#
+# **This case uses the verb, and `case_session_build` may not**: a case that proved the shape through our own verb
+# would be partly testing itself. This one's subject *is* the verb, so what it asserts is the line and the three facts
+# the line is about — the command's own exit status, the identity it ran as, and the directory it ran in.
+#
+# `case_image_run` is separate from `case_session_build` for that reason, and it is seconds: one `docker build` of a
+# two-line recipe over the base `case_server_images` leaves in place — answered from the layer cache on every run
+# after the first — and three `docker run`s at about 0.7 s each. The base is a fixture project's `FROM` and nothing
+# else, so no gate run fetches anything.
+case_image_run() {
+  local name=case_image_run root="$repo_root/target/verify-image-run-$$"
+  local projects="$root/projects" repo="$root/projects/tagged" data="$root/data"
+  local version base plain code line image work
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers (tests/image_cli.rs covers the verb'"'"'s refusals)\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  [ -n "$version" ] || fail "$name/version" "the artifact's version report is incomplete: $plain"
+  base="holosmith-base:$version"
+  # The base is what `case_server_images` builds earlier in this same run, so its absence is this run failing rather
+  # than a fact about the machine: a `SKIP` here would be a green gate over the facts below, nothing measured.
+  docker image inspect "$base" >/dev/null 2>&1 ||
+    fail "$name/base" "no $base, so nothing here was measured: case_server_images builds it and runs first"
+  # The scratch tree is under `target/` and not `$WORK`, because its projects root is a **mount source**: a
+  # `mktemp -d` on a tmpfs `/tmp` is a directory the daemon creates empty rather than mounts (ADR-0035).
+  rm -rf "$root"
+  mkdir -p "$repo/docker" "$data" "$root/elsewhere" ||
+    fail "$name/mkdir" "could not make this case's scratch tree under $root"
+  # The recipe's first line is this run's id: `hs-tagged:<digest>` is a content address over the recipe's bytes, so
+  # two gate runs on one machine — two worktrees — would otherwise share one tag and each remove the other's image.
+  printf '# gate run %s\nFROM %s\n' "$$" "$base" >"$repo/docker/Dockerfile" ||
+    fail "$name/recipe" "could not write the fixture project's recipe"
+  # The three limits are the file's, and not left at their defaults: the line below asserts what they say, so a verb
+  # that read the numbers from somewhere other than this config would fail here.
+  printf 'owner = "%s"\nbackend = "stub"\nprojects_root = "%s"\ndata_root = "%s"\nbase_image = "%s"\ncontainer_cpus = 1\ncontainer_memory_mb = 512\ncontainer_pids = 128\nmin_free_gb = 1\n' \
+    "$owner" "$projects" "$data" "$base" >"$WORK/config-image-run.toml"
+
+  # One command as the data root's owner: the uid it ran as, the directory it started in, and a file it wrote, whose
+  # owner is the identity fact — the tree is the invoking uid's, so anything else is a container that could not write
+  # the tree it was given.
+  code=0
+  "$artifact" image run tagged --config "$WORK/config-image-run.toml" -- \
+    sh -c 'id -u; pwd; touch /work/probe && stat -c "%u" /work/probe' \
+    >"$WORK/$name.ok.out" 2>"$WORK/$name.ok.err" || code=$?
+  [ "$code" -eq 0 ] ||
+    fail "$name/run" "image run exited $code: $(tail -5 "$WORK/$name.ok.err")"
+  assertions=$((assertions + 1))
+  check "$name/run/uid" "$(id -u)" "$(sed -n '1p' "$WORK/$name.ok.out")"
+  check "$name/run/workdir" "/work" "$(sed -n '2p' "$WORK/$name.ok.out")"
+  check "$name/run/owner" "$(id -u)" "$(sed -n '3p' "$WORK/$name.ok.out")"
+  # The project's checkout is where the run started, which is the default the verb promises.
+  [ -f "$repo/probe" ] ||
+    fail "$name/run/checkout" "the run wrote no probe into the project's checkout, so /work was not $repo"
+  assertions=$((assertions + 1))
+  # The build's whole log is under the data root the config named, which is what proves the verb took its roots from
+  # that file and used the same build a create does rather than a second one.
+  [ -f "$data/images/hs-tagged.log" ] ||
+    fail "$name/log" "no $data/images/hs-tagged.log: the verb's build kept no log under the config's data root"
+  assertions=$((assertions + 1))
+
+  # The line: the whole shape in one place, which is what a project pastes into a pipeline that cannot have holosmith.
+  # It is parsed **before** the image, because the image is the line's own word: `projectimage` is the one composer of
+  # `hs-<project>:<digest>`, so a case that spelled the tag here would be a second composer, and a listing of the
+  # daemon's `hs-tagged:*` is every gate run's — two runs on one machine would each read, and later remove, the
+  # other's image.
+  line="$(sed -n 's/^holosmith: image run: \(docker run .*\)$/\1/p' "$WORK/$name.ok.err")"
+  [ -n "$line" ] || fail "$name/line" "the verb printed no \`docker run\` line: $(cat "$WORK/$name.ok.err")"
+  image="$(tr ' ' '\n' <<<"$line" | sed -n 's/^\(hs-tagged:[0-9a-f]\{1,\}\)$/\1/p' | head -1)"
+  [ -n "$image" ] || fail "$name/line/image" "the printed line names no hs-tagged image: $line"
+  docker image inspect "$image" >/dev/null 2>&1 ||
+    fail "$name/line/image" "the printed line names $image and this daemon has no such image: $line"
+  assertions=$((assertions + 1))
+  for want in \
+    " -i " " --rm " " --init " " --cap-drop ALL " " --security-opt no-new-privileges " \
+    " --workdir /work " " --cpus 1 " " --memory 512m " " --pids-limit 128 " \
+    " --user $(id -u):$(id -g) " " --network none " " -v $repo:/work "; do
+    case " $line " in
+      *"$want"*) ;;
+      *) fail "$name/line/flags" "the printed line is missing '$want': $line" ;;
+    esac
+    assertions=$((assertions + 1))
+  done
+
+  # The command's own status is the verb's: 7 here, handed back rather than translated, and the verb adds no code of its
+  # own to it.
+  code=0
+  "$artifact" image run tagged --config "$WORK/config-image-run.toml" -- sh -c 'exit 7' \
+    >/dev/null 2>"$WORK/$name.exit.err" || code=$?
+  [ "$code" -eq 7 ] ||
+    fail "$name/exit" "image run exited $code for a command that exits 7: $(tail -2 "$WORK/$name.exit.err")"
+  assertions=$((assertions + 1))
+
+  # `--work` overrides the checkout: the same run, in a directory the case made, finds the file only that directory
+  # has. Without the flag this run would see the checkout and not this marker.
+  printf 'elsewhere\n' >"$root/elsewhere/marker"
+  code=0
+  work="$("$artifact" image run tagged --config "$WORK/config-image-run.toml" --work "$root/elsewhere" -- \
+    sh -c 'pwd; cat /work/marker' 2>"$WORK/$name.work.err")" || code=$?
+  [ "$code" -eq 0 ] ||
+    fail "$name/work/exit" "image run --work exited $code: $(tail -3 "$WORK/$name.work.err")"
+  check "$name/work/pwd" "$(printf '/work\nelsewhere')" "$work"
+  assertions=$((assertions + 1))
+
+  # The image is this case's alone and goes on a green run, with the scratch tree the runs wrote into.
+  timeout 120 docker image rm -f "$image" >/dev/null 2>&1 || true
   rm -rf "$root"
 }
 
