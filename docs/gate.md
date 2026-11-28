@@ -103,6 +103,12 @@ session can build with is a property of the image it was started from. `case_age
 `case_server_images` is where that image is built — from the project's own recipe, by the same `docker build` a session's
 first start runs (ADR-0126).
 
+What replaces those two is decided and not yet written (ADR-0128): one case whose subject image is a **fixture project**
+— a recipe `FROM` the base image plus a `COPY` of a recorded npm cache, so it carries node and no compiler — and whose
+four facts are the session's shape rather than this tree's toolchain: a build as the invoking uid, `--network none`, a
+cache read-only for that uid while npm's log land is `/tmp`, and npm's own sentence for a package the image does not
+hold. It costs seconds, because the layer its `COPY` makes is cached and nothing is fetched at case time.
+
 The three image cases after it are the **lazy** half (ADR-0124): `case_project_image` makes a project carry a
 `docker/Dockerfile` and lets its first session build `hs-<project>:<digest>`, `case_project_image_failure` gives one a
 `RUN` that exits non-zero, and `case_base_image_lazy` removes `holosmith-base` and lets a session in a project with no
