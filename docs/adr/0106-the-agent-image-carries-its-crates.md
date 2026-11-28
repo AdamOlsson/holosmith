@@ -27,6 +27,15 @@ dependencies into `/opt/cargo-vendor` (105 crates, 108 MB) and `npm ci` fills `/
 `web/package-lock.json`. What both steps read is the six-file crate set the build context already carries
 (`images::AGENT_CONTEXT`), so no second build path and no new context entry was needed.
 
+**Superseded in part by ADR-0131:** the vendored crate set and the npm cache stay in the image this repository's
+sessions run, and stop being a **product** fact. `agent.Dockerfile` is deleted (ADR-0126), so no image the product
+ships carries either set; what carries them is this repository's own recipe, `docker/Dockerfile` over the base image,
+giving `hs-holosmith:<digest>` to this tree's sessions. The two instructions this record decided — `cargo vendor
+--locked` into `/opt/cargo-vendor` with the lock's digest beside it, and `npm ci` into `/opt/npm-cache` behind
+`npm_config_offline` — are that recipe's own now, and a project that vendors content writes its own (ADR-0123,
+ADR-0127). The `case_agent_toolchain` and `case_agent_offline_build` arms the body names are deleted (ADR-0129), so
+what a build in that image does is this repository's own CI's claim and no gate case asserts it (ADR-0131).
+
 ## D1 — vendored, not a warm registry
 
 The gate's answer until now was a **warm registry**: `case_agent_toolchain` copied `$CARGO_HOME/registry` out of the

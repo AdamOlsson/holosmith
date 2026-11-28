@@ -16,6 +16,14 @@ gate in. `server deploy`'s step 3 builds three images: proxy, base, agent.
 The key is `base_image`, defaulted to this decision's `holosmith-base:<version>`, and the agent image is what a
 machine whose projects are this tree names explicitly.
 
+**Superseded in part by ADR-0131:** of the three images this record names, the third — the one that carried this
+repository's toolchain — is not a product image any more, and what it carries stops being a **product** fact.
+`agent.Dockerfile` is deleted (ADR-0126), so `server deploy` builds the proxy and the base; the third is this
+repository's own **project** image, `hs-holosmith:<digest>` over `docker/Dockerfile` (ADR-0123, ADR-0126). Everything
+below that describes the base stands as product fact, and everything that describes what the third image holds is true
+of that recipe — a fact its own CI owns now, because the gate measures the shape a session's build runs in and no
+longer compiles this tree in that image (ADR-0129, ADR-0131).
+
 **Supersedes ADR-0057's** sentence that "the two images are built from Dockerfiles embedded in the binary". That
 decision's subject was *where the recipe lives* — inside the artifact, because a deploy runs on a machine that has the
 artifact and nothing else — and it is unchanged: there are three `include_str!`ed recipes now, and

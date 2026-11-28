@@ -19,6 +19,13 @@ that the agent image carries the toolchain the tree is written in, as part of th
 more. `agent_toolchains` is gone, and the two packages it named by default — `python3` and `ripgrep` — are literals
 in the same `apt-get` line as the toolchain.
 
+**Superseded in part by ADR-0131:** the toolchain stays in the image this repository's sessions run, and stops being a
+**product** fact. ADR-0126 deleted `agent.Dockerfile`, so the product ships two recipes and neither carries a
+compiler; what carries one is this repository's own recipe, `docker/Dockerfile` over the base image, giving
+`hs-holosmith:<digest>` to this tree's sessions and to nothing else. Every statement below is true of that recipe — and
+the gate stopped asserting it: the cases that compiled this tree in it are deleted (ADR-0129), so "this tree builds in
+this image, offline" is this repository's own CI's claim now and not the product's (ADR-0131).
+
 ## D1 — unconditional, not a variant image
 
 The toolchain goes into `crates/holosmith/images/agent.Dockerfile`, the recipe `server deploy`'s step 3 builds and

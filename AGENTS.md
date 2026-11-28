@@ -322,8 +322,8 @@ that**: a case that compiled this repository inside that image was a project mea
 so what the gate measures now is the **shape** a session's build runs in — `case_session_build`, whose subject is a
 fixture project carrying node and no compiler, and whose facts are the invoking uid, `--network none`, a cache that uid
 reads and cannot write, and npm's own sentence for a package the image does not hold (ADR-0128). A project's build
-inside its own image — this one's included — belongs to that project's own CI, which gets the same shape as one
-command: `holosmith image run <project> -- <cmd>` (ADR-0130). `--locked` is the flag to keep; anything that would
+inside its own image — this one's included — belongs to that project's own CI (ADR-0131), which gets the same shape as
+one command: `holosmith image run <project> -- <cmd>` (ADR-0130). `--locked` is the flag to keep; anything that would
 move the lock is a host's work. A project that is not this one gets exactly what its own image installed, and the
 measurements below are this tree's.
 

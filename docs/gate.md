@@ -105,8 +105,8 @@ host, not a compiler. What a session can build with is therefore its **project's
 this repository's is `hs-holosmith:<digest>` over `docker/Dockerfile`, and `case_server_images` is where the gate builds
 it — from the project's own recipe, by the same `docker build` a session's first start runs (ADR-0126). So what the gate
 measures is the **shape** a session's build runs in, on a fixture project, and a project's build inside its own image —
-this one's included — is that project's own CI's business, with `holosmith image run <project> -- <cmd>` giving that CI
-the same shape as one command.
+this one's included — is that project's own CI's business (ADR-0131), with `holosmith image run <project> -- <cmd>`
+giving that CI the same shape as one command.
 
 The shape has one case, `case_session_build` (ADR-0128): its subject image is a **fixture project**
 — a recipe `FROM` the base image plus a `COPY` of a recorded npm cache, so it carries node and no compiler — and its
