@@ -103,7 +103,7 @@ session can build with is a property of the image it was started from. `case_age
 `case_server_images` is where that image is built — from the project's own recipe, by the same `docker build` a session's
 first start runs (ADR-0126).
 
-What replaces those two is decided and not yet written (ADR-0128): one case whose subject image is a **fixture project**
+What replaces those two is `case_session_build` (ADR-0128): one case whose subject image is a **fixture project**
 — a recipe `FROM` the base image plus a `COPY` of a recorded npm cache, so it carries node and no compiler — and whose
 four facts are the session's shape rather than this tree's toolchain: a build as the invoking uid, `--network none`, a
 cache read-only for that uid while npm's log land is `/tmp`, and npm's own sentence for a package the image does not

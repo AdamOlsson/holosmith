@@ -1,0 +1,8 @@
+{
+  "name": "holosmith-build-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "inherits": "2.0.4"
+  }
+}
