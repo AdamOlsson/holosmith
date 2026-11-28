@@ -60,13 +60,17 @@ One command proves the tree:
 scripts/verify.sh
 ```
 
-It takes about half an hour on this host once `target/` is warm, and nearer forty in a fresh worktree
-(~5 min 20 s of it the session offline build case). It is 34 to 43 minutes when the image cases rebuild
-every layer of this repository's own image, from the recipe at `docker/Dockerfile` (two such runs measured here: 34 and
-43 minutes). The tags `case_server_images` removes are not what costs that: a removal leaves the layer cache intact, so
-the build after it is **0.73 s with every layer `CACHED`**, and a new commit's rebuild is nearly as cheap now that the
-three label-only build arguments sit below every `RUN` — a changed git tag used to bust every one of them, for values
-nothing above `LABEL` reads (ADR-0115). Green is its last line: `verify: <n> assertions, ok`.
+It takes 1149 s, about nineteen minutes, on this host once `target/` is warm — 619 s of it the serve phase, and a
+fifth of it `case_server_images`, which builds the three images — and a cold worktree with an empty `target/` adds the
+compile: the release build alone, from an empty `target/` in this tree, was 2 m 17 s, a second measurement here and not
+part of that run. What the image cases cost is the machine's layer cache, not the tags `case_server_images` removes:
+a removal leaves the cache intact, and the three label-only build arguments sit below every `RUN` — a changed git tag
+or a rebuilt binary used to bust every one of them, for values nothing above `LABEL` reads (ADR-0115). But a `RUN` the
+cache cannot answer is a `RUN` that runs again, and the run above shows both answers: the base's two `RUN`s re-ran
+in `case_base_image_lazy` — about 11 s of its 45 s — while `case_server_images`'s 236 s is this repository's
+project image built over a base the cache answered, about 100 s of it the musl cross-toolchain fetch. A project's
+image is `FROM` the base, so a rebuilt base is every layer of this tree's recipe above it (ADR-0126).
+Green is its last line: `verify: <n> assertions, ok`.
 A `FAIL case_x/assertion` line above it names the case and the assertion; a case that cannot measure its
 fact prints `SKIP` with the reason instead of passing quietly. The count moves as cases are added, so read
 the shape of that line, not its number. It wants a working Docker daemon for the container cases.
@@ -197,7 +201,7 @@ A cleanup problem warns and never fails the gate: a leftover listener on a pinne
 the case that wanted it.
 
 A worker's full gate is **one run, at the end of its turn**. A second run answers a question the first is
-still answering, and holding one `bash` call open for the whole half hour is the mistake this rule
+still answering, and holding one `bash` call open for the whole run is the mistake this rule
 exists to prevent: the call outlives the worker, and the run ends with nothing said. If the work is cut
 short, report the changed files, the gate state you last saw and what remains, rather than begin again.
 
@@ -313,10 +317,13 @@ This repository is the project that needs a Rust toolchain, so its own image is 
 pinned rustc, this tree's crate set vendored beside it and the web app's packages in its npm cache (ADR-0106,
 ADR-0126). A machine whose projects are this tree needs no `base_image` key at all: the resolver finds the recipe, and a
 session there — no network, nothing mounted, `CARGO_HOME` empty — runs `cargo build --locked`, `cargo fmt`,
-`cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag. `scripts/build.sh` too, and the gate proves it:
-`case_agent_toolchain` runs `cargo build --locked`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-`cargo test` and `npm ci` inside that image under `--network none`, and `case_agent_offline_build` runs
-`scripts/build.sh` there and reads `file -b` on the musl artifact. `--locked` is the flag to keep; anything that would
+`cargo clippy`, `cargo test` and `npm ci`/`npm test` with no flag, and `scripts/build.sh` too. **The gate does not prove
+that**: a case that compiled this repository inside that image was a project measuring itself inside the product's gate,
+so what the gate measures now is the **shape** a session's build runs in — `case_session_build`, whose subject is a
+fixture project carrying node and no compiler, and whose facts are the invoking uid, `--network none`, a cache that uid
+reads and cannot write, and npm's own sentence for a package the image does not hold (ADR-0128). A project's build
+inside its own image — this one's included — belongs to that project's own CI, which gets the same shape as one
+command: `holosmith image run <project> -- <cmd>` (ADR-0130). `--locked` is the flag to keep; anything that would
 move the lock is a host's work. A project that is not this one gets exactly what its own image installed, and the
 measurements below are this tree's.
 
@@ -543,7 +550,9 @@ next boot resumes them.
 - The workspace root has one member, so a command from the root needs `-p holosmith`
   (`cargo run -p holosmith -- version`).
 - **The fetch-nothing proof**, once per target: `cargo fetch --locked`, then a release build under
-  `docker run --network none` (the shape `case_agent_offline_build` runs); `scripts/check-static.sh` also rejects a
+  `docker run --network none` in this repository's own image, `hs-holosmith:<digest>`. No case runs it any more — the gate
+  stopped compiling this tree inside a container — so it is a host's own act, and `scripts/verify-in-container.sh` is not
+  a substitute, because it runs on the host's network. `scripts/check-static.sh` also rejects a
   `source = "git+…"` entry in `Cargo.lock`. It covers cargo only: the binary embeds the web app, so a cargo-only build
   of a clone without `web/dist` still succeeds and serves a placeholder — build the app first and with
   `HOLOSMITH_REQUIRE_WEB=1`, which `scripts/build.sh` always does.
