@@ -143,8 +143,8 @@ fn workspace_version(manifest: &str) -> String {
 /// Every file in the worktree except build output and git history, for trees with no `.git` to list tracked files
 /// from.
 fn walk_files(root: &Path) -> Vec<String> {
-    // The same four `scripts/verify.sh`'s toolchain case leaves out of its copy: none holds a tracked file, and
-    // `web/node_modules` holds packages whose sources are not this tree's.
+    // Build output and installed packages: none holds a tracked file, and `web/node_modules` holds packages whose
+    // sources are not this tree's.
     const SKIPPED: [&str; 4] = [".git", "target", "dist", "node_modules"];
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];

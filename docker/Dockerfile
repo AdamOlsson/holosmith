@@ -175,9 +175,9 @@ COPY web/package.json web/package-lock.json /tmp/web/
 #
 # The lock's own digest is written beside the crates, in the instruction that vendored them, so it is derived and cannot
 # disagree with them: it is the one value that says whether a vendor directory is *this* tree's crate set, and
-# `scripts/verify.sh`'s `case_agent_toolchain` compares it with the tree's `Cargo.lock` rather than trusting that two
-# versions of a file agree. `a+rX` because a session runs as the data root's owner, which is neither root nor the
-# image's `node` (ADR-0087), and reading these files is all it may do with them.
+# `scripts/check-crate-set.sh` compares it with the tree's `Cargo.lock` rather than trusting that two versions of a
+# file agree. `a+rX` because a session runs as the data root's owner, which is neither root nor the image's `node`
+# (ADR-0087), and reading these files is all it may do with them.
 RUN cd /tmp/vendor-src \
  && CARGO_HOME=/tmp/cargo-vendor-home cargo vendor --locked /opt/cargo-vendor \
  && sha256sum Cargo.lock | cut -d' ' -f1 > /opt/cargo-vendor/.holosmith-cargo-lock \

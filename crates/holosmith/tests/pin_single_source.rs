@@ -269,9 +269,8 @@ fn the_manifests_rust_floor_is_the_pins_major_minor() {
 /// Every file in the worktree except build output and git history, for trees with no
 /// `.git` to list tracked files from.
 fn walk_files(root: &Path) -> Vec<String> {
-    // Build output and installed packages, the same ones `scripts/verify.sh`'s toolchain case leaves out of
-    // its copy: none holds a tracked file, and `web/node_modules` holds a package's version string that is
-    // not this tree's pin.
+    // Build output and installed packages: none holds a tracked file, and `web/node_modules` holds a package's
+    // version string that is not this tree's pin.
     const SKIPPED: [&str; 4] = [".git", "target", "dist", "node_modules"];
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
