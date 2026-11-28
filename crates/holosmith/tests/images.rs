@@ -4,8 +4,9 @@
 //! Two halves, and the split is the design:
 //!
 //! - **The shapes are asserted without a daemon.** The embedded Dockerfiles are compared with the files under
-//!   `crates/holosmith/images/`, `docker/Dockerfile` is read from the tree, and the two spellings of a project's tag —
-//!   `projectimage::resolve`'s and `scripts/project-image.sh tag`'s — are compared with each other (so moving or
+//!   `crates/holosmith/images/`, `docker/Dockerfile` is read from the tree, the tree's own `.cargo/config.toml` is read
+//!   and asserted to shadow none of the source replacement the recipe writes, and the two spellings of a project's
+//!   tag — `projectimage::resolve`'s and `scripts/project-image.sh tag`'s — are compared with each other (so moving or
 //!   rewriting one breaks this test rather than a release), the archive is parsed as a
 //!   ustar and read back with the `tar` program every machine this repo builds on has, the label comparison is
 //!   driven over four arms, and the failure sentence is fed the output this machine's daemon printed for a broken
@@ -398,11 +399,44 @@ fn project_recipe() -> String {
         .unwrap_or_else(|error| panic!("{} is not readable: {error}", path.display()))
 }
 
+/// This tree's own `.cargo/config.toml`, read from the tree.
+///
+/// Cargo reads a `.cargo/config.toml` from the working directory upward, so this file — at `/work/.cargo` in a session,
+/// because a session's worktree is `/work` — is **nearer** than the image's `/.cargo/config.toml`, and its tables win
+/// where the two name the same thing. A `[source…]` table or a dotted `source…` key here therefore *shadows* the source
+/// replacement the recipe writes at the filesystem root instead of merging with it, and the symptom a session reports
+/// is an empty vendor directory rather than a config conflict (ADR-0106). An absent file is a failure and never a pass:
+/// it is tracked, and cargo would then read only the image's.
+fn tracked_cargo_config() -> String {
+    let path = project_root().join(".cargo/config.toml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} is not readable: {error}", path.display()))
+}
+
+/// The lines of a cargo config that would shadow the image's source replacement: every table header that is not a
+/// `[target…]` one, and every dotted top-level key beginning `source`.
+///
+/// Every header and not only a `[source…]` one, because TOML spells one table two ways and the file's own bytes are
+/// what is asserted here: the rule is then total for the shadowing case, and a header nobody anticipated is caught by
+/// it as well instead of being a table the rule never looked at.
+/// A comment is excluded by construction: a TOML comment begins with `#`, which is neither a bracket nor `source`.
+fn source_shadowing_lines(config: &str) -> Vec<String> {
+    config
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| match line.strip_prefix('[') {
+            Some(_) => !line.starts_with("[target"),
+            None => line.starts_with("source"),
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn the_project_recipe_vendors_its_crates_and_points_cargo_at_them() {
     // A Dockerfile-shaped claim, so it is asserted here and not in a case that needs a daemon: the order of two
     // instructions and the agreement between a path written in one and the path another one names are exactly what a
-    // mis-edit breaks, and what the gate's `case_agent_toolchain` would report as a network failure five minutes in.
+    // mis-edit breaks, and the symptom three minutes into an image build is a fetch the image's cache cannot answer.
     let recipe = project_recipe();
     let blocks = instructions(&recipe);
 
@@ -532,6 +566,46 @@ fn the_project_recipe_vendors_its_crates_and_points_cargo_at_them() {
     assert!(
         npm_env.contains("npm_config_logs_dir=/tmp/npm-logs"),
         "npm's logs directory is the read-only cache: {npm_env}"
+    );
+}
+
+#[test]
+fn the_tracked_cargo_config_shadows_none_of_the_images_source_replacement() {
+    // The tree-side half of the source replacement the assertion above writes into the image, and a test of its own
+    // rather than an arm of that one: its subject is a tree file the recipe never writes, and it is exactly the kind of
+    // claim a mis-edit breaks silently — a `[source…]` table added under the tree's `.cargo` wins over the image's, and
+    // the build then fails somewhere else. No daemon is needed to read a tracked file, which is why this lives here and
+    // not in a case that copies the tree into an image.
+    let shadowing = source_shadowing_lines(&tracked_cargo_config());
+    assert!(
+        shadowing.is_empty(),
+        "the tracked .cargo/config.toml carries a table or a dotted key that would shadow the image's source \
+         replacement at /.cargo/config.toml, and a session's build would fail as an empty vendor directory: {shadowing:?}"
+    );
+}
+
+#[test]
+fn a_source_table_or_a_dotted_source_key_is_what_the_shadowing_rule_catches() {
+    // The rule's negative sample: the tree's own file is clean today, so a rule that answered `[]` to everything would
+    // make the assertion above vacuous, and a mutation of it fails here rather than in a build nobody runs locally.
+    let table = "# a comment naming [source.crates-io] is not a table\n\
+                 [target.x86_64-unknown-linux-musl]\n\
+                 linker = \"x86_64-linux-musl-gcc\"\n\
+                 \n\
+                 [source.crates-io]\n\
+                 replace-with = \"vendored-sources\"\n";
+    assert_eq!(
+        source_shadowing_lines(table),
+        ["[source.crates-io]"],
+        "a [source…] table is the shadowing the rule exists for"
+    );
+    let dotted = "[target.x86_64-unknown-linux-musl]\n\
+                  linker = \"x86_64-linux-musl-gcc\"\n\
+                  source.crates-io.replace-with = \"vendored-sources\"\n";
+    assert_eq!(
+        source_shadowing_lines(dotted),
+        ["source.crates-io.replace-with = \"vendored-sources\""],
+        "the dotted spelling of the same table shadows the replacement just as surely"
     );
 }
 

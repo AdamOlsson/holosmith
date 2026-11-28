@@ -22,10 +22,10 @@
 # and without an image; only the path moves, never the sentence. Nothing goes to stdout: a preflight that chatters is
 # noise in every run's first lines, and the one failure prints its sentence on stderr.
 #
-# The marker's path is a literal with three readers — this script, `scripts/verify.sh`'s `case_agent_toolchain`, and
-# `crates/holosmith/tests/images.rs` — and its one writer is the recipe's `sha256sum Cargo.lock` line. Three readers
-# of a literal are cheaper to follow than a shared definition a Dockerfile's `RUN` would have to carry too, so the
-# path is spelled here rather than sourced from `scripts/gates.sh`.
+# The marker's path is a literal with one reader of its content — this script — and one test that asserts the recipe
+# writes it, `crates/holosmith/tests/images.rs`; the one writer is the recipe's `sha256sum Cargo.lock` line. A spelled
+# literal is cheaper to follow than a shared definition a Dockerfile's `RUN` would have to carry too, so the path is
+# spelled here rather than sourced from `scripts/gates.sh`.
 
 set -euo pipefail
 

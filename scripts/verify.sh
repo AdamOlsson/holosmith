@@ -661,8 +661,6 @@ serve_cases=(
   case_project_image_failure
   case_base_image_lazy
   case_session_build
-  case_agent_toolchain
-  case_agent_offline_build
   case_smoke
   case_upgrade
   case_rollback
@@ -12100,9 +12098,9 @@ case_server_images() {
   else
     fail "$name/project/present" "$project is not on this machine after its build"
   fi
-  # The image's own toolchain is `case_agent_toolchain`'s subject; what is asserted here is the one fact this case can
-  # see that no Rust test can — that the recipe the resolver names is the recipe the daemon built. `pi` comes from the
-  # base, so an image with no `pi` is an image built over the wrong base.
+  # The toolchain the recipe installs is this project's own claim, made out of tree and not by this gate, so what is
+  # asserted here is the one fact this case can see that no Rust test can: that the recipe the resolver names is the
+  # recipe the daemon built. `pi` comes from the base, so an image with no `pi` is an image built over the wrong base.
   answer="$(timeout 300 docker run --rm --network none --entrypoint pi "$project" --version 2>&1)" ||
     fail "$name/project/pi" '`pi --version` did not run in the project image: '"$answer"
   check "$name/project/pi/version" "$pin" "$(sed -n '1s/^[^0-9]*//p' <<<"$answer" | tr -d '[:space:]')"
@@ -12687,10 +12685,11 @@ case_base_image_lazy() {
 
 # A build in a session's shape: the **container** a build runs in, not the toolchain it builds with (ADR-0128).
 #
-# `case_agent_toolchain` and `case_agent_offline_build` measure **this repository's** tree compiling in **this
-# repository's** image. A project owns its recipe and the toolchain that recipe installs (ADR-0123, ADR-0126), so that
-# is this project's own CI claim. What is Holosmith's, and measured nowhere else, is the shape a session's build runs
-# in — four facts, and each one fails a build that leans on something a session does not have:
+# This repository's tree compiling in this repository's image is **this project's own claim, out of tree**: a project
+# owns its recipe and the toolchain that recipe installs (ADR-0123, ADR-0126), and two cases measured it until
+# `docs/adr/0129-what-the-two-deleted-cases-leave.md` (ADR-0129) deleted them. No case does now, and that record names
+# what owns each half of it. What is Holosmith's, and measured nowhere else, is the shape a session's build runs in —
+# four facts, and each one fails a build that leans on something a session does not have:
 #
 #   identity  the run is the invoking uid (`--user "$(id -u):$(id -g)"` — the data root's owner, which is what
 #             `container.rs` passes), not root and not the image's own user. That uid may have **no passwd entry**
@@ -12842,14 +12841,16 @@ case_session_build() {
     fail "$name/invoking/log" \
       "npm wrote no debug log under the mount at /tmp/npm-logs, so its writes did not land where the recipe sends them: $(ls -a "$logs")"
   assertions=$((assertions + 1))
-  # The other half of `readable`: a cache this uid can read is not a cache it may write. Inside the image the recorded
-  # tree is root's and carries no group or other write bit — which is why the recipe moves npm's log to `/tmp`, since
-  # npm's default is `<cache>/_logs` and it would have to create that inside the cache. The log assertion above cannot
-  # see a recipe that loosened the cache, because the mount answers the log wherever the cache allows a write too; this
-  # one names every entry that broke either half, after the installs that could have moved it.
+  # The other half of `readable`: a cache this uid can read is not a cache it may write. "Read-only" here is that this
+  # run cannot write it — find's `-writable`, asked as the run's own identity — not a claim about the group or other
+  # bits, which are the checkout's umask rather than the repository's: git records no mode beyond a file's exec bit, and
+  # a `-perm /022` arm measured the shell that made the worktree. Which is why the recipe moves npm's log to `/tmp`,
+  # since npm's default is `<cache>/_logs` and it would have to create that inside the cache. The log assertion above
+  # cannot see a recipe that loosened the cache, because the mount answers the log wherever the cache allows a write
+  # too; this one names every entry that broke either half, after the installs that could have moved it.
   code=0
   timeout 60 docker run --rm --user "$(id -u):$(id -g)" "${shape[@]}" --entrypoint find "$tag" \
-    /opt/npm-cache \( ! -user 0 -o ! -group 0 -o -perm /022 \) -printf '%u:%g %m %p\n' \
+    /opt/npm-cache \( ! -user 0 -o ! -group 0 -o -writable \) -printf '%u:%g %m %p\n' \
     >"$WORK/$name.cache.out" 2>&1 || code=$?
   [ "$code" -eq 0 ] && [ ! -s "$WORK/$name.cache.out" ] ||
     fail "$name/cache/mode" \
@@ -12914,191 +12915,6 @@ case_session_build() {
 
   # The image is this case's alone and goes on a green run, with the scratch tree the arms wrote into.
   timeout 120 docker image rm -f "$tag" >/dev/null 2>&1 || true
-  rm -rf "$root"
-}
-
-# This project's own image can run this tree's own gate: rustc, cargo, rustfmt, clippy and the musl cross linker, at
-# the version the recipe pins, and the crates and npm packages the tree builds from inside the image itself (ADR-0105,
-# ADR-0106). The recipe is `docker/Dockerfile`, and it is also the image the gate's own container runs in, so this case
-# is the one place a session's container and the gate's container are measured to be one artifact (ADR-0126).
-#
-# The case's whole reason is that a **host cannot answer an image question**. `cargo fmt` on the gate's machine says
-# nothing about what a session's container holds, and the image is what a session runs: so the commands a worker
-# runs are the commands measured here, in a container shaped exactly like a session's — `--network none`, the
-# invoking uid (`--user "$(id -u):$(id -g)"`, because `container.rs` passes the data root's owner, which is *not*
-# the image's `node`), and a session's limits (`--cpus 2 --memory 4096m`) so what is measured is the product's shape
-# rather than a generous one.
-#
-# The numbers, measured on this host, are why the shape is what it is: the image is ~3.5 GB (725 MB before the
-# toolchain and the crate set), `cargo fmt --check` answers in 1 s, `cargo clippy --all-targets` in ~38 s, `cargo
-# test --no-run` in ~2 min, and one full `cargo test` writes **8.9 GB** of `target/`. So the tree is **copied** into
-# this case's own directory under `$repo_root/target/` rather than mounted writable (`$WORK` is a `mktemp -d` on a
-# tmpfs the daemon may not see, ADR-0035's rule), and nothing is left behind but the image.
-#
-# `--network none` is the point — a session's container reaches only the proxies — so nothing can be fetched. Nothing
-# has to be: the image carries the crate set (`/opt/cargo-vendor`, written by the recipe's own `cargo vendor --locked`)
-# and the npm cache (`/opt/npm-cache`), and `/.cargo/config.toml` plus the `npm_config_*` environment are what point a
-# bare `cargo build --locked` and a bare `npm ci` at them (ADR-0106). **Nothing is mounted over `CARGO_HOME` and no
-# command below passes `--offline`**: both are the fact this case measures, because they are what a worker relies on
-# and the two things a warm registry mount used to hide.
-#
-# The image is this repository's own **project** image — `hs-holosmith:<digest>` over `docker/Dockerfile`, the same
-# image a session here runs (ADR-0126) — which `case_server_images` builds and leaves in place: it removes the tag at
-# its start, so the tag read here is one built from **this** tree, and the ordering in `serve_cases` is what makes that
-# true. It is also the image the gate's own container is, which is why `python3` and `ripgrep` are this recipe's: the
-# `SKIP` lines `cargo test` prints below are the measurement that a gate run here lost nothing.
-case_agent_toolchain() {
-  local name=case_agent_toolchain root="$repo_root/target/verify-toolchain-$$"
-  local project pinned answer code tree status headers dotted
-  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-    printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
-    return 0
-  fi
-  project="$(project_image)" ||
-    fail "$name/tag" "this tree's project image tag could not be composed, so the image a session runs here was not measured"
-  if ! docker image inspect "$project" >/dev/null 2>&1; then
-    printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
-      "$name" "$project"
-    return 0
-  fi
-  # The version the pin holds, read out of `pins/rust.txt`: a literal here would be a second copy of the pin. The
-  # file's one value is the whole reference — tag and digest — so the version is the part before the first `-`.
-  pinned="$(tr -d '[:space:]' <"$repo_root/pins/rust.txt")"
-  pinned="${pinned%%-*}"
-  case "$pinned" in
-    '' | *[!0-9.]*) fail "$name/pin" "pins/rust.txt names no rust version to compare against: '$pinned'" ;;
-  esac
-
-  rm -rf "$root"
-  mkdir -p "$root"
-  # The session's runtime, as a session mounts it: a copy, so a `--network none` run has the source and not the
-  # operator's tree, and the copy — not `target/` — is what gets built. The copy is **`git ls-files`**: the tracked
-  # tree, byte for byte as it stands (a dirty tree is what a worker's tree is), so what runs in the container is what
-  # this repository would commit. `.git` is not there for the reason a session's history is not the point of a build,
-  # and because a test that found it would write to the operator's own repository; build output (`target/`,
-  # `web/dist`, `node_modules`) and whatever else this run left in the tree are untracked, so they go by construction
-  # rather than by a list that could miss one — a stray file with the pinned version in it broke this once.
-  tree="$root/src"
-  mkdir -p "$tree"
-  git -C "$repo_root" ls-files -z | tar -C "$repo_root" --null -T - -cf - | tar -C "$tree" -xf - ||
-    fail "$name/copy" "could not copy the tracked tree into $tree"
-  assertions=$((assertions + 1))
-
-  # One shape for every run, because the point is that it is a session's and not a convenient one: no network,
-  # the invoking uid, the session's limits, and the copied tree writable at `/src`. Nothing is mounted over
-  # `CARGO_HOME=/tmp/cargo` — it starts empty, as it does for a session, and the crates come from the image.
-  in_image() {
-    local entrypoint="$1"
-    shift
-    docker run --rm --network none \
-      --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-      -v "$tree:/src" -w /src \
-      --entrypoint "$entrypoint" "$project" "$@" 2>&1
-  }
-
-  # The compiler is the one the recipe pins, asked of the toolchain rather than of the recipe's text again.
-  answer="$(in_image cargo --version)" || fail "$name/cargo" "cargo does not run in this project image: $answer"
-  check "$name/cargo/version" "cargo $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
-  answer="$(in_image rustc --version)" || fail "$name/rustc" "rustc does not run in this project image: $answer"
-  check "$name/rustc/version" "rustc $pinned" "$(printf '%s\n' "$answer" | sed -n '1s/ (.*//p')"
-  # The cross linker, by name: the tree's own `.cargo/config.toml` names it for the one release target, and a session
-  # that cannot find it gets a linker-not-found that reads like a code error.
-  for linker in x86_64-linux-musl-gcc; do
-    answer="$(in_image "$linker" --version)" ||
-      fail "$name/$linker" "$linker does not run in this project image: $answer"
-    case "$answer" in
-      *"$linker"*) assertions=$((assertions + 1)) ;;
-      *) fail "$name/$linker/version" "$linker answered something else: $answer" ;;
-    esac
-  done
-
-  # The vendored crate set is **this** tree's: the recipe records the digest of the `Cargo.lock` it vendored with, and
-  # the copy at `/src` is the tree this commit would make. A lock that reached one and not the other is a build against
-  # another tree's crates, which is the failure the digest exists for.
-  answer="$(in_image cat /opt/cargo-vendor/.holosmith-cargo-lock | tr -d '\n')"
-  check "$name/vendor/lock" "$(sha256sum "$tree/Cargo.lock" | cut -d' ' -f1)" "$answer"
-
-  # The crate set is only half of a source replacement; the other half is the image's `/.cargo/config.toml` at the
-  # filesystem root. Cargo reads `.cargo/config.toml` from the working directory upward, so a `[source…]` table in
-  # **this** tree's file — at `/src/.cargo`, nearer than the root — would shadow the image's replacement instead of
-  # merging with it, and the symptom a session would report is an empty vendor directory, not a config conflict. So
-  # the file the copy at `/src` builds with is asserted positively — its own bytes, every table header in it one of
-  # the `[target.…]` ones it is known for (the linkers and `relocation-model`) — which is total for the rule and also
-  # catches a header nobody anticipated. Two greps, because TOML spells one table twice: a header may have whitespace
-  # before its `[`, so `^[[:space:]]*\[` is read and then filtered down to what is not a `[target` one; and the
-  # dotted top-level form (`source.crates-io.replace-with = "…"`) has no bracket at all while shadowing the
-  # replacement just the same, so a line whose key starts `source` gets its own grep. An absent file is a failure and
-  # not a pass, because the copy is the tracked tree: if it is gone here, it went missing on the way.
-  [ -f "$tree/.cargo/config.toml" ] ||
-    fail "$name/config/file" \
-      "the tracked .cargo/config.toml did not reach the copy at $tree, so the linkers a musl build reads are not there to assert"
-  headers="$(grep -En '^[[:space:]]*\[' "$tree/.cargo/config.toml" | grep -vE ':[[:space:]]*\[target')"
-  [ -z "$headers" ] ||
-    fail "$name/config/table" \
-      ".cargo/config.toml carries a table that is not a [target…] one, and a [source] table would shadow the image's replacement at /.cargo/config.toml: $headers"
-  assertions=$((assertions + 1))
-  dotted="$(grep -En '^[[:space:]]*source' "$tree/.cargo/config.toml")"
-  [ -z "$dotted" ] ||
-    fail "$name/config/source" \
-      ".cargo/config.toml carries a dotted source key, which shadows the image's replacement at /.cargo/config.toml as surely as a [source] table does: $dotted"
-  assertions=$((assertions + 1))
-
-  # The commands a worker runs, in that order and from the copied tree. `cargo build --locked` is the acceptance's own
-  # fact — no flag beyond the lock, so a build that wanted the network would fail here rather than on a machine that
-  # happens to have a proxy allow-list. `cargo test` is the one whose failure mode is a hang, so it is named and
-  # removed rather than left to `--rm` when a `timeout` kills the CLI (a killed `docker` does not stop its container).
-  code=0
-  timeout 900 docker run --rm --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint cargo "$project" build --locked >"$WORK/$name.build.out" 2>&1 || code=$?
-  [ "$code" -eq 0 ] || fail "$name/build" "cargo build --locked exited $code: $(tail -20 "$WORK/$name.build.out")"
-  assertions=$((assertions + 1))
-  code=0
-  timeout 300 docker run --rm --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint cargo "$project" fmt --check >"$WORK/$name.fmt.out" 2>&1 || code=$?
-  [ "$code" -eq 0 ] || fail "$name/fmt" "cargo fmt --check exited $code: $(tail -20 "$WORK/$name.fmt.out")"
-  assertions=$((assertions + 1))
-  code=0
-  timeout 900 docker run --rm --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint cargo "$project" clippy --all-targets -- -D warnings \
-    >"$WORK/$name.clippy.out" 2>&1 || code=$?
-  [ "$code" -eq 0 ] || fail "$name/clippy" "cargo clippy exited $code: $(tail -20 "$WORK/$name.clippy.out")"
-  assertions=$((assertions + 1))
-  status=0
-  timeout 1200 docker run --rm --name "hs_toolchain_test_$$" --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint cargo "$project" test --no-fail-fast -- --nocapture \
-    >"$WORK/$name.test.out" 2>&1 || status=$?
-  timeout 60 docker rm -f "hs_toolchain_test_$$" >/dev/null 2>&1 || true
-  [ "$status" -eq 0 ] ||
-    fail "$name/test" "cargo test exited $status in this project image: $(tail -40 "$WORK/$name.test.out")"
-  assertions=$((assertions + 1))
-  # `--nocapture` is there for this line: the container-shaped binaries print their `SKIP` to stderr, which a
-  # captured run would swallow — so "the suite ran here" is a measurement rather than four green binaries that
-  # never entered the code the container is about.
-  grep -Eq 'SKIP.*[Dd]ocker daemon' "$WORK/$name.test.out" ||
-    fail "$name/test/skip" \
-      "no SKIP line in the container's cargo test names a missing daemon, so --nocapture did not carry it: $(grep -c SKIP "$WORK/$name.test.out" || true) SKIP lines"
-  assertions=$((assertions + 1))
-
-  # The web app's own install, with no flag: `npm_config_offline=true` and `npm_config_cache` are the image's, and
-  # `npm_config_logs_dir` is why a cache this uid cannot write is still enough for npm to work out of.
-  code=0
-  timeout 300 docker run --rm --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src/web \
-    --entrypoint npm "$project" ci >"$WORK/$name.npm.out" 2>&1 || code=$?
-  [ "$code" -eq 0 ] || fail "$name/npm" "npm ci exited $code: $(tail -20 "$WORK/$name.npm.out")"
-  assertions=$((assertions + 1))
-
-  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy and the
-  # outputs are this case's own and go.
   rm -rf "$root"
 }
 
@@ -14409,114 +14225,6 @@ case_releases() {
     *) fail "$name/none/unknown" "a machine with no unit and no tree is not an honest unknown: $(cat "$WORK/$name.none.out")" ;;
   esac
 
-  rm -rf "$root"
-}
-
-# A session builds this tree's release artifact: `scripts/build-web.sh` and then `scripts/build.sh` in a session's own
-# shape, with `dist/<triple>/holosmith` statically linked and no network anywhere.
-#
-# The case exists because this is the product's path and not a flag's. `scripts/build.sh` is what a worker runs to
-# prove a tree, and until the image carried its crates and its npm cache that command needed the network; the warm
-# registry `case_agent_toolchain` used to copy out of the host's `$CARGO_HOME` and the `--offline` that went with it are
-# gone, so nothing here can be what makes this pass. `--network none` is the whole barrier between the build and a
-# registry, and the two things that carry it across are the image's `/.cargo/config.toml` — the source replacement and
-# `net.offline` — and its `npm_config_*` environment (ADR-0106). A failure here therefore names something a session
-# feels: a lock the crate set does not hold, an image without the crates, or an npm cache whose logs directory a
-# session's uid cannot write.
-#
-# Its own case rather than an arm of `case_agent_toolchain`, because of what it costs and because a failure should name
-# the release build rather than the toolchain.
-# Measured on this host in this shape — 2 cpus, the invoking uid, a `git ls-files` copy writable at `/src` — the web
-# half answers in ~7 s (its `npm ci` reads `/opt/npm-cache`) and the one release musl target in a few minutes, and the
-# copy grows to hundreds of MB, almost all of it its `target/`. That is why the copy is under `$repo_root/target/` and
-# not in `$WORK`: a `mktemp -d` on a tmpfs is a path the daemon may not see (ADR-0035).
-#
-# The `SKIP` lines in the captured output are all `check-static.sh`'s, and none of them is about the crates:
-# `git_tag` (no `.git` in the copy, so there is no `git describe` to compare against) and the x86_64 empty-root run
-# (this container has no Docker daemon to run it in). `build.sh` calls `build-web.sh` itself, so the explicit run is
-# the npm half measured on its own and the second, inside `build.sh`, is the fast path with `node_modules` already
-# there.
-#
-# The image is this repository's own **project** image, which `case_server_images` builds and leaves in place, so the
-# tag read here is one built from **this** tree; a machine without it skips with the reason rather than measuring an
-# older image. That the recipe is the release build's own subject is the point: this is the image a session runs, and
-# `scripts/build.sh` is what a worker runs inside it.
-case_agent_offline_build() {
-  local name=case_agent_offline_build root="$repo_root/target/verify-offline-build-$$"
-  local project tree code answer triple
-  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-    printf 'SKIP %s: no Docker daemon answers (no test can cover this: every command here needs the image, which case_server_images builds)\n' "$name"
-    return 0
-  fi
-  project="$(project_image)" ||
-    fail "$name/tag" "this tree's project image tag could not be composed, so the image a session runs here was not measured"
-  if ! docker image inspect "$project" >/dev/null 2>&1; then
-    printf 'SKIP %s: %s is not on this machine; case_server_images builds it and runs before this one\n' \
-      "$name" "$project"
-    return 0
-  fi
-
-  rm -rf "$root"
-  tree="$root/src"
-  mkdir -p "$tree"
-  # The tracked tree as this commit would make it, `git ls-files` for `case_agent_toolchain`'s reason: no `.git`, no
-  # `target/`, no `web/dist`, no `node_modules`, so the build below starts where a session's checkout starts.
-  git -C "$repo_root" ls-files -z | tar -C "$repo_root" --null -T - -cf - | tar -C "$tree" -xf - ||
-    fail "$name/copy" "could not copy the tracked tree into $tree"
-  assertions=$((assertions + 1))
-
-  # One shape for both commands, because the point is that it is a session's and not a convenient one: no network, the
-  # invoking uid, the session's limits, and nothing mounted over `CARGO_HOME=/tmp/cargo` — it starts empty, and the
-  # crates and packages come from the image, exactly as they do for a session.
-  in_image() {
-    local entrypoint="$1"
-    shift
-    docker run --rm --network none \
-      --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-      -v "$tree:/src" -w /src \
-      --entrypoint "$entrypoint" "$project" "$@" 2>&1
-  }
-
-  # The app first, on its own: `npm ci` with `npm_config_offline=true` against `/opt/npm-cache`, then the app's own
-  # rules and its two vite builds, and `build-web.sh` itself refuses a build that left no `web/dist/index.html`. Named
-  # and removed after the fact, because a `timeout` that kills the CLI does not stop the container it started.
-  code=0
-  timeout 600 docker run --rm --name "hs_offline_build_web_$$" --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint /src/scripts/build-web.sh "$project" >"$WORK/$name.web.out" 2>&1 || code=$?
-  timeout 60 docker rm -f "hs_offline_build_web_$$" >/dev/null 2>&1 || true
-  [ "$code" -eq 0 ] ||
-    fail "$name/web" "scripts/build-web.sh exited $code in this project image: $(tail -20 "$WORK/$name.web.out")"
-  assertions=$((assertions + 1))
-
-  # Then the release musl target, which is `cargo build --release --locked` with no flag beyond the lock. The tree's own
-  # `scripts/check-static.sh` is `build.sh`'s last step, so a placeholder page, a dynamic artifact or a missing embedded
-  # file fails here as a build failure — the assertions below are about where the files came from.
-  code=0
-  timeout 1800 docker run --rm --name "hs_offline_build_release_$$" --network none \
-    --user "$(id -u):$(id -g)" --cpus 2 --memory 4096m \
-    -v "$tree:/src" -w /src \
-    --entrypoint /src/scripts/build.sh "$project" >"$WORK/$name.build.out" 2>&1 || code=$?
-  timeout 60 docker rm -f "hs_offline_build_release_$$" >/dev/null 2>&1 || true
-  [ "$code" -eq 0 ] ||
-    fail "$name/build" "scripts/build.sh exited $code in this project image: $(tail -40 "$WORK/$name.build.out")"
-  assertions=$((assertions + 1))
-
-  # The artifacts are read **inside the image**, over the same mount the build wrote: `build.sh` returning 0 is the
-  # claim that they were produced, and `file` is the image's own. `file` on the host would be reading a file nothing
-  # proves came from the image's toolchain, while one container that never entered it could have written one.
-  for triple in x86_64-unknown-linux-musl; do
-    answer="$(in_image sh -c "test -f dist/$triple/holosmith && file -b dist/$triple/holosmith")" ||
-      fail "$name/$triple" "scripts/build.sh left no dist/$triple/holosmith in the image: $answer"
-    case "$answer" in
-      *"statically linked"*) assertions=$((assertions + 1)) ;;
-      *) fail "$name/$triple" "dist/$triple/holosmith is not statically linked: $answer" ;;
-    esac
-  done
-
-  # The image stays (a later `serve` boot needs it, the same way `case_server_images` leaves it); the copy and the
-  # build output inside it are this case's own and go.
   rm -rf "$root"
 }
 
