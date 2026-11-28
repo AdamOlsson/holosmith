@@ -219,10 +219,10 @@ this is the number it will write.
 This record is the decision. **The reason also belongs beside the case**, in the `scripts/verify.sh` doc comment above
 `case_*` — that is where every case in that file states what it measures and why its shape is what it is, and where a
 reader deciding whether to keep, move or widen the case will look. The reason goes there and not only here — a case
-reader should not have to open the ADR to learn why it is shaped as it is — and since the case does not exist yet,
-whoever writes it writes, in its own comment, that the subject image is a fixture project carrying node and no compiler,
-why a compiler is refused (D2), where the cache comes from and how to re-record it (D3), what the four facts are (D4),
-and the cost (D5). This ADR is the argument; the comment is the summary a case reader gets without opening it.
+reader should not have to open the ADR to learn why it is shaped as it is — and the case states, in its own comment,
+that the subject image is a fixture project carrying node and no compiler, why a compiler is refused (D2), where the
+cache comes from and how to re-record it (D3), what the four facts are (D4), and the cost (D5). This ADR is the
+argument; the comment is the summary a case reader gets without opening it.
 
 **The ADR that records "the gate measures a build in the session's shape, not a project's build" does not exist yet.**
 It is a separate decision, and this record is not it: it must carry D2 and D3 forward — the subject image is a
@@ -290,13 +290,13 @@ package.
 
 It also adds two sentences to `docs/gate.md`, in the paragraph that already states the rule those two cases hold, so
 that the document names what replaces them instead of reading as if the replacement were undecided. Its case tables,
-counts and per-case costs are untouched: a table naming a case that does not exist yet would be a lie, and moving the
+counts and per-case costs are untouched: naming the case in that paragraph's prose is this record's, and moving the
 numbers is D5's separate decision.
 
 ## What is not measured
 
-- **The case itself.** It does not exist yet. This is the decision, and D1-D5 are what the case's author builds; there
-  is no `case_*` in `scripts/verify.sh` that this record's measurements are taken from.
+- **The case itself.** It exists now — `case_session_build` in `scripts/verify.sh`, with D2, D3, D4 and D5's cost in
+  the comment above it (D6) — and the measurements above were made by hand and before it, so they are not its output.
 - **A session's real worktree.** Every measurement above is a `docker run` this record made by hand, not a container
   the backend started. The worktree and the identity are the same facts `case_agent_toolchain` measures today, and
   `case_project_image` and `case_container_mounts` are where a session's own mounts are measured.

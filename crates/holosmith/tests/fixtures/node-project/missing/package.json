@@ -1,0 +1,8 @@
+{
+  "name": "holosmith-build-fixture-missing",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "is-buffer": "2.0.5"
+  }
+}

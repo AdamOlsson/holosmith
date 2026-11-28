@@ -660,6 +660,7 @@ serve_cases=(
   case_project_image
   case_project_image_failure
   case_base_image_lazy
+  case_session_build
   case_agent_toolchain
   case_agent_offline_build
   case_smoke
@@ -12681,6 +12682,238 @@ case_base_image_lazy() {
 
   remove_session "${name}_delete" "$id" force
   docker_session_id=""
+  rm -rf "$root"
+}
+
+# A build in a session's shape: the **container** a build runs in, not the toolchain it builds with (ADR-0128).
+#
+# `case_agent_toolchain` and `case_agent_offline_build` measure **this repository's** tree compiling in **this
+# repository's** image. A project owns its recipe and the toolchain that recipe installs (ADR-0123, ADR-0126), so that
+# is this project's own CI claim. What is Holosmith's, and measured nowhere else, is the shape a session's build runs
+# in — four facts, and each one fails a build that leans on something a session does not have:
+#
+#   identity  the run is the invoking uid (`--user "$(id -u):$(id -g)"` — the data root's owner, which is what
+#             `container.rs` passes), not root and not the image's own user. That uid may have **no passwd entry**
+#             inside the image at all, which leaves `$HOME` as `/` and unwritable, so a recipe or a build that reads
+#             `~/.cargo` or `~/.npm` works for root and fails for a session.
+#   readable  everything the build reads out of the image is readable by that stranger: `a+rX`, not a file a root `RUN`
+#             left at 0600. Here that is the recorded cache — chmod it 0700 in the fixture and the install below exits
+#             with npm's EACCES instead of installing — and it stays root-owned and read-only for the run, which the case
+#             asserts on the image after the installs and which is why the recipe moves npm's log to `/tmp`.
+#   offline   `--network none` holds and the dependencies really are the image's, so nothing in the shape could have
+#             fetched what the install resolved.
+#   fast      a dependency the image does not hold answers with npm's own sentence, in the time a successful install
+#             takes — not a download, and not a hang.
+#
+# Every run also takes a session's limits (`--cpus 2 --memory 4096m`) so the shape measured is the product's and not a
+# generous one.
+#
+# The four facts are toolchain-agnostic, so the subject is **node**: the one toolchain every session has, because pi is
+# a node CLI and the boot's isolation probe is `node -e` in the base image (ADR-0044). The subject **image** is a
+# fixture project — `FROM holosmith-base:<version>`, one `COPY` of a recorded npm cache into `/opt/npm-cache`, and the
+# three `npm_config_*` values that point npm at it — built by this case's own `docker build`, which is also the claim
+# that a project's image is a two-line recipe over the base. A compiler fixture is deliberately refused (ADR-0128 D2):
+# it would be a mini session image kept alive as test furniture, it costs a build-time fetch and a minute of build, and
+# ADR-0127 makes a project's crate set the project's own check.
+#
+# Nothing here calls a `holosmith` verb and nothing boots a `serve`. `case_project_image` and `case_server_images` are
+# where the program's own build path is measured; a case that proved this shape **through** our own verb would be
+# partly testing itself, and booting a server to reach the same `docker run` would make one cause fail twice.
+#
+# The furniture is `crates/holosmith/tests/fixtures/node-project/`: `package.json` and `package-lock.json` for
+# `inherits@2.0.4` — one package, one tarball — the `npm-cache/` that pair resolves to, and `missing/`, a pair asking
+# for `is-buffer@2.0.5`, which the cache does not hold. Byte for byte a recording, like the pi turns beside them, and
+# `COPY`'d rather than filled by a `RUN`, so no gate run fetches anything: the layer is content-addressed and answers
+# `CACHED` until the recorded bytes move. **To re-record the cache** when the lock moves, with the base image's own npm
+# so the two versions agree by construction, and network on. The command carries `npm_config_offline=false` for a
+# recording made *inside the fixture image*, where the recipe's `true` would otherwise win; `holosmith-base` sets no
+# `npm_config_*` at all, so against the base it is inert rather than load-bearing (`missing/` the same way with
+# `--package-lock-only`, into a cache of its own that is then thrown away):
+#
+#   dir=crates/holosmith/tests/fixtures/node-project
+#   mkdir -p target/npm-record target/npm-cache && cp "$dir/package.json" target/npm-record/
+#   docker run --rm -v "$PWD/target/npm-record:/work" -v "$PWD/target/npm-cache:/cache" -w /work \
+#     --user "$(id -u):$(id -g)" -e npm_config_cache=/cache -e npm_config_offline=false \
+#     -e npm_config_logs_dir=/tmp/npm-logs --entrypoint npm holosmith-base:<version> install
+#   cp target/npm-record/package-lock.json "$dir/"
+#   rm -rf "$dir/npm-cache" && cp -a target/npm-cache "$dir/npm-cache"
+#
+# **Which identity measures which fact.** The invoking uid's arm is the identity fact's own subject. The second arm runs
+# the same install as `60123`, an identity `holosmith-base` has no passwd entry for, in a tree `chmod -R a+rwX`'d for
+# it: that is the only way the passwd-less `$HOME=/` half is measurable on a host whose own uid *is* the image's
+# (`node`, 1000, on this one), and it is what makes a run as the image's own user fail here instead of passing by
+# coincidence. It costs one more `docker run` and no more than that.
+#
+# Measured on this host (Docker 29.9.2, npm 11.19.1), the layer cache warm: the fixture build 0.45 s (0.67 s when the
+# `COPY` layer is new), the invoking uid's install 0.68 s, the stranger's 0.67 s, the missing dependency 0.64 s, the
+# cache's modes 0.28 s and the probe 0.35 s — **3.1 s** of containers — plus 0.5 s of housekeeping the shape costs (four
+# container removals, the stranger's tree taken back from inside the image, and the tag removed): the case is **3.6 s**
+# from its first `docker build` to the scratch tree's removal — 3.6–4.8 s over the runs measured here, the slow end this
+# host under load. It needs `holosmith-base:<version>` on the machine, which `case_server_images` builds and leaves in
+# place before this case runs; an absent base is that build failing and a `FAIL` here, because a `SKIP` would be a green
+# run over four facts nothing measured.
+case_session_build() {
+  local name=case_session_build root="$repo_root/target/verify-session-build-$$"
+  local fixture="$repo_root/crates/holosmith/tests/fixtures/node-project" tag logs code owner
+  local version base
+  local plain
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    printf 'SKIP %s: no Docker daemon answers\n' "$name"
+    return 0
+  fi
+  plain="$("$artifact" version 2>/dev/null)" || fail "$name/version" "the artifact does not report a version"
+  version="$(sed -n 's/^version //p' <<<"$plain")"
+  [ -n "$version" ] || fail "$name/version" "the artifact's version report is incomplete: $plain"
+  base="holosmith-base:$version"
+  # The tag is this case's own, with this run's pid in it: two gate runs on one machine (two worktrees) would otherwise
+  # remove each other's image, and no `hs-<project>:<digest>` or product tag is this case's to touch.
+  tag="holosmith-session-build:$$"
+  logs="$root/logs"
+
+  rm -rf "$root"
+  # The context and the work trees live under `$repo_root/target/`, not `$WORK`: one is a `docker build` context and the
+  # others are mount sources, and a `mktemp -d` on a tmpfs `/tmp` is a directory the daemon may not be able to see —
+  # which is a session's own rule for its worktree (ADR-0035) as well as this case's.
+  mkdir -p "$root/context" "$root/invoking" "$root/stranger" "$root/missing" "$logs" ||
+    fail "$name/mkdir" "could not make this case's scratch tree under $root"
+  cp -a "$fixture/npm-cache" "$root/context/npm-cache" ||
+    fail "$name/fixture" "could not copy $fixture/npm-cache into the build context, so the image would carry no cache"
+  cp "$fixture/package.json" "$fixture/package-lock.json" "$root/invoking/" ||
+    fail "$name/fixture" "could not copy the fixture project's lock pair into $root/invoking"
+  cp "$fixture/package.json" "$fixture/package-lock.json" "$root/stranger/" ||
+    fail "$name/fixture" "could not copy the fixture project's lock pair into $root/stranger"
+  cp "$fixture/missing/package.json" "$fixture/missing/package-lock.json" "$root/missing/" ||
+    fail "$name/fixture" "could not copy the unmatched lock pair into $root/missing"
+  # A tree owned by a uid the run is not is a second failure that reads like the image's: `npm ci` cannot write
+  # `/work/node_modules` and says EACCES in under a second (ADR-0128 measured it). The plain arm needs nothing — the
+  # scratch tree is the invoking uid's — and the stranger's is made writable for it here.
+  chmod -R a+rwX "$root/stranger" || fail "$name/chmod" "could not make $root/stranger writable for uid 60123"
+
+  # The recipe is two instructions over the base and its whole text is here rather than in a tracked file: the `FROM`
+  # interpolates the tag the artifact reports, the way `case_project_image` writes its fixture project's (ADR-0128 D1).
+  # `npm_config_logs_dir` is load-bearing — npm's default is `<cache>/_logs`, which this uid cannot create, and that
+  # failure puts two permission lines in front of the sentence a missing dependency is supposed to say.
+  printf 'FROM %s\nCOPY npm-cache /opt/npm-cache\nENV npm_config_cache=/opt/npm-cache npm_config_offline=true npm_config_logs_dir=/tmp/npm-logs\n' \
+    "$base" >"$root/context/Dockerfile" || fail "$name/recipe" "could not write the fixture project's recipe"
+  code=0
+  timeout 300 docker build -t "$tag" "$root/context" >"$WORK/$name.build.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] ||
+    fail "$name/build" \
+      "the fixture project's recipe did not build (exit $code), so the base tag or the recipe is what failed and nothing below was measured: $(tail -20 "$WORK/$name.build.out")"
+  assertions=$((assertions + 1))
+
+  # The shape every run of this case takes, in **one** place: the install arms and the network probe below both go through
+  # it, so a change that gave the installs a route out cannot leave the probe at `--network none` and pass over the run it
+  # is supposed to speak for. `--user` stays at each call site, because which identity runs is the one thing an arm differs
+  # from its sibling in.
+  shape=(--network none --cpus 2 --memory 4096m)
+
+  # <arm> <user> <tree> <bound> [docker run args…]: one `npm ci` in a session's shape, its output at
+  # `$WORK/<name>.<arm>.out` and its exit status as the return value. The container is named and removed, because a
+  # `timeout` kills the CLI and not the container — and one of the arms below expects a non-zero exit, so a bare
+  # `|| fail` at a call site could not tell that from a docker that never ran.
+  npm_ci() {
+    local arm="$1" user="$2" tree="$3" bound="$4" status=0
+    shift 4
+    timeout "$bound" docker run --rm --name "hs_session_build_$$_$arm" --user "$user" "${shape[@]}" \
+      -v "$tree:/work" -w /work "$@" \
+      --entrypoint npm "$tag" ci >"$WORK/$name.$arm.out" 2>&1 || status=$?
+    timeout 60 docker rm -f "hs_session_build_$$_$arm" >/dev/null 2>&1 || true
+    return "$status"
+  }
+
+  # The invoking uid, with npm's log directory mounted so the one place npm may write is observable from here. A bare
+  # `npm ci` — no flag, no mount over the cache — because the image's own `npm_config_*` environment is the fact.
+  code=0
+  npm_ci invoking "$(id -u):$(id -g)" "$root/invoking" 120 -v "$logs:/tmp/npm-logs" || code=$?
+  [ "$code" -eq 0 ] ||
+    fail "$name/invoking" \
+      "a bare npm ci exited $code as the invoking uid with --network none, so the install did not come out of the image: $(tail -20 "$WORK/$name.invoking.out")"
+  assertions=$((assertions + 1))
+  # The install wrote as that uid and not as root and not as the image's own user: `node_modules` is the tree a session's
+  # build writes, and whose it is is the whole of the first fact.
+  [ "$(stat -c '%u:%g' "$root/invoking/node_modules" 2>/dev/null)" = "$(id -u):$(id -g)" ] ||
+    fail "$name/invoking/owner" \
+      "the install left node_modules owned by $(stat -c '%u:%g' "$root/invoking/node_modules" 2>/dev/null || printf 'nothing'), not by the invoking uid $(id -u):$(id -g)"
+  assertions=$((assertions + 1))
+  # And nothing else was written: the cache in the image is root's and read-only for this uid, so the log the recipe moves
+  # to `/tmp` is the whole of what npm writes, and it landed there.
+  [ -n "$(find "$logs" -name '*-debug-0.log' -print -quit)" ] ||
+    fail "$name/invoking/log" \
+      "npm wrote no debug log under the mount at /tmp/npm-logs, so its writes did not land where the recipe sends them: $(ls -a "$logs")"
+  assertions=$((assertions + 1))
+  # The other half of `readable`: a cache this uid can read is not a cache it may write. Inside the image the recorded
+  # tree is root's and carries no group or other write bit — which is why the recipe moves npm's log to `/tmp`, since
+  # npm's default is `<cache>/_logs` and it would have to create that inside the cache. The log assertion above cannot
+  # see a recipe that loosened the cache, because the mount answers the log wherever the cache allows a write too; this
+  # one names every entry that broke either half, after the installs that could have moved it.
+  code=0
+  timeout 60 docker run --rm --user "$(id -u):$(id -g)" "${shape[@]}" --entrypoint find "$tag" \
+    /opt/npm-cache \( ! -user 0 -o ! -group 0 -o -perm /022 \) -printf '%u:%g %m %p\n' \
+    >"$WORK/$name.cache.out" 2>&1 || code=$?
+  [ "$code" -eq 0 ] && [ ! -s "$WORK/$name.cache.out" ] ||
+    fail "$name/cache/mode" \
+      "the image's cache is not root's read-only tree (exit $code), so the run could write into it: $(head -3 "$WORK/$name.cache.out")"
+  assertions=$((assertions + 1))
+
+  # The stranger: an identity the image has never heard of, whose `$HOME` is `/` and unwritable. The same install has to
+  # work, from the same cache, in a tree that uid can write — and this is the arm a run as the image's own user fails,
+  # which a uid comparison alone cannot do on a host where the two are one identity.
+  code=0
+  npm_ci stranger 60123:60123 "$root/stranger" 120 || code=$?
+  # The tree is taken back from **inside** the image before either assertion below can fail, and that order is the
+  # point: npm made `node_modules` 0755 for uid 60123, so `rm -rf` as this uid cannot unlink inside it and `chmod`
+  # cannot take what it does not own — and a `target/verify-*` tree the invoking uid cannot remove is one the gate's own
+  # sweep fails on for every later run. `--user 0:0` because the base's own user is `node`, the identity this line
+  # exists to undo; `/scratch` itself stays, as the mount it is, and only this arm's tree is under it.
+  owner="$(stat -c '%u:%g' "$root/stranger/node_modules" 2>/dev/null || printf 'nothing')"
+  timeout 60 docker run --rm --user 0:0 -v "$root/stranger:/scratch" --entrypoint sh "$tag" \
+    -c 'rm -rf /scratch/*' >/dev/null 2>&1 || true
+  [ "$code" -eq 0 ] ||
+    fail "$name/stranger" \
+      "a bare npm ci exited $code as 60123, an identity the image has no passwd entry for whose HOME is /, so the build needed a home: $(tail -20 "$WORK/$name.stranger.out")"
+  assertions=$((assertions + 1))
+  [ "$owner" = "60123:60123" ] ||
+    fail "$name/stranger/owner" \
+      "the install for 60123 left node_modules owned by $owner, so the run was not that identity"
+  assertions=$((assertions + 1))
+
+  # A dependency the image does not hold: npm's own sentence, in the time a successful install takes, because the recipe
+  # sets `npm_config_offline`. Without it the same run is a registry complaint — `EAI_AGAIN`, and 70 s of getaddrinfo
+  # retries on this host — which is what the bound below turns into a named failure instead of a slow one.
+  code=0
+  npm_ci missing "$(id -u):$(id -g)" "$root/missing" 20 || code=$?
+  [ "$code" -ne 0 ] ||
+    fail "$name/missing/exit" \
+      "npm ci exited 0 on a lock the cache does not hold, so the package came from somewhere other than the image"
+  [ "$code" -ne 124 ] ||
+    fail "$name/missing/hang" \
+      "a cache miss did not answer inside 20 s, so it tried the network instead of saying so: $(tail -5 "$WORK/$name.missing.out")"
+  assertions=$((assertions + 1))
+  if ! grep -q 'npm error code ENOTCACHED' "$WORK/$name.missing.out" ||
+    ! grep -q 'is-buffer' "$WORK/$name.missing.out"; then
+    fail "$name/missing/sentence" \
+      "a lock the cache does not hold did not answer with npm's ENOTCACHED sentence naming the package: $(tail -6 "$WORK/$name.missing.out")"
+  fi
+  assertions=$((assertions + 1))
+
+  # The network is not there, which is the other half of `offline`: an address outside the container has no route, so
+  # nothing above could have resolved a dependency. Under a bridge network the same probe answers `answered` or
+  # `TimeoutError` (this host's sandbox lets the SYN out and never answers), and the case fails by name instead of
+  # passing over a run that had a way to fetch.
+  code=0
+  timeout 60 docker run --rm --name "hs_session_build_$$_network" --user "$(id -u):$(id -g)" "${shape[@]}" \
+    --entrypoint node "$tag" \
+    -e 'fetch("http://192.0.2.1/", { signal: AbortSignal.timeout(3000) }).then(() => console.log("answered"), (e) => console.log((e.cause && e.cause.code) || e.name))' \
+    >"$WORK/$name.network.out" 2>&1 || code=$?
+  timeout 60 docker rm -f "hs_session_build_$$_network" >/dev/null 2>&1 || true
+  [ "$code" -eq 0 ] && [ "$(tr -d '[:space:]' <"$WORK/$name.network.out")" = "ENETUNREACH" ] ||
+    fail "$name/network" \
+      "a fetch from the build's own container answered '$(tr -d '[:space:]' <"$WORK/$name.network.out" || true)' (exit $code), so this run had a route out and nothing here measured a session's network"
+  assertions=$((assertions + 1))
+
+  # The image is this case's alone and goes on a green run, with the scratch tree the arms wrote into.
+  timeout 120 docker image rm -f "$tag" >/dev/null 2>&1 || true
   rm -rf "$root"
 }
 
