@@ -65,20 +65,24 @@ owner>:<gid>` — a uid with no passwd entry and `HOME` at `/` — so an image t
 image's own uid and picks one that is neither it nor zero, so the measurement cannot quietly become a plain
 `docker run`.
 
-## D3 — the base is the agent image's base, by the same manifest-list digest
+## D3 — the base is the smoke image's base, by the same manifest-list digest
 
-`base.Dockerfile`'s `FROM` is `agent.Dockerfile`'s **last** `FROM`, character for character:
-`node:24-bookworm-slim@sha256:01d566e8…`. Two reasons, and the first is the one that has to hold through this change:
+`base.Dockerfile`'s `FROM` is `smoke.Dockerfile`'s **last** `FROM`, character for character. Two reasons:
 
-- the smoke image's invariant — `the_smoke_recipe_names_the_agent_images_base` in `src/smoke.rs` — compares the smoke
-  recipe's last `FROM` with the agent recipe's, so a base that drifted from the agent's would leave that test green
-  while a session moved between two distributions;
-- a session that moves from the base image to the agent image moves within one Debian release, so a program that runs
-  in one runs in the other.
+- the smoke image's invariant — `the_smoke_recipe_names_the_base_images_base` in `src/smoke.rs` — compares the smoke
+  recipe's last `FROM` with this recipe's, so the smoke image stands on the distribution a session's base is: a smoke
+  run boots the candidate as `base_image`, and the smoke recipe installs nothing, so its base is its whole environment;
+- this repository's own session image is a project's recipe, `FROM ${HOLOSMITH_BASE_IMAGE}` (ADR-0123, ADR-0126), so it
+  holds no node digest of its own: this line is the pin, and every session here stands on the distribution a smoke run
+  measures.
 
-`tests/images.rs` compares the two lines and asserts the digest is present, so a bump is two edits that cannot
-drift — a Dockerfile cannot `include` anything, so a copy held together by a test is what there is. The rust stage
-had this same shape until it gained a reader outside the recipes, which ADR-0118 makes a build argument.
+`tests/images.rs` asserts the digest is present, and `src/smoke.rs` holds the smoke recipe's copy to this line, so a bump
+is two edits that cannot drift — a Dockerfile cannot `include` anything, so a copy held together by a test is what there
+is. The rust stage had this same shape until it gained a reader outside the recipes, which ADR-0118 makes a build
+argument.
+
+**ADR-0126 supersedes this section's agent-image half:** `agent.Dockerfile` is the recipe that is gone, and D5 there is
+what replaced the comparison it left behind.
 
 ## D4 — four labels, no binary, and the digest that is still spent
 

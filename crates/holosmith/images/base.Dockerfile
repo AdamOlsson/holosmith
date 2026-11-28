@@ -36,11 +36,13 @@
 # recipe is `include_str!`ed into that binary.
 #
 # **The base is the smoke image's, by the same manifest-list digest**, so a session that moves between the two does not
-# move to another distribution. `tests/images.rs` reads this file's `FROM` line against the smoke recipe's, so the two
-# cannot drift — and that comparison is now the whole of what pins the smoke image's base: this repository's own
-# session image is a project's recipe, `FROM ${HOLOSMITH_BASE_IMAGE}`, so it holds no node digest of its own
-# (ADR-0126 D5). The **digest** rather than the tag is the pin: a tag re-resolves on the next
-# pull, and one manifest list resolves to the daemon's own architecture.
+# move to another distribution. That digest is now the whole of what pins the smoke image's environment — the smoke
+# recipe installs no package, so its base is all of that environment. `the_smoke_recipe_names_the_base_images_base` in
+# `crates/holosmith/src/smoke.rs` is the test that holds the two last `FROM` lines together, this file's and the smoke
+# recipe's. `crates/holosmith/tests/images.rs` is what keeps this line carrying a digest rather than a bare tag. It is
+# the whole of that pin because this repository's own session image is a project's recipe, `FROM ${HOLOSMITH_BASE_IMAGE}`,
+# so it holds no node digest of its own (ADR-0126 D5). The **digest** rather than the tag is the pin: a tag re-resolves on
+# the next pull, and one manifest list resolves to the daemon's own architecture.
 #
 # The identity rule is unchanged (ADR-0087): a session's container runs `--user <the data root's owner>:<gid>` with no
 # passwd entry and `HOME` at `/`, so nothing here may need `$HOME`. `PI_CODING_AGENT_DIR` is an absolute path for

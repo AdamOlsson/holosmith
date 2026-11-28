@@ -61,6 +61,13 @@ boot's network self-test probes `agent_image` as `node -e` — in a smoke run th
 naming one digest is asserted by a test, because "two pinned files drift" is the defect the P1 and ADR-0080's
 `COPY --from` both were.
 
+**Superseded in part by ADR-0126:** the recipe above is `FROM` the **base** recipe's digest-pinned node base, not the
+agent image's — that recipe is deleted, and `base.Dockerfile`'s `FROM` is the line the test compares against (ADR-0126
+D5) — and the boot's network self-test probes the config's `base_image` (ADR-0117), which in a smoke run is this image.
+The agent image is not what a session runs in production either: a project's image is, or the base image for a project
+with no recipe of its own (ADR-0123, ADR-0126). What this section decides is unchanged: a third Dockerfile, node kept
+because the base has it, and the two recipes' one digest held by a test.
+
 The image is tagged `holosmith-smoke:<version>` and labelled `org.holosmith.smoke-recipe-sha256` = the SHA-256 of
 (recipe ‖ candidate bytes) — `builder::ensure_image`'s read-then-apply, and one label rather than two because a
 promotion asks one question. A changed recipe or a different candidate rebuilds; a second run of the same candidate

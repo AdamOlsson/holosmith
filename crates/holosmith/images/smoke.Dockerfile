@@ -8,7 +8,10 @@
 # The base is the base image's own, by the same manifest-list digest, and **nothing is installed on it**: the fake
 # replays records and needs no git, no CA bundle and no openssl. Node stays because the base has it and because the
 # boot's network self-test runs its probe as `node -e` inside `base_image` — which, in a smoke run, is this image.
-# The two recipes naming one digest is what keeps them from drifting, and a test holds them together.
+# The two recipes naming one digest is what keeps them from drifting, and the test that holds them together is
+# `the_smoke_recipe_names_the_base_images_base` in `crates/holosmith/src/smoke.rs`: it compares this file's last `FROM`
+# with `base.Dockerfile`'s, and since this recipe installs no package, that base is the whole of this image's package
+# set (ADR-0126 D5).
 #
 # The build context is `images::archive`'s: exactly `Dockerfile` and `holosmith`, so the wrapper is written by a RUN
 # rather than copied as a third file.
